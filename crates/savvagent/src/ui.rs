@@ -1,139 +1,283 @@
+//! Render pass: paint the current [`App`] state into the frame.
+
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    Frame,
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, FrameExt, List, ListItem, Paragraph},
-    Frame,
+    widgets::{Block, Borders, Clear, FrameExt, List, ListItem, Paragraph, Wrap},
 };
-use crate::app::{App, InputMode};
-use crate::agent::Role;
-use rust_i18n::t;
+use savvagent_host::ToolCallStatus;
+
+use crate::app::{App, Entry, InputMode};
+use crate::providers::PROVIDERS;
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(3),
+            Constraint::Length(3),  // header
+            Constraint::Min(1),     // log
+            Constraint::Length(1),  // status
+            Constraint::Length(3),  // input
+            Constraint::Length(1),  // metrics
         ])
         .split(area);
 
-    // Header
-    let header = Paragraph::new(t!("header", agent = app.current_agent, llm = format!("{:?}", app.current_provider)))
-        .style(Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))
+    let header_text = if app.connected {
+        format!(
+            "Savvagent — {} · {}",
+            app.active_provider_id.unwrap_or("?"),
+            app.model
+        )
+    } else {
+        "Savvagent — disconnected · type /connect".to_string()
+    };
+    let header_color = if app.connected { Color::Blue } else { Color::Magenta };
+    let header = Paragraph::new(header_text)
+        .style(
+            Style::default()
+                .fg(header_color)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(header, chunks[0]);
 
-    // Messages
-    let mut list_items = Vec::new();
-    for m in &app.agent.conversation {
-        let (prefix, style) = match m.role {
-            Role::User => (t!("user_prefix"), Style::default().fg(Color::Green)),
-            Role::Assistant => (t!("agent_prefix"), Style::default().fg(Color::Cyan)),
-            Role::Tool => (t!("output_prefix"), Style::default().fg(Color::DarkGray)),
-        };
-
-        if !m.content.is_empty() {
-            list_items.push(ListItem::new(Line::from(vec![
-                Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
-                Span::styled(&m.content, style),
-            ])));
-        }
-
-        if let Some(ref tool_calls) = m.tool_calls {
-            for tc in tool_calls {
-                list_items.push(ListItem::new(Line::from(vec![
-                    Span::styled("> ", Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM)),
-                    Span::styled(t!("calling_tool", name = tc.name, args = tc.arguments), Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM)),
-                ])));
-            }
-        }
-    }
-
-    let messages_list = List::new(list_items)
-        .block(Block::default().borders(Borders::ALL).title(t!("activity_log")));
-    frame.render_widget(messages_list, chunks[1]);
-
-    // Status Bar
-    let mode_str = match app.input_mode {
-        InputMode::Normal => "NORMAL",
-        InputMode::Editing => "INSERT",
-        InputMode::ViewingFile => "VIEW",
-        InputMode::EditingFile => "EDIT",
-    };
+    render_log(app, frame, chunks[1]);
 
     let status = if app.is_loading {
-        Paragraph::new(format!(" ● {} [{}]", t!("thinking"), mode_str))
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
+        Paragraph::new(" ● thinking…")
+            .style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::ITALIC),
+            )
     } else {
-        Paragraph::new(format!(" ○ {} [{}]", t!("ready"), mode_str))
-            .style(Style::default().fg(Color::Blue))
+        Paragraph::new(" ○ ready").style(Style::default().fg(Color::Blue))
     };
     frame.render_widget(status.block(Block::default().borders(Borders::BOTTOM)), chunks[2]);
 
-    // Input
-    let width = chunks[3].width.max(3) - 3; // buffer for borders
-    let scroll = app.input.visual_scroll(width as usize);
-    let input = Paragraph::new(app.input.value())
-        .style(match app.input_mode {
-            InputMode::Normal | InputMode::ViewingFile | InputMode::EditingFile => Style::default(),
-            InputMode::Editing => Style::default().fg(Color::Yellow),
-        })
-        .scroll((0, scroll as u16))
-        .block(Block::default().borders(Borders::ALL).title(t!("input_hint")));
-    frame.render_widget(input, chunks[3]);
+    let mut textarea = app.input_textarea.clone();
+    textarea.set_block(Block::default().borders(Borders::ALL));
+    frame.render_widget(&textarea, chunks[3]);
+
+    let transcript_label = match &app.last_transcript {
+        Some(p) => format!(" · transcript: {}", p.display()),
+        None => String::new(),
+    };
+    let metrics = Paragraph::new(format!(
+        " ctx≈{} tokens · entries: {}{}",
+        app.context_size,
+        app.entries.len(),
+        transcript_label
+    ))
+    .style(Style::default().fg(Color::Blue));
+    frame.render_widget(metrics, chunks[4]);
 
     if app.is_file_picker_active {
-        let popup_area = centered_rect(60, 40, area);
-        frame.render_widget(Clear, popup_area);
-        frame.render_widget_ref(app.file_explorer.widget(), popup_area);
+        let popup = centered_rect(60, 40, area);
+        frame.render_widget(Clear, popup);
+        frame.render_widget_ref(app.file_explorer.widget(), popup);
     }
 
-    if let InputMode::ViewingFile | InputMode::EditingFile = app.input_mode {
+    if matches!(
+        app.input_mode,
+        InputMode::ViewingFile | InputMode::EditingFile
+    ) {
         if let Some(editor) = &app.editor {
-            let popup_area = centered_rect(80, 80, area);
-            frame.render_widget(Clear, popup_area);
+            let popup = centered_rect(80, 80, area);
+            frame.render_widget(Clear, popup);
 
-            let path_str = app.active_file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-            let (title, hint) = if let InputMode::EditingFile = app.input_mode {
-                (t!("edit_title", path = path_str), t!("edit_hint"))
+            let path_str = app
+                .active_file_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let (title, hint) = if matches!(app.input_mode, InputMode::EditingFile) {
+                (
+                    format!(" Editing: {path_str} "),
+                    " [Esc] Save & Close | [Enter] New Line ",
+                )
             } else {
-                (t!("view_title", path = path_str), t!("view_hint"))
+                (
+                    format!(" Viewing: {path_str} "),
+                    " [Esc] Close | [j/k] Scroll ",
+                )
             };
 
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title(title)
                 .title_bottom(Line::from(hint).right_aligned());
-
-            let inner_area = popup_area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
-            frame.render_widget(block, popup_area);
-            frame.render_widget(editor, inner_area);
+            let inner = popup.inner(Margin { horizontal: 1, vertical: 1 });
+            frame.render_widget(block, popup);
+            frame.render_widget(editor, inner);
         }
     }
 
-    match app.input_mode {
-        InputMode::Normal => {}
-        InputMode::Editing => {
-            frame.set_cursor_position((
-                chunks[3].x + ((app.input.visual_cursor()).max(scroll) - scroll) as u16 + 1,
-                chunks[3].y + 1,
-            ));
-        }
-        InputMode::EditingFile => {
-            if let Some(editor) = &app.editor {
-                let popup_area = centered_rect(80, 80, area);
-                let inner_area = popup_area.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
-                if let Some((x, y)) = editor.get_visible_cursor(&inner_area) {
-                    frame.set_cursor_position((x, y));
-                }
+    if matches!(app.input_mode, InputMode::CommandPalette) {
+        let popup = centered_rect(50, 30, area);
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = app
+            .commands
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                let style = if i == app.command_index {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:<10} ", cmd.name), style),
+                    Span::styled(&cmd.description, Style::default().fg(Color::DarkGray)),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(" Commands "))
+            .highlight_symbol("> ");
+        frame.render_widget(list, popup);
+    }
+
+    if matches!(app.input_mode, InputMode::EditingFile) {
+        if let Some(editor) = &app.editor {
+            let popup = centered_rect(80, 80, area);
+            let inner = popup.inner(Margin { horizontal: 1, vertical: 1 });
+            if let Some((x, y)) = editor.get_visible_cursor(&inner) {
+                frame.set_cursor_position((x, y));
             }
         }
-        _ => {}
     }
+
+    if matches!(app.input_mode, InputMode::SelectingProvider) {
+        let popup = centered_rect(60, 40, area);
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = PROVIDERS
+            .iter()
+            .enumerate()
+            .map(|(i, spec)| {
+                let style = if i == app.provider_index {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let active_marker = if Some(spec.id) == app.active_provider_id {
+                    " (active)"
+                } else {
+                    ""
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:<22}", spec.display_name), style),
+                    Span::styled(
+                        format!(" {}{}", spec.id, active_marker),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Connect to provider ")
+                    .title_bottom(
+                        Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ").right_aligned(),
+                    ),
+            )
+            .highlight_symbol("> ");
+        frame.render_widget(list, popup);
+    }
+
+    if matches!(app.input_mode, InputMode::EnteringApiKey) {
+        let popup = centered_rect(60, 20, area);
+        frame.render_widget(Clear, popup);
+        let title = match app.pending_provider {
+            Some(spec) => format!(" {} API key ", spec.display_name),
+            None => " API key ".to_string(),
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_bottom(Line::from(" [Enter] connect  [Esc] cancel ").right_aligned());
+        let inner = popup.inner(Margin { horizontal: 1, vertical: 1 });
+        frame.render_widget(block, popup);
+        let mut ta = app.api_key_textarea.clone();
+        ta.set_block(Block::default());
+        frame.render_widget(&ta, inner);
+    }
+}
+
+fn render_log(app: &App, frame: &mut Frame, area: Rect) {
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(app.entries.len() * 2 + 1);
+    for entry in &app.entries {
+        match entry {
+            Entry::User(text) => {
+                lines.push(line_block("You: ", text, Color::Green));
+            }
+            Entry::Assistant(text) => {
+                lines.push(line_block("Agent: ", text, Color::Cyan));
+            }
+            Entry::Tool {
+                name,
+                arguments,
+                status,
+                result_preview,
+            } => {
+                let badge = match status {
+                    None => "…",
+                    Some(ToolCallStatus::Ok) => "✓",
+                    Some(ToolCallStatus::Errored) => "✗",
+                };
+                let color = match status {
+                    None => Color::Yellow,
+                    Some(ToolCallStatus::Ok) => Color::Green,
+                    Some(ToolCallStatus::Errored) => Color::Red,
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {badge} "), Style::default().fg(color)),
+                    Span::styled(
+                        format!("{name}({arguments})"),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+                    ),
+                ]));
+                if let Some(preview) = result_preview {
+                    lines.push(Line::from(Span::styled(
+                        format!("    → {preview}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            Entry::Note(text) => {
+                lines.push(Line::from(Span::styled(
+                    format!("· {text}"),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )));
+            }
+        }
+    }
+
+    if !app.live_text.is_empty() {
+        lines.push(line_block("Agent: ", &app.live_text, Color::Cyan));
+    }
+
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(" Conversation "));
+    frame.render_widget(para, area);
+}
+
+fn line_block(prefix: &str, text: &str, color: Color) -> Line<'static> {
+    let style = Style::default().fg(color);
+    Line::from(vec![
+        Span::styled(prefix.to_string(), style.add_modifier(Modifier::BOLD)),
+        Span::styled(text.to_string(), style),
+    ])
 }
 
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
