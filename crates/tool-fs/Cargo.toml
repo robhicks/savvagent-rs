@@ -1,0 +1,32 @@
+[package]
+name = "tool-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Filesystem tools as a stdio MCP server (read_file, write_file, list_dir, glob)"
+
+[[bin]]
+name = "savvagent-tool-fs"
+path = "src/main.rs"
+
+[lib]
+name = "tool_fs"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+glob = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

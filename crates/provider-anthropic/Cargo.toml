@@ -1,0 +1,38 @@
+[package]
+name = "provider-anthropic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Anthropic Messages API as a Savvagent SPP provider"
+
+[[bin]]
+name = "savvagent-anthropic"
+path = "src/main.rs"
+
+[lib]
+name = "provider_anthropic"
+path = "src/lib.rs"
+
+[dependencies]
+savvagent-protocol.workspace = true
+savvagent-mcp.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+dotenvy.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+axum = { workspace = true, features = ["json"] }

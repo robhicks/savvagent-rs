@@ -1,20 +1,83 @@
-[package]
-name = "savvagent"
+[workspace]
+resolver = "3"
+members = [
+    "crates/savvagent",
+    "crates/savvagent-protocol",
+    "crates/savvagent-mcp",
+    "crates/savvagent-host",
+    "crates/provider-anthropic",
+    "crates/provider-gemini",
+    "crates/tool-fs",
+]
+default-members = ["crates/savvagent"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/robhicks/savvagent"
+rust-version = "1.85"
 
-[dependencies]
-anyhow = "1.0.102"
-crossterm = "0.29.0"
-ratatui = { version = "0.30.0", features = ["crossterm_0_29"] }
-tokio = { version = "1.52.1", features = ["full"] }
-tui-input = "0.14.0"
-serde = { version = "1.0.218", features = ["derive"] }
-serde_json = "1.0.139"
-async-trait = "0.1.86"
-reqwest = { version = "0.13.3", features = ["json"] }
-dotenvy = "0.15.7"
-uuid = { version = "1.23.1", features = ["v4"] }
+[workspace.dependencies]
+# Local crates
+savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.1.0" }
+savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.1.0" }
+savvagent-host = { path = "crates/savvagent-host", version = "0.1.0" }
+provider-anthropic = { path = "crates/provider-anthropic", version = "0.1.0" }
+provider-gemini = { path = "crates/provider-gemini", version = "0.1.0" }
+
+# Async runtime + utilities
+tokio = { version = "1.52", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "1.2", features = ["preserve_order"] }
+
+# HTTP / MCP
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2"] }
+rmcp = { version = "1.6", features = [
+    "client",
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-server",
+] }
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "tokio"] }
+
+# Errors
+anyhow = "1"
+thiserror = "2"
+
+# Misc
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"
+url = { version = "2", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TUI deps (only used by savvagent crate, but pinned here for consistency)
+crossterm = "0.29"
+ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+tui-textarea = { package = "tui-textarea-2", version = "0.10" }
+ratatui-explorer = "0.3"
+ratatui-code-editor = "0.0.3"
 rust-i18n = "3.1"
-ratatui-explorer = "0.3.0"
-ratatui-code-editor = "0.0.2"
+dotenvy = "0.15"
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+debug = "limited"

@@ -1,1 +1,5 @@
 /target
+*.heapsnapshot
+.env
+.env.local
+/home/
