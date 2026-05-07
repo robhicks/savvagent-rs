@@ -25,6 +25,7 @@ savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.1.0" }
 savvagent-host = { path = "crates/savvagent-host", version = "0.1.0" }
 provider-anthropic = { path = "crates/provider-anthropic", version = "0.1.0" }
 provider-gemini = { path = "crates/provider-gemini", version = "0.1.0" }
+tool-fs = { path = "crates/tool-fs", version = "0.1.0" }
 
 # Async runtime + utilities
 tokio = { version = "1.52", features = ["full"] }
@@ -81,3 +82,32 @@ panic = "abort"
 
 [profile.dev]
 debug = "limited"
+
+# Profile used by `dist` for release builds. Inherits from `release`; kept
+# separate so we can tune release-archive builds (e.g. crank up debug-info for
+# crash-symbolication) without touching local `cargo build --release`.
+[profile.dist]
+inherits = "release"
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Whether to auto-include files like READMEs, LICENSEs, and CHANGELOGs (default true)
+auto-includes = true
+# The archive format to use for non-windows builds (defaults .tar.xz)
+unix-archive = ".tar.xz"
+# The archive format to use for windows builds (defaults .zip)
+windows-archive = ".zip"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Which actions to run on pull requests
+pr-run-mode = "plan"
+# Whether to install an updater program
+install-updater = false

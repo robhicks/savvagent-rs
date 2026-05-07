@@ -24,7 +24,6 @@ uuid.workspace = true
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-tool-fs = { path = "../tool-fs" }
 tracing-subscriber = { workspace = true }
 
 [[example]]

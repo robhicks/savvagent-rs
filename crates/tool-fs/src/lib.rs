@@ -444,6 +444,35 @@ fn walk_dir(root: &Path, recursive: bool, limit: usize) -> Result<(Vec<DirEntry>
 }
 
 // ---------------------------------------------------------------------------
+// Binary entry point
+// ---------------------------------------------------------------------------
+
+/// Serve [`FsTools`] over a stdio MCP transport. Shared between the
+/// `savvagent-tool-fs` binary in this crate and the bundled shim in the
+/// `savvagent` crate's release archive.
+pub async fn run() -> anyhow::Result<()> {
+    use rmcp::{ServiceExt, transport::stdio};
+
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    tracing::info!(
+        "savvagent-tool-fs {} starting on stdio",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let service = FsTools::new().serve(stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

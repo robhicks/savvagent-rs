@@ -4,7 +4,37 @@ A fast, MCP-first terminal coding agent written end-to-end in Rust.
 
 The product vision and rationale live in [`PRD.md`](PRD.md). This README is
 for developers working on the repo: how to build it, how it's laid out, and
-how to extend it.
+how to extend it. End users wanting to install Savvagent can skip to
+[Install](#install) below.
+
+## Install
+
+Precompiled binaries for Linux (x86_64 / aarch64), macOS (Apple Silicon),
+and Windows (x86_64) are published to GitHub Releases on every tag. Each
+release ships one archive per platform containing four binaries — the
+TUI plus the bundled `savvagent-tool-fs`, `savvagent-anthropic`, and
+`savvagent-gemini` MCP servers — installed to your Cargo bin directory.
+
+**Linux / macOS** (one-liner):
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/robhicks/savvagent-rs/releases/latest/download/savvagent-installer.sh | sh
+```
+
+**Windows** (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/robhicks/savvagent-rs/releases/latest/download/savvagent-installer.ps1 | iex"
+```
+
+**Manual:** download the matching `savvagent-<target>.tar.xz` (or `.zip`
+on Windows) from the [Releases page](https://github.com/robhicks/savvagent-rs/releases),
+unpack it, and put the binaries on your `$PATH`. Each archive ships with a
+`.sha256` next to it for verification.
+
+After installing, run `savvagent` in your project, `/connect` once to store
+an API key in the OS keyring, and you're done.
 
 ## Repository layout
 
@@ -12,13 +42,13 @@ The workspace is a small set of focused crates:
 
 | Crate | Purpose |
 |---|---|
-| [`crates/savvagent`](crates/savvagent) | The TUI binary. Owns the conversation log, the `/connect` flow, file picker, transcript persistence. |
+| [`crates/savvagent`](crates/savvagent) | All four shipping binaries (`savvagent` TUI plus the `savvagent-tool-fs`, `savvagent-anthropic`, `savvagent-gemini` shims). Owns `/connect`, file picker, transcript persistence. |
 | [`crates/savvagent-host`](crates/savvagent-host) | Agent engine consumed as a library. Drives the tool-use loop, manages provider/tool sessions, exposes `Host::run_turn` and `run_turn_streaming`. |
 | [`crates/savvagent-protocol`](crates/savvagent-protocol) | Pure-types crate: `CompleteRequest`, `CompleteResponse`, `StreamEvent`, content blocks. SPP wire spec in [`SPEC.md`](crates/savvagent-protocol/SPEC.md). |
 | [`crates/savvagent-mcp`](crates/savvagent-mcp) | The `ProviderClient` / `ProviderHandler` traits and the `InProcessProviderClient` bridge that makes provider crates linkable as libraries. |
-| [`crates/provider-anthropic`](crates/provider-anthropic) | Anthropic Messages API as a `ProviderHandler`, plus a `savvagent-anthropic` binary that wraps it as a Streamable HTTP MCP server. |
-| [`crates/provider-gemini`](crates/provider-gemini) | Same shape, for Google Gemini (`savvagent-gemini` binary). |
-| [`crates/tool-fs`](crates/tool-fs) | `read_file`/`write_file`/`list_dir`/`glob` as a stdio MCP server (`savvagent-tool-fs` binary). |
+| [`crates/provider-anthropic`](crates/provider-anthropic) | Anthropic Messages API as a `ProviderHandler` library plus `provider_anthropic::run` (the entry point the `savvagent-anthropic` shim calls). |
+| [`crates/provider-gemini`](crates/provider-gemini) | Same shape, for Google Gemini. |
+| [`crates/tool-fs`](crates/tool-fs) | `read_file`/`write_file`/`list_dir`/`glob` library plus `tool_fs::run` (the entry point the `savvagent-tool-fs` shim calls). |
 
 Every provider and every tool is "just" an MCP-shaped library that *can* be
 wrapped in a binary. The TUI links providers in-process by default and only
@@ -98,15 +128,15 @@ iterating on.
 
 The default in-process path is the easy one. Sometimes you want the binary
 form — e.g., when iterating on the wire format or running the `headless`
-example. Each provider binary takes its API key via env and listens on
-loopback:
+example. The standalone provider servers ship as bins on the `savvagent`
+crate; each takes its API key via env and listens on loopback:
 
 ```bash
 # Anthropic — defaults to 127.0.0.1:8787
-ANTHROPIC_API_KEY=sk-ant-… cargo run -p provider-anthropic
+ANTHROPIC_API_KEY=sk-ant-… cargo run -p savvagent --bin savvagent-anthropic
 
 # Gemini — defaults to 127.0.0.1:8788
-GEMINI_API_KEY=…           cargo run -p provider-gemini
+GEMINI_API_KEY=…           cargo run -p savvagent --bin savvagent-gemini
 ```
 
 Then point the TUI (or `savvagent-host` example) at it:
@@ -154,8 +184,11 @@ shutdown.
    …and a `build_foo` factory next to the existing two.
 5. Wire `provider-foo` into `Cargo.toml` (workspace deps + savvagent crate
    deps).
-6. Optional: ship a `savvagent-foo` binary if you want the standalone-MCP
-   form too. Mirror `crates/provider-anthropic/src/main.rs`.
+6. Optional: ship a standalone `savvagent-foo` MCP server. Add a
+   `pub async fn run()` to `provider_foo`'s lib (mirror `provider_anthropic::run`),
+   then add a `[[bin]]` entry in `crates/savvagent/Cargo.toml` pointing at a
+   3-line shim in `crates/savvagent/src/bin/savvagent-foo.rs` that just calls
+   `provider_foo::run().await`. The release archive picks it up automatically.
 
 That's the whole touch surface. There's no provider registry to update in
 the host, no tool dispatch table — the host doesn't know about providers
@@ -179,12 +212,12 @@ Tools are stdio MCP servers. Mirror `crates/tool-fs`:
 | `SAVVAGENT_PROVIDER_URL` | `savvagent` | (unset) | When set, skips in-process bridge; uses MCP HTTP. |
 | `SAVVAGENT_MODEL` | `savvagent` | per-provider | Overrides `ProviderSpec::default_model`. |
 | `SAVVAGENT_TOOL_FS_BIN` | `savvagent` | `savvagent-tool-fs` (PATH) | Path to the fs tool binary. |
-| `ANTHROPIC_API_KEY` | `provider-anthropic` (binary form) | — | Read at server start. In-process flow gets it from `/connect`. |
-| `ANTHROPIC_BASE_URL` | `provider-anthropic` | `https://api.anthropic.com` | For local mocks. |
-| `SAVVAGENT_ANTHROPIC_LISTEN` | `provider-anthropic` (binary form) | `127.0.0.1:8787` | Bind address. |
-| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `provider-gemini` (binary form) | — | Same idea. |
-| `GEMINI_BASE_URL` | `provider-gemini` | `https://generativelanguage.googleapis.com` | |
-| `SAVVAGENT_GEMINI_LISTEN` | `provider-gemini` (binary form) | `127.0.0.1:8788` | |
+| `ANTHROPIC_API_KEY` | `savvagent-anthropic` | — | Read at server start. In-process flow gets it from `/connect`. |
+| `ANTHROPIC_BASE_URL` | `savvagent-anthropic` | `https://api.anthropic.com` | For local mocks. |
+| `SAVVAGENT_ANTHROPIC_LISTEN` | `savvagent-anthropic` | `127.0.0.1:8787` | Bind address. |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `savvagent-gemini` | — | Same idea. |
+| `GEMINI_BASE_URL` | `savvagent-gemini` | `https://generativelanguage.googleapis.com` | |
+| `SAVVAGENT_GEMINI_LISTEN` | `savvagent-gemini` | `127.0.0.1:8788` | |
 | `RUST_LOG` | all binaries | `warn` (TUI), `info` (providers) | Standard `tracing-subscriber` env filter. |
 
 `.env` and `.env.local` at the repo root are auto-loaded on startup.

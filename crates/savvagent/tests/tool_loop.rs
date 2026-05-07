@@ -7,8 +7,10 @@
 //!   assistant turns: `list_dir` → `read_file` → final text. It receives the
 //!   real conversation history (including tool results) on each call and
 //!   asserts the host wired everything correctly.
-//! - The real `savvagent-tool-fs` binary is spawned as a child stdio MCP
-//!   server pointed at a temp directory.
+//! - The real `savvagent-tool-fs` binary (built from this crate) is spawned
+//!   as a child stdio MCP server pointed at a temp directory. Cargo sets
+//!   `CARGO_BIN_EXE_savvagent-tool-fs` for tests in the same package as the
+//!   bin, so we don't have to walk the workspace looking for it.
 //! - The host glues them together. We assert the loop converges and the trace
 //!   of tool calls matches the script.
 
@@ -29,16 +31,8 @@ use serde_json::json;
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 
-/// Locate the workspace `target/<profile>/savvagent-tool-fs` binary. Cargo
-/// builds dev-dependency bins before the test, so this path always resolves.
 fn tool_fs_bin() -> PathBuf {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace = manifest
-        .ancestors()
-        .nth(2)
-        .expect("workspace root above crates/savvagent-host");
-    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
-    workspace.join("target").join(profile).join("savvagent-tool-fs")
+    PathBuf::from(env!("CARGO_BIN_EXE_savvagent-tool-fs"))
 }
 
 /// One scripted assistant turn.
@@ -176,11 +170,6 @@ async fn list_then_read_then_summarize() {
     // 3. Build the host with a stub provider endpoint (with_components
     //    bypasses connect for the provider but still spawns tools normally).
     let bin = tool_fs_bin();
-    assert!(
-        bin.exists(),
-        "expected savvagent-tool-fs at {} — did the dev-dep build run?",
-        bin.display()
-    );
     let config = HostConfig::new(
         ProviderEndpoint::StreamableHttp { url: "http://unused".into() },
         "claude-test",

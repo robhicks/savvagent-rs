@@ -7,10 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Google Gemini API as a Savvagent SPP provider"
 
-[[bin]]
-name = "savvagent-gemini"
-path = "src/main.rs"
-
+# Library only. The `savvagent-gemini` binary lives in the `savvagent` crate
+# (a thin shim around `provider_gemini::run`) so the release archive can ship
+# all four binaries under a single installer.
 [lib]
 name = "provider_gemini"
 path = "src/lib.rs"

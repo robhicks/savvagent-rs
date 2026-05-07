@@ -12,12 +12,28 @@ default-run = "savvagent"
 name = "savvagent"
 path = "src/main.rs"
 
+# Shim binaries that re-export the auxiliary crates' run() entry points so
+# `dist` ships one archive per platform with all four binaries. Each shim is
+# ~10 lines and just calls the corresponding crate's `run()`.
+[[bin]]
+name = "savvagent-tool-fs"
+path = "src/bin/savvagent-tool-fs.rs"
+
+[[bin]]
+name = "savvagent-anthropic"
+path = "src/bin/savvagent-anthropic.rs"
+
+[[bin]]
+name = "savvagent-gemini"
+path = "src/bin/savvagent-gemini.rs"
+
 [dependencies]
 savvagent-host = { workspace = true }
 savvagent-protocol = { workspace = true }
 savvagent-mcp = { workspace = true }
 provider-anthropic = { workspace = true }
 provider-gemini = { workspace = true }
+tool-fs = { workspace = true }
 anyhow.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -30,3 +46,8 @@ tui-textarea.workspace = true
 ratatui-explorer.workspace = true
 ratatui-code-editor.workspace = true
 keyring.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+rmcp.workspace = true
+tempfile = "3"

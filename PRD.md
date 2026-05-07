@@ -58,7 +58,7 @@ What we change:
 - A working terminal agent that can hold a multi-turn conversation with Claude, read and edit files in the current project, and run commands — with sub-100 ms TUI input latency under typical use.
 - A clean separation in which `savvagent-host` knows nothing about Anthropic, and `provider-anthropic` knows nothing about the TUI.
 - A protocol (SPP) frozen enough to publish v0.1 on crates.io.
-- Installing Savvagent on Linux/macOS should be downloading a single precompiled binary (tarball or one-line install script) plus authenticating with a provider — either an env var like `ANTHROPIC_API_KEY` or running `/connect` once to store the key in the OS keyring.
+- Installing Savvagent on Linux/macOS/Windows should be downloading a single archive (or running a one-line install script) plus authenticating with a provider — either an env var like `ANTHROPIC_API_KEY` or running `/connect` once to store the key in the OS keyring. Each platform archive bundles the TUI plus the `savvagent-tool-fs` / `savvagent-anthropic` / `savvagent-gemini` MCP servers under a single installer.
 
 ### Non-goals (v0.1)
 
@@ -209,7 +209,7 @@ M1–M5 have all landed; M6 (the v0.1.0 release) is the only remaining numbered 
 - A second provider (`provider-gemini`) ships alongside Anthropic, validating the in-process bridge.
 
 ### M6 · Public release v0.1.0 (in progress)
-- Distribute via **precompiled binaries** — tarballs for Linux x86_64 / aarch64 and macOS arm64, plus a one-line install script that downloads the right artifact from GitHub Releases. Publishing to crates.io is *not* a release requirement (deferred until there's a clear external consumer for the libraries).
+- Distribute via **precompiled binaries** — `.tar.xz` for Linux (x86_64 / aarch64) and macOS arm64, `.zip` for Windows x86_64, plus shell (`curl | sh`) and PowerShell (`irm | iex`) install scripts that download the right artifact from GitHub Releases. Driven by [`cargo-dist`](https://opensource.axo.dev/cargo-dist/) — config in `[workspace.metadata.dist]`, workflow at `.github/workflows/release.yml`. Publishing to crates.io is *not* a release requirement (deferred until there's a clear external consumer for the libraries).
 - README with one-paragraph install + first-run instructions covering both the install script and manual tarball use.
 - License: MIT OR Apache-2.0 (already configured in workspace).
 - **Open work before tag:**
@@ -236,7 +236,7 @@ For v0.1 release, "done" means:
 
 1. **It works.** A new user can download a precompiled `savvagent` binary, authenticate with a provider (env var or `/connect`), run it inside a project, and hold a multi-turn conversation that reads/writes files. Crates.io publication is *not* required for v0.1.
 2. **It's fast.** TUI keystroke-to-render p99 ≤ 100 ms. Host-to-Anthropic first-token-latency overhead ≤ 20 ms (i.e. our processing adds little to the network round-trip).
-3. **It's small (at v0.1).** Stripped release sizes at the v0.1 tag: per-provider binary ≤ 8 MB, host + TUI binary ≤ 12 MB. Regression budget: +20% per minor release — anything over that is a release blocker until either justified in writing or the budget is explicitly rebudgeted.
+3. **It's small (at v0.1).** Stripped release sizes at the v0.1 tag: each provider/tool shim binary ≤ 8 MB, host + TUI binary ≤ 12 MB, full-platform archive (all four binaries) ≤ 36 MB pre-compression. Regression budget: +20% per minor release — anything over that is a release blocker until either justified in writing or the budget is explicitly rebudgeted.
 4. **It's hackable.** A new contributor can add a provider in < 200 LOC by copying `provider-anthropic` and swapping the translation layer.
 
 ---

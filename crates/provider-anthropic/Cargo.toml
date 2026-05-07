@@ -7,10 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Anthropic Messages API as a Savvagent SPP provider"
 
-[[bin]]
-name = "savvagent-anthropic"
-path = "src/main.rs"
-
+# Library only. The `savvagent-anthropic` binary lives in the `savvagent`
+# crate (a thin shim around `provider_anthropic::run`) so the release archive
+# can ship all four binaries under a single installer.
 [lib]
 name = "provider_anthropic"
 path = "src/lib.rs"

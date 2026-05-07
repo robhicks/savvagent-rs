@@ -253,6 +253,69 @@ pub fn router(provider: Arc<GeminiProvider>) -> axum::Router {
     axum::Router::new().nest_service(DEFAULT_MCP_PATH, service)
 }
 
+/// Default bind address for the standalone `savvagent-gemini` binary.
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:8788";
+
+/// Run the standalone Gemini MCP HTTP server. Reads `GEMINI_API_KEY`
+/// (or `GOOGLE_API_KEY`), `SAVVAGENT_GEMINI_LISTEN`, and `GEMINI_BASE_URL`
+/// from the environment (a `.env` file walking up from the CWD is honored).
+/// Shared between this crate's `savvagent-gemini` binary and the bundled
+/// shim in the `savvagent` crate.
+pub async fn run() -> std::process::ExitCode {
+    use std::env;
+    use std::process::ExitCode;
+
+    dotenvy::dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_target(false)
+        .init();
+
+    let listen =
+        env::var("SAVVAGENT_GEMINI_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
+    let base_url = env::var("GEMINI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+
+    let provider = match GeminiProvider::builder().base_url(base_url).build() {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let app = router(provider);
+
+    let listener = match tokio::net::TcpListener::bind(&listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error binding {listen}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let local = listener.local_addr().expect("local_addr");
+    tracing::info!(
+        "savvagent-gemini {} listening on http://{local}{DEFAULT_MCP_PATH}",
+        env!("CARGO_PKG_VERSION")
+    );
+
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("ctrl-c received, shutting down");
+    };
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+    {
+        eprintln!("server error: {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
 /// Useful for tests: a [`GeminiProvider`] aimed at a local mock server.
 #[doc(hidden)]
 pub fn provider_for_tests(base_url: impl Into<String>) -> GeminiProvider {
