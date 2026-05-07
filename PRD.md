@@ -1,6 +1,6 @@
 # Savvagent — Product Requirements Document
 
-**Status:** Draft v0.1 · **Owner:** Rob Hicks · **Last updated:** 2026-05-01
+**Status:** Draft v0.2 · **Owner:** Rob Hicks · **Last updated:** 2026-05-07
 
 ---
 
@@ -45,7 +45,7 @@ What we keep from this picture:
 
 What we change:
 
-- **The Provider System is also MCP.** No internal `Provider` trait wrapping vendor SDKs — every provider is a separate binary speaking MCP Streamable HTTP, conforming to **SPP** (see §6).
+- **The Provider System is also MCP-shaped.** Every provider implements the same `ProviderHandler` trait and conforms to **SPP** (see §6). Providers are **linked in-process by default** via `InProcessProviderClient` (zero-RPC for the common case) and *also* ship as standalone MCP Streamable HTTP servers for wire-protocol debugging or out-of-process deployments.
 - **One client to start.** Just the TUI. No SolidJS desktop, no IDE extensions, no Agent Client Protocol (ACP) — those become open questions for v0.3+.
 - **Rust everywhere**, including the TUI (ratatui).
 
@@ -58,11 +58,11 @@ What we change:
 - A working terminal agent that can hold a multi-turn conversation with Claude, read and edit files in the current project, and run commands — with sub-100 ms TUI input latency under typical use.
 - A clean separation in which `savvagent-host` knows nothing about Anthropic, and `provider-anthropic` knows nothing about the TUI.
 - A protocol (SPP) frozen enough to publish v0.1 on crates.io.
-- Building Savvagent from a fresh clone on Linux/macOS should be `cargo install savvagent` and one env var (`ANTHROPIC_API_KEY`).
+- Installing Savvagent on Linux/macOS should be downloading a single precompiled binary (tarball or one-line install script) plus authenticating with a provider — either an env var like `ANTHROPIC_API_KEY` or running `/connect` once to store the key in the OS keyring.
 
 ### Non-goals (v0.1)
 
-- Multi-provider parity — Anthropic only, others stubbed for v0.2.
+- Full multi-provider coverage — Anthropic and Gemini ship in v0.1; OpenAI and local-model (Ollama) providers are post-v0.1.
 - Desktop or IDE clients.
 - LSP integration.
 - Sandboxing / permission prompts (tools run with the user's privileges; users are warned).
@@ -91,46 +91,49 @@ flowchart TB
         Engine["Agent Engine<br/>(tool-use loop, planning, action)"]
         State["Session State<br/>(history, transcripts)"]
         Project["Project Context<br/>(SAVVAGENT.md)"]
-        Router["MCP Router<br/>(provider + tool clients)"]
+        PC["ProviderClient<br/>(Box&lt;dyn&gt;)"]
+        TR["ToolRegistry<br/>(stdio children)"]
     end
 
     subgraph Wire["Wire Layer"]
-        SPP["savvagent-protocol (SPP)<br/>shared by host + every provider"]
-        MCP["savvagent-mcp<br/>traits, emitter, rmcp glue"]
+        SPP["savvagent-protocol (SPP)<br/>shared types"]
+        MCP["savvagent-mcp<br/>traits, ChannelEmitter,<br/>InProcessProviderClient, rmcp glue"]
     end
 
-    subgraph Providers["Provider MCP Servers — Streamable HTTP"]
-        PA["provider-anthropic<br/>(bin: savvagent-anthropic)"]
-        PO["provider-openai (v0.2)"]
-        PG["provider-gemini (v0.2)"]
-        PL["provider-local · Ollama (v0.2)"]
+    subgraph Providers["Providers — in-process by default"]
+        PA["provider-anthropic<br/>(also bin: savvagent-anthropic)"]
+        PG["provider-gemini<br/>(also bin: savvagent-gemini)"]
+        PO["provider-openai (post-v0.1)"]
+        PL["provider-local · Ollama (post-v0.1)"]
     end
 
     subgraph Tools["Tool MCP Servers — stdio"]
         TF["tool-fs<br/>(read_file, write_file, list_dir, glob)"]
-        TB["tool-bash (v0.2)"]
+        TB["tool-bash (post-v0.1)"]
         T3["3rd-party MCP servers"]
     end
 
     TUI <-->|in-process| Engine
     Engine <--> State
     Engine <--> Project
-    Engine <--> Router
+    Engine <--> PC
+    Engine <--> TR
 
-    Router -.uses.-> SPP
-    Router -.uses.-> MCP
+    PC -.uses.-> SPP
+    PC -.uses.-> MCP
+    TR -.uses.-> MCP
 
-    Router -->|SPP over MCP HTTP| PA
-    Router -->|SPP over MCP HTTP| PO
-    Router -->|SPP over MCP HTTP| PG
-    Router -->|SPP over MCP HTTP| PL
-    Router -->|MCP stdio| TF
-    Router -->|MCP stdio| TB
-    Router -->|MCP stdio| T3
+    PC -->|in-process<br/>or SPP/MCP HTTP| PA
+    PC -->|in-process<br/>or SPP/MCP HTTP| PG
+    PC -.->|future| PO
+    PC -.->|future| PL
+    TR -->|MCP stdio| TF
+    TR -.->|future| TB
+    TR -->|MCP stdio| T3
 
     PA --> AAPI[("Anthropic /v1/messages")]
-    PO --> OAPI[("OpenAI Responses API")]
     PG --> GAPI[("Gemini API")]
+    PO --> OAPI[("OpenAI Responses API")]
     PL --> LAPI[("Local model server")]
 ```
 
@@ -140,9 +143,9 @@ flowchart TB
 |---|---|---|
 | Client | `savvagent` | TUI rendering, input handling, talks to host in-process via Rust API |
 | Host | `savvagent-host` | Conversation state, tool-use loop, MCP client orchestration, project context |
-| Wire | `savvagent-protocol`, `savvagent-mcp` | Shared types (SPP) and traits / rmcp glue |
-| Providers | `provider-anthropic`, `provider-openai` (v0.2), … | Translate SPP ⇄ vendor API; ship as standalone MCP servers |
-| Tools | `tool-fs`, `tool-bash` (v0.2), 3rd-party | Standard MCP servers; the host only sees `tools/list` + `tools/call` |
+| Wire | `savvagent-protocol`, `savvagent-mcp` | Shared SPP types, `ProviderHandler` / `ProviderClient` traits, `InProcessProviderClient` bridge, rmcp glue |
+| Providers | `provider-anthropic`, `provider-gemini`, … | Translate SPP ⇄ vendor API; linked in-process by default, also ship as standalone MCP Streamable HTTP servers |
+| Tools | `tool-fs`, `tool-bash` (post-v0.1), 3rd-party | Standard MCP servers; the host only sees `tools/list` + `tools/call` |
 
 ### 5.3 Workspace layout
 
@@ -154,9 +157,10 @@ ai-coder/
 └── crates/
     ├── savvagent/                ← TUI (formerly src/)
     ├── savvagent-protocol/       ← SPP wire types + SPEC.md
-    ├── savvagent-mcp/            ← shared traits, ChannelEmitter
-    ├── savvagent-host/           ← engine, router, project context
+    ├── savvagent-mcp/            ← shared traits, ChannelEmitter, InProcessProviderClient
+    ├── savvagent-host/           ← engine, ProviderClient + ToolRegistry, project context
     ├── provider-anthropic/       ← Anthropic provider + savvagent-anthropic bin
+    ├── provider-gemini/          ← Gemini provider + savvagent-gemini bin
     └── tool-fs/                  ← filesystem tools + savvagent-tool-fs bin
 ```
 
@@ -180,52 +184,48 @@ See `crates/savvagent-protocol/SPEC.md` for the complete spec and JSON schemas.
 
 ## 7. Milestones
 
-We ship in dependency order. Each milestone is independently demoable.
+M1–M5 have all landed; M6 (the v0.1.0 release) is the only remaining numbered milestone.
 
 ### M1 · Protocol & traits (✅ done)
-- `savvagent-protocol` v0.1.0 with full round-trip tests.
-- `savvagent-mcp` `ProviderHandler` / `ProviderClient` / `StreamEmitter` traits + `ChannelEmitter`.
-- **Demo:** `cargo test -p savvagent-protocol -p savvagent-mcp`.
+- `savvagent-protocol` v0.1.0 with round-trip tests.
+- `savvagent-mcp` `ProviderHandler` / `ProviderClient` / `StreamEmitter` traits + `ChannelEmitter` + `InProcessProviderClient` bridge.
 
-### M2 · Anthropic provider as an MCP server
-- Wrap `AnthropicProvider` in an `rmcp` Streamable HTTP server inside the `savvagent-anthropic` bin.
-- End-to-end: `savvagent-anthropic` binary listens on a port; an `rmcp` test client can call `tools/call complete` and stream events.
-- **Demo:** integration test using `rmcp` Streamable HTTP client → server in-process; one-shot + streaming.
-- **Acceptance:** non-streaming and streaming completions both round-trip; SSE → SPP `StreamEvent` adapter passes a frozen fixture.
+### M2 · Anthropic provider (✅ done)
+- `provider-anthropic` library implements `ProviderHandler`; the `savvagent-anthropic` bin wraps it as an `rmcp` Streamable HTTP server.
+- Host links the provider in-process by default; the HTTP path is opt-in via `SAVVAGENT_PROVIDER_URL` and exists primarily for wire-protocol debugging.
+- Streaming via MCP `notifications/progress` carrying SPP `StreamEvent`s — see the `rmcp` `ProgressDispatcher` gotcha in `CLAUDE.md`.
 
-### M3 · `tool-fs` stdio MCP server (unblocks workspace build)
-- Implement `read_file`, `write_file`, `list_dir`, `glob` as a stdio MCP server.
-- Use `rmcp` `transport-io` server.
-- **Demo:** `echo '{...}' | savvagent-tool-fs` round-trips a `tools/call read_file`.
-- **Acceptance:** `cargo check --workspace` passes; integration test spawns the binary as a child process and exercises every tool.
+### M3 · `tool-fs` stdio MCP server (✅ done)
+- `read_file`, `write_file`, `list_dir`, `glob` ship as a stdio MCP server (`savvagent-tool-fs`), spawned and reaped by `ToolRegistry`.
 
-### M4 · `savvagent-host` engine
-- Spawn provider (HTTP child or external) and tool (stdio child) MCP servers from config.
-- Conversation state, tool-use loop, transcript storage in memory.
-- Public Rust API the TUI consumes (no IPC yet — the TUI links the host as a library).
-- Load `SAVVAGENT.md` from the project root if present.
-- **Demo:** a tiny `examples/headless.rs` that runs a multi-turn conversation calling `tool-fs` against a temp dir.
-- **Acceptance:** scripted scenario "list current dir, then read Cargo.toml, then summarize" succeeds end-to-end.
+### M4 · `savvagent-host` engine (✅ done)
+- `Host` owns conversation state, the tool-use loop (`run_turn_streaming`), in-memory transcripts, and project context (`SAVVAGENT.md`).
+- Public Rust API the TUI consumes; no provider registry inside the host — it just holds a `Box<dyn ProviderClient>` plus a `ToolRegistry`.
+- `examples/headless.rs` exercises the loop end-to-end against `tool-fs`.
 
-### M5 · `savvagent` TUI on the host
-- Rip out the legacy `src/llm/*` clients and `src/tools/*` calls; route everything through `savvagent-host`.
-- Keep current keybindings; add a streaming-token render path.
-- **Demo:** real interactive session against Claude with file edits.
-- **Acceptance:** sub-100 ms keystroke-to-render p99 on a warm session; clean exit on Ctrl-C; transcript saved to `~/.savvagent/transcripts/`.
+### M5 · `savvagent` TUI on the host (✅ done)
+- TUI routes every turn through `savvagent-host` with a streaming-token render path; transcripts persist to `~/.savvagent/transcripts/<unix>.json`.
+- `/connect` swaps the active host atomically (keyring-backed credentials, `Arc<RwLock<Option<Arc<Host>>>>`); `/save` persists transcripts on demand.
+- A second provider (`provider-gemini`) ships alongside Anthropic, validating the in-process bridge.
 
-### M6 · Public release v0.1.0
-- Crates published: `savvagent-protocol`, `savvagent-mcp`, `savvagent-host`, `provider-anthropic`, `tool-fs`, `savvagent`.
-- Binary tarballs for Linux x86_64 / aarch64 and macOS arm64.
-- README with one-paragraph install + first-run instructions.
+### M6 · Public release v0.1.0 (in progress)
+- Distribute via **precompiled binaries** — tarballs for Linux x86_64 / aarch64 and macOS arm64, plus a one-line install script that downloads the right artifact from GitHub Releases. Publishing to crates.io is *not* a release requirement (deferred until there's a clear external consumer for the libraries).
+- README with one-paragraph install + first-run instructions covering both the install script and manual tarball use.
 - License: MIT OR Apache-2.0 (already configured in workspace).
+- **Open work before tag:**
+  - Measure & defend the §8 perf targets — keystroke-to-render p99 ≤ 100 ms, host overhead over network RTT ≤ 20 ms, stripped binary sizes.
+  - Decide on the TUI editor widget (see `tui-textarea` in §9).
+  - Path canonicalization + project-root containment in `tool-fs` (Layer 1 hygiene from the sandboxing plan below — non-blocking but cheap to land).
 
 ### Post-v0.1 (v0.2 candidates, not committed)
 
-- Providers: OpenAI, Gemini, local (Ollama).
+- Providers: OpenAI, local (Ollama). (Anthropic and Gemini are already in.)
 - Tools: bash (with allowlist), edit (structured), grep, glob (richer than fs glob).
-- Permissions / confirmation prompts before destructive tool calls.
-- Session persistence + resume.
-- Slash commands (`/clear`, `/model`, `/tools`).
+- **Permissions / confirmation prompts** (Layer 2). Allow/ask/deny rules keyed by `(tool_name, path_pattern, command_pattern)`, configurable in `~/.savvagent/config.toml` and `SAVVAGENT.md` front-matter. Intercepted in `Host` before `ToolRegistry::call`; the TUI pauses the turn loop and prompts `y / n / always / never`. Sensible defaults: `read_file: allow`, `write_file: ask` outside project root, `bash: ask` always, `.env` / `~/.ssh`: deny.
+- **Tool sandboxing** (Layer 3). OS-level per-process isolation for tool MCP servers. Linux via `bubblewrap` (project-root bind-mount, `--unshare-net`, `--die-with-parent`, optional seccomp-bpf belt); macOS via `sandbox-exec` profile; Windows deferred (AppContainer + Job Objects is the eventual target). The host wraps the spawn — the multi-call binary's `savvagent tool-fs` becomes the inner exec, so tools themselves don't change. Runtime cost is ~zero (kernel namespaces, native syscall speed); startup adds 10–50 ms once per session because `tool-fs` is a long-lived stdio child. Opt-in via `--sandbox` flag and per-tool config in v0.2; default-on candidate for v0.3 once defaults are proven non-annoying.
+- **Crates.io publication** of `savvagent-protocol`, `savvagent-mcp`, and `savvagent-host` once an external consumer wants them as libraries.
+- **Session resume.** Per-turn transcripts already persist; reload + replay is the gap.
+- More slash commands beyond the existing `/connect` and `/save`: `/clear`, `/model`, `/tools`.
 - v0.3+: LSP integration, IDE extensions (ACP-style), desktop app.
 
 ---
@@ -234,9 +234,9 @@ We ship in dependency order. Each milestone is independently demoable.
 
 For v0.1 release, "done" means:
 
-1. **It works.** A new user can `cargo install savvagent`, set `ANTHROPIC_API_KEY`, run `savvagent` in a project, and hold a multi-turn conversation that reads/writes files.
+1. **It works.** A new user can download a precompiled `savvagent` binary, authenticate with a provider (env var or `/connect`), run it inside a project, and hold a multi-turn conversation that reads/writes files. Crates.io publication is *not* required for v0.1.
 2. **It's fast.** TUI keystroke-to-render p99 ≤ 100 ms. Host-to-Anthropic first-token-latency overhead ≤ 20 ms (i.e. our processing adds little to the network round-trip).
-3. **It's small.** Single Anthropic provider binary < 8 MB stripped release. Host + TUI binary < 12 MB stripped release.
+3. **It's small (at v0.1).** Stripped release sizes at the v0.1 tag: per-provider binary ≤ 8 MB, host + TUI binary ≤ 12 MB. Regression budget: +20% per minor release — anything over that is a release blocker until either justified in writing or the budget is explicitly rebudgeted.
 4. **It's hackable.** A new contributor can add a provider in < 200 LOC by copying `provider-anthropic` and swapping the translation layer.
 
 ---
@@ -246,7 +246,7 @@ For v0.1 release, "done" means:
 - **rmcp maturity.** `rmcp` v1.6 is the assumed substrate; if its Streamable HTTP server has gaps, we may need to vendor / patch. Mitigation: M2 is the integration test — we'll know early.
 - **MCP framing for streaming.** Wrapping vendor SSE → MCP progress notifications is a per-provider concern. We're betting the SPP `StreamEvent` shape is stable enough not to leak vendor quirks; round-trip tests guard this.
 - **Project context format.** Is `SAVVAGENT.md` enough, or do we need YAML front-matter for tool allowlists, model pinning, etc.? Open until M4.
-- **Tool sandboxing in v0.1.** We're shipping with no sandbox, only a warning. Acceptable for v0.1 because the user is opting in via `cargo install`, but it's the highest-priority follow-up in v0.2.
+- **Tool sandboxing in v0.1.** We're shipping with no sandbox, only a warning. Acceptable for v0.1 because the user is opting in via `cargo install`, but it's the highest-priority follow-up in v0.2 — see the layered plan in §7 (Layer 1 hygiene, Layer 2 permission prompts, Layer 3 OS-level isolation via bubblewrap / sandbox-exec).
 - **Multi-client transport.** v0.1 has the TUI link the host as a library. If we ever add a desktop client, we'll need a real wire (websocket? ACP? gRPC?). Deferred — the host's Rust API is the boundary that matters today.
 - **TUI editor widget.** Both the prompt input and any in-TUI file editing need a text-area widget with multi-line editing, cursor movement, selection, and undo. Candidate: [`tui-textarea`](https://github.com/rhysd/tui-textarea) — a ratatui-compatible widget by rhysd that already provides these (plus search, syntax-aware behavior via optional features). Decision deferred to M5; tradeoff is the dep weight and styling flexibility vs. rolling our own minimal editor on top of `ratatui::Buffer`. The current `ratatui-code-editor` use is the placeholder we'd replace.
 - **Context management / retrieval.** Long sessions and large repos will outgrow the model's context window; we'll need a strategy for selecting which transcript turns, files, and tool outputs to keep in-context. Candidate to evaluate: [`vecstore`](https://crates.io/crates/vecstore) — a pure-Rust embedded vector store that could back semantic recall over transcript history and project files. Decision deferred (post-M5); tradeoffs include embedding model choice (local vs. provider-hosted), index footprint, and whether retrieval lives in the host or behind an MCP tool server.
