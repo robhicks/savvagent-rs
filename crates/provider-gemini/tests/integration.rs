@@ -236,9 +236,13 @@ async fn streaming_complete_emits_progress_and_final_response() {
         Some(savvagent_protocol::ContentBlock::Text { text }) if text == "hello world"
     ));
 
-    // Drain progress notifications. Allow a short grace window for late SSE frames.
+    // Drain progress notifications. The deadline is a worst-case bound; in
+    // the happy path the channel closes the moment the rmcp progress
+    // forwarder is aborted and we exit immediately. The 5 s ceiling is just
+    // headroom for slow CI runners — see the rmcp ProgressDispatcher note in
+    // CLAUDE.md.
     let mut events: Vec<StreamEvent> = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         match tokio::time::timeout_at(deadline, rx.recv()).await {
             Ok(Some(p)) => {
