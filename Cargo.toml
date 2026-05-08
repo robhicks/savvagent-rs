@@ -111,3 +111,12 @@ install-path = "CARGO_HOME"
 pr-run-mode = "plan"
 # Whether to install an updater program
 install-updater = false
+
+# System packages required to build on each Linux runner. `keyring`'s
+# `sync-secret-service` feature transitively pulls libdbus-sys, whose
+# build.rs needs the system libdbus-1 headers + pkg-config to detect them.
+# `dist` injects these as `apt-get install` steps in the generated release
+# workflow.
+[workspace.metadata.dist.dependencies.apt]
+libdbus-1-dev = "*"
+pkg-config = "*"
