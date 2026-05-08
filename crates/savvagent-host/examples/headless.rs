@@ -40,14 +40,16 @@ async fn main() -> ExitCode {
 
     let url = std::env::var("SAVVAGENT_PROVIDER_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".to_string());
-    let model = std::env::var("SAVVAGENT_MODEL")
-        .unwrap_or_else(|_| "claude-haiku-4-5".to_string());
+    let model = std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
     let tool_bin: PathBuf = std::env::var("SAVVAGENT_TOOL_FS_BIN")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("savvagent-tool-fs"));
 
     let config = HostConfig::new(ProviderEndpoint::StreamableHttp { url }, model)
-        .with_tool(ToolEndpoint::Stdio { command: tool_bin, args: vec![] })
+        .with_tool(ToolEndpoint::Stdio {
+            command: tool_bin,
+            args: vec![],
+        })
         .with_project_root(std::env::current_dir().unwrap_or_else(|_| ".".into()));
 
     let host = match Host::start(config).await {

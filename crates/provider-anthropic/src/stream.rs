@@ -36,7 +36,9 @@ pub async fn consume_sse(
             Ok(v) => v,
             Err(e) => {
                 let _ = emit
-                    .emit(StreamEvent::Warning { message: format!("invalid SSE payload: {e}") })
+                    .emit(StreamEvent::Warning {
+                        message: format!("invalid SSE payload: {e}"),
+                    })
                     .await;
                 continue;
             }
@@ -66,8 +68,15 @@ struct Accumulator {
 #[derive(Debug)]
 enum BlockState {
     Text(String),
-    ToolUse { id: String, name: String, partial_json: String },
-    Thinking { text: String, signature: Option<String> },
+    ToolUse {
+        id: String,
+        name: String,
+        partial_json: String,
+    },
+    Thinking {
+        text: String,
+        signature: Option<String>,
+    },
     Image,
 }
 
@@ -93,12 +102,14 @@ impl Accumulator {
                     usage: self.usage.clone(),
                 }]
             }
-            AnthropicEvent::ContentBlockStart { index, content_block } => {
+            AnthropicEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => {
                 let (state, emitted) = match content_block {
-                    SseContentBlock::Text { text } => (
-                        BlockState::Text(text.clone()),
-                        ContentBlock::Text { text },
-                    ),
+                    SseContentBlock::Text { text } => {
+                        (BlockState::Text(text.clone()), ContentBlock::Text { text })
+                    }
                     SseContentBlock::ToolUse { id, name, input } => (
                         BlockState::ToolUse {
                             id: id.clone(),
@@ -111,14 +122,31 @@ impl Accumulator {
                             input: input.unwrap_or(serde_json::json!({})),
                         },
                     ),
-                    SseContentBlock::Thinking { thinking, signature } => (
-                        BlockState::Thinking { text: thinking.clone(), signature: signature.clone() },
-                        ContentBlock::Thinking { text: thinking, signature },
+                    SseContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => (
+                        BlockState::Thinking {
+                            text: thinking.clone(),
+                            signature: signature.clone(),
+                        },
+                        ContentBlock::Thinking {
+                            text: thinking,
+                            signature,
+                        },
                     ),
-                    SseContentBlock::Image => (BlockState::Image, ContentBlock::Text { text: String::new() }),
+                    SseContentBlock::Image => (
+                        BlockState::Image,
+                        ContentBlock::Text {
+                            text: String::new(),
+                        },
+                    ),
                 };
                 self.ensure_block(index as usize, state);
-                vec![StreamEvent::ContentBlockStart { index, block: emitted }]
+                vec![StreamEvent::ContentBlockStart {
+                    index,
+                    block: emitted,
+                }]
             }
             AnthropicEvent::ContentBlockDelta { index, delta } => {
                 let (delta_event, _) = match delta {
@@ -129,8 +157,9 @@ impl Accumulator {
                         (BlockDelta::TextDelta { text }, ())
                     }
                     SseDelta::InputJsonDelta { partial_json } => {
-                        if let Some(BlockState::ToolUse { partial_json: buf, .. }) =
-                            self.blocks.get_mut(index as usize)
+                        if let Some(BlockState::ToolUse {
+                            partial_json: buf, ..
+                        }) = self.blocks.get_mut(index as usize)
                         {
                             buf.push_str(&partial_json);
                         }
@@ -153,7 +182,10 @@ impl Accumulator {
                         (BlockDelta::SignatureDelta { signature }, ())
                     }
                 };
-                vec![StreamEvent::ContentBlockDelta { index, delta: delta_event }]
+                vec![StreamEvent::ContentBlockDelta {
+                    index,
+                    delta: delta_event,
+                }]
             }
             AnthropicEvent::ContentBlockStop { index } => {
                 vec![StreamEvent::ContentBlockStop { index }]
@@ -186,13 +218,19 @@ impl Accumulator {
     }
 
     fn finish(self) -> Result<spp::CompleteResponse, spp::ProviderError> {
-        let id = self.id.ok_or_else(|| stream_decode_error("missing message_start"))?;
+        let id = self
+            .id
+            .ok_or_else(|| stream_decode_error("missing message_start"))?;
         let model = self.model.unwrap_or_default();
         let mut content = Vec::with_capacity(self.blocks.len());
         for b in self.blocks {
             match b {
                 BlockState::Text(text) => content.push(ContentBlock::Text { text }),
-                BlockState::ToolUse { id, name, partial_json } => {
+                BlockState::ToolUse {
+                    id,
+                    name,
+                    partial_json,
+                } => {
                     let input = if partial_json.is_empty() {
                         serde_json::json!({})
                     } else {
@@ -233,14 +271,29 @@ fn stream_decode_error(msg: &str) -> spp::ProviderError {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicEvent {
-    MessageStart { message: SseMessage },
-    ContentBlockStart { index: u32, content_block: SseContentBlock },
-    ContentBlockDelta { index: u32, delta: SseDelta },
-    ContentBlockStop { index: u32 },
-    MessageDelta { delta: SseMessageDelta, usage: SseUsageDelta },
+    MessageStart {
+        message: SseMessage,
+    },
+    ContentBlockStart {
+        index: u32,
+        content_block: SseContentBlock,
+    },
+    ContentBlockDelta {
+        index: u32,
+        delta: SseDelta,
+    },
+    ContentBlockStop {
+        index: u32,
+    },
+    MessageDelta {
+        delta: SseMessageDelta,
+        usage: SseUsageDelta,
+    },
     MessageStop,
     Ping,
-    Error { error: SseError },
+    Error {
+        error: SseError,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,13 +317,30 @@ struct SseInitialUsage {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SseContentBlock {
-    Text { #[serde(default)] text: String },
-    ToolUse { id: String, name: String, #[serde(default)] input: Option<serde_json::Value> },
-    Thinking { #[serde(default)] thinking: String, #[serde(default)] signature: Option<String> },
+    Text {
+        #[serde(default)]
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        #[serde(default)]
+        input: Option<serde_json::Value>,
+    },
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
     #[serde(other)]
     Image,
 }
 
+// Variants mirror Anthropic's `delta.type` wire field (`text_delta`,
+// `input_json_delta`, …) one-for-one, so the shared `Delta` postfix is
+// required by the protocol — not a naming smell.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SseDelta {
@@ -384,7 +454,10 @@ impl SseDecoder {
         if data_lines.is_empty() && event.is_none() {
             return self.try_pop_frame();
         }
-        Some(SseFrame { event, data: data_lines.join("\n") })
+        Some(SseFrame {
+            event,
+            data: data_lines.join("\n"),
+        })
     }
 }
 
@@ -399,12 +472,17 @@ mod tests {
             message: SseMessage {
                 id: "m1".into(),
                 model: "claude-x".into(),
-                usage: SseInitialUsage { input_tokens: 5, ..Default::default() },
+                usage: SseInitialUsage {
+                    input_tokens: 5,
+                    ..Default::default()
+                },
             },
         });
         acc.consume(AnthropicEvent::ContentBlockStart {
             index: 0,
-            content_block: SseContentBlock::Text { text: String::new() },
+            content_block: SseContentBlock::Text {
+                text: String::new(),
+            },
         });
         acc.consume(AnthropicEvent::ContentBlockDelta {
             index: 0,
@@ -412,12 +490,20 @@ mod tests {
         });
         acc.consume(AnthropicEvent::ContentBlockDelta {
             index: 0,
-            delta: SseDelta::TextDelta { text: " there".into() },
+            delta: SseDelta::TextDelta {
+                text: " there".into(),
+            },
         });
         acc.consume(AnthropicEvent::ContentBlockStop { index: 0 });
         acc.consume(AnthropicEvent::MessageDelta {
-            delta: SseMessageDelta { stop_reason: Some("end_turn".into()), stop_sequence: None },
-            usage: SseUsageDelta { output_tokens: Some(2), ..Default::default() },
+            delta: SseMessageDelta {
+                stop_reason: Some("end_turn".into()),
+                stop_sequence: None,
+            },
+            usage: SseUsageDelta {
+                output_tokens: Some(2),
+                ..Default::default()
+            },
         });
         acc.consume(AnthropicEvent::MessageStop);
 
@@ -451,16 +537,26 @@ mod tests {
         });
         acc.consume(AnthropicEvent::ContentBlockDelta {
             index: 0,
-            delta: SseDelta::InputJsonDelta { partial_json: "{\"path\":\"".into() },
+            delta: SseDelta::InputJsonDelta {
+                partial_json: "{\"path\":\"".into(),
+            },
         });
         acc.consume(AnthropicEvent::ContentBlockDelta {
             index: 0,
-            delta: SseDelta::InputJsonDelta { partial_json: "/tmp\"}".into() },
+            delta: SseDelta::InputJsonDelta {
+                partial_json: "/tmp\"}".into(),
+            },
         });
         acc.consume(AnthropicEvent::ContentBlockStop { index: 0 });
         acc.consume(AnthropicEvent::MessageDelta {
-            delta: SseMessageDelta { stop_reason: Some("tool_use".into()), stop_sequence: None },
-            usage: SseUsageDelta { output_tokens: Some(7), ..Default::default() },
+            delta: SseMessageDelta {
+                stop_reason: Some("tool_use".into()),
+                stop_sequence: None,
+            },
+            usage: SseUsageDelta {
+                output_tokens: Some(7),
+                ..Default::default()
+            },
         });
         acc.consume(AnthropicEvent::MessageStop);
 

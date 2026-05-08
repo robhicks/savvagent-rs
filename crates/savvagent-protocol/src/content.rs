@@ -139,6 +139,9 @@ mod tests {
             is_error: false,
         };
         let v = serde_json::to_value(&block).unwrap();
-        assert!(v.get("is_error").is_none(), "is_error=false must be omitted");
+        assert!(
+            v.get("is_error").is_none(),
+            "is_error=false must be omitted"
+        );
     }
 }

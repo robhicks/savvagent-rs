@@ -30,7 +30,10 @@ pub fn response_from_anthropic(r: api::MessageResponse) -> spp::CompleteResponse
         id: r.id,
         model: r.model,
         content: r.content.into_iter().map(block_from_anthropic).collect(),
-        stop_reason: r.stop_reason.map(stop_reason_from_anthropic).unwrap_or(spp::StopReason::Other),
+        stop_reason: r
+            .stop_reason
+            .map(stop_reason_from_anthropic)
+            .unwrap_or(spp::StopReason::Other),
         stop_sequence: r.stop_sequence,
         usage: usage_from_anthropic(r.usage),
     }
@@ -54,13 +57,15 @@ fn block_to_anthropic(b: &spp::ContentBlock) -> api::ContentBlock {
             name: name.clone(),
             input: input.clone(),
         },
-        spp::ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-            api::ContentBlock::ToolResult {
-                tool_use_id: tool_use_id.clone(),
-                content: content.iter().map(block_to_anthropic).collect(),
-                is_error: *is_error,
-            }
-        }
+        spp::ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => api::ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            content: content.iter().map(block_to_anthropic).collect(),
+            is_error: *is_error,
+        },
         spp::ContentBlock::Image { source } => api::ContentBlock::Image {
             source: image_source_to_anthropic(source),
         },
@@ -77,17 +82,22 @@ fn block_from_anthropic(b: api::ContentBlock) -> spp::ContentBlock {
         api::ContentBlock::ToolUse { id, name, input } => {
             spp::ContentBlock::ToolUse { id, name, input }
         }
-        api::ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-            spp::ContentBlock::ToolResult {
-                tool_use_id,
-                content: content.into_iter().map(block_from_anthropic).collect(),
-                is_error,
-            }
-        }
+        api::ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => spp::ContentBlock::ToolResult {
+            tool_use_id,
+            content: content.into_iter().map(block_from_anthropic).collect(),
+            is_error,
+        },
         api::ContentBlock::Image { source } => spp::ContentBlock::Image {
             source: image_source_from_anthropic(source),
         },
-        api::ContentBlock::Thinking { thinking, signature } => spp::ContentBlock::Thinking {
+        api::ContentBlock::Thinking {
+            thinking,
+            signature,
+        } => spp::ContentBlock::Thinking {
             text: thinking,
             signature,
         },
@@ -118,7 +128,10 @@ fn image_source_from_anthropic(s: api::ImageSource) -> spp::ImageSource {
                 "image/webp" => spp::MediaType::Webp,
                 _ => spp::MediaType::Png,
             };
-            spp::ImageSource::Base64 { media_type: mt, data }
+            spp::ImageSource::Base64 {
+                media_type: mt,
+                data,
+            }
         }
         api::ImageSource::Url { url } => spp::ImageSource::Url { url },
     }
@@ -174,7 +187,10 @@ mod tests {
         let body = request_to_anthropic(&req, false);
         assert_eq!(body.model, "claude-x");
         assert_eq!(body.messages.len(), 1);
-        assert!(matches!(body.messages[0].content[0], api::ContentBlock::Text { .. }));
+        assert!(matches!(
+            body.messages[0].content[0],
+            api::ContentBlock::Text { .. }
+        ));
         assert!(!body.stream);
     }
 

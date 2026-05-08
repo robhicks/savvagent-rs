@@ -1,8 +1,8 @@
 //! End-to-end JSON round-trip tests covering the surface of SPP.
 
 use savvagent_protocol::{
-    BlockDelta, CompleteRequest, CompleteResponse, ContentBlock, ErrorKind, Message,
-    ProviderError, Role, StopReason, StreamEvent, ToolDef, Usage, UsageDelta,
+    BlockDelta, CompleteRequest, CompleteResponse, ContentBlock, ErrorKind, Message, ProviderError,
+    Role, StopReason, StreamEvent, ToolDef, Usage, UsageDelta,
 };
 use serde_json::json;
 
@@ -73,25 +73,37 @@ fn stream_events_round_trip() {
         StreamEvent::MessageStart {
             id: "msg_1".into(),
             model: "claude-sonnet-4-6".into(),
-            usage: Usage { input_tokens: 100, ..Default::default() },
+            usage: Usage {
+                input_tokens: 100,
+                ..Default::default()
+            },
         },
         StreamEvent::ContentBlockStart {
             index: 0,
-            block: ContentBlock::Text { text: String::new() },
+            block: ContentBlock::Text {
+                text: String::new(),
+            },
         },
         StreamEvent::ContentBlockDelta {
             index: 0,
-            delta: BlockDelta::TextDelta { text: "Hello".into() },
+            delta: BlockDelta::TextDelta {
+                text: "Hello".into(),
+            },
         },
         StreamEvent::ContentBlockDelta {
             index: 0,
-            delta: BlockDelta::TextDelta { text: " world".into() },
+            delta: BlockDelta::TextDelta {
+                text: " world".into(),
+            },
         },
         StreamEvent::ContentBlockStop { index: 0 },
         StreamEvent::MessageDelta {
             stop_reason: Some(StopReason::EndTurn),
             stop_sequence: None,
-            usage_delta: UsageDelta { output_tokens: Some(2), ..Default::default() },
+            usage_delta: UsageDelta {
+                output_tokens: Some(2),
+                ..Default::default()
+            },
         },
         StreamEvent::MessageStop,
     ];
@@ -115,7 +127,9 @@ fn tool_use_input_delta_then_stop() {
     };
     let delta = StreamEvent::ContentBlockDelta {
         index: 1,
-        delta: BlockDelta::InputJsonDelta { partial_json: "{\"pa".into() },
+        delta: BlockDelta::InputJsonDelta {
+            partial_json: "{\"pa".into(),
+        },
     };
     let stop = StreamEvent::ContentBlockStop { index: 1 };
 
@@ -146,7 +160,9 @@ fn message_round_trips_with_tool_result() {
         role: Role::User,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: "toolu_1".into(),
-            content: vec![ContentBlock::Text { text: "/tmp/a /tmp/b".into() }],
+            content: vec![ContentBlock::Text {
+                text: "/tmp/a /tmp/b".into(),
+            }],
             is_error: false,
         }],
     };

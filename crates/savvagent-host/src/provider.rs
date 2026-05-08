@@ -15,8 +15,7 @@ use rmcp::{
     },
     service::{NotificationContext, RunningService},
     transport::{
-        StreamableHttpClientTransport,
-        streamable_http_client::StreamableHttpClientTransportConfig,
+        StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
 use savvagent_mcp::ProviderClient;
@@ -69,7 +68,11 @@ impl RmcpProviderClient {
             StreamableHttpClientTransportConfig::with_uri(url.to_string()),
         );
         let service = handler.serve(transport).await?;
-        Ok(Self { service, progress, counter: AtomicU64::new(0) })
+        Ok(Self {
+            service,
+            progress,
+            counter: AtomicU64::new(0),
+        })
     }
 
     /// Drop the MCP session.
@@ -101,7 +104,11 @@ impl ProviderClient for RmcpProviderClient {
             .map_err(|e| internal(format!("encode CompleteRequest: {e}")))?
         {
             serde_json::Value::Object(m) => m,
-            _ => return Err(internal("CompleteRequest did not encode as a JSON object".into())),
+            _ => {
+                return Err(internal(
+                    "CompleteRequest did not encode as a JSON object".into(),
+                ));
+            }
         };
         let mut params =
             CallToolRequestParams::new(COMPLETE_TOOL_NAME.to_string()).with_arguments(args);
@@ -120,14 +127,10 @@ impl ProviderClient for RmcpProviderClient {
         };
 
         tracing::trace!("calling rmcp service.call_tool");
-        let result = self
-            .service
-            .call_tool(params)
-            .await
-            .map_err(|e| {
-                tracing::warn!("call_tool errored: {e}");
-                transport_error(e.to_string())
-            });
+        let result = self.service.call_tool(params).await.map_err(|e| {
+            tracing::warn!("call_tool errored: {e}");
+            transport_error(e.to_string())
+        });
         // The forwarder task parks on `subscriber.next()`, which never
         // closes on its own. Abort it now so the events sender clone it
         // holds is dropped and the caller's downstream channel can close.
@@ -224,4 +227,3 @@ fn transport_error(msg: String) -> ProviderError {
         provider_code: None,
     }
 }
-

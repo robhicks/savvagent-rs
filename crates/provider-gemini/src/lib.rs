@@ -103,7 +103,11 @@ impl GeminiProviderBuilder {
             .https_only(self.base_url.starts_with("https://"))
             .build()
             .map_err(|e| BuildError::HttpClient(e.to_string()))?;
-        Ok(GeminiProvider { http, api_key, base_url: self.base_url })
+        Ok(GeminiProvider {
+            http,
+            api_key,
+            base_url: self.base_url,
+        })
     }
 }
 
@@ -232,7 +236,12 @@ async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
         (body, None)
     };
 
-    ProviderError { kind, message, retry_after_ms, provider_code }
+    ProviderError {
+        kind,
+        message,
+        retry_after_ms,
+        provider_code,
+    }
 }
 
 /// Default endpoint path the Streamable HTTP server is mounted at.
@@ -275,8 +284,7 @@ pub async fn run() -> std::process::ExitCode {
         .with_target(false)
         .init();
 
-    let listen =
-        env::var("SAVVAGENT_GEMINI_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
+    let listen = env::var("SAVVAGENT_GEMINI_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
     let base_url = env::var("GEMINI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
 
     let provider = match GeminiProvider::builder().base_url(base_url).build() {

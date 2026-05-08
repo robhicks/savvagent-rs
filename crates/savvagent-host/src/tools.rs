@@ -12,9 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rmcp::{
-    RoleClient, ServiceExt,
-    model::CallToolRequestParams,
-    service::RunningService,
+    RoleClient, ServiceExt, model::CallToolRequestParams, service::RunningService,
     transport::TokioChildProcess,
 };
 use savvagent_protocol::ToolDef;
@@ -83,7 +81,11 @@ impl ToolRegistry {
             defs.len()
         );
 
-        Ok(Self { servers, routes, defs })
+        Ok(Self {
+            servers,
+            routes,
+            defs,
+        })
     }
 
     /// Call `name` on the appropriate tool server with `input` JSON arguments.
@@ -170,9 +172,15 @@ pub(crate) struct ToolCallOutcome {
 
 impl ToolCallOutcome {
     fn success(payload: String) -> Self {
-        Self { is_error: false, payload }
+        Self {
+            is_error: false,
+            payload,
+        }
     }
     fn error(payload: String) -> Self {
-        Self { is_error: true, payload }
+        Self {
+            is_error: true,
+            payload,
+        }
     }
 }

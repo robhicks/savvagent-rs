@@ -19,13 +19,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use savvagent_host::{
-    Host, HostConfig, ProviderEndpoint, ToolCallStatus, ToolEndpoint,
-};
+use savvagent_host::{Host, HostConfig, ProviderEndpoint, ToolCallStatus, ToolEndpoint};
 use savvagent_mcp::ProviderClient;
 use savvagent_protocol::{
-    CompleteRequest, CompleteResponse, ContentBlock, ProviderError, Role, StopReason,
-    StreamEvent, Usage,
+    CompleteRequest, CompleteResponse, ContentBlock, ProviderError, Role, StopReason, StreamEvent,
+    Usage,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -40,9 +38,11 @@ struct ScriptStep {
     /// Closure that returns the assistant content blocks for this turn. The
     /// closure receives the request the host sent, so the script can sanity-
     /// check inputs (history, tool defs, …) before responding.
-    response: Box<dyn Fn(&CompleteRequest) -> Vec<ContentBlock> + Send + Sync>,
+    response: ResponseFn,
     stop_reason: StopReason,
 }
+
+type ResponseFn = Box<dyn Fn(&CompleteRequest) -> Vec<ContentBlock> + Send + Sync>;
 
 struct ScriptedProvider {
     steps: Vec<ScriptStep>,
@@ -92,8 +92,7 @@ impl ProviderClient for ScriptedProvider {
 async fn list_then_read_then_summarize() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_test_writer()
         .try_init();
@@ -171,10 +170,15 @@ async fn list_then_read_then_summarize() {
     //    bypasses connect for the provider but still spawns tools normally).
     let bin = tool_fs_bin();
     let config = HostConfig::new(
-        ProviderEndpoint::StreamableHttp { url: "http://unused".into() },
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
         "claude-test",
     )
-    .with_tool(ToolEndpoint::Stdio { command: bin, args: vec![] })
+    .with_tool(ToolEndpoint::Stdio {
+        command: bin,
+        args: vec![],
+    })
     .with_project_root(project_path.clone());
 
     let host = Host::with_components(config, Box::new(provider))
@@ -182,7 +186,10 @@ async fn list_then_read_then_summarize() {
         .expect("host start");
 
     // 4. Run the turn and assert.
-    let outcome = host.run_turn("Summarize this project").await.expect("run_turn");
+    let outcome = host
+        .run_turn("Summarize this project")
+        .await
+        .expect("run_turn");
 
     assert_eq!(outcome.iterations, 3);
     assert!(
@@ -232,10 +239,15 @@ async fn loop_limit_kicks_in() {
 
     let bin = tool_fs_bin();
     let config = HostConfig::new(
-        ProviderEndpoint::StreamableHttp { url: "http://unused".into() },
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
         "claude-test",
     )
-    .with_tool(ToolEndpoint::Stdio { command: bin, args: vec![] })
+    .with_tool(ToolEndpoint::Stdio {
+        command: bin,
+        args: vec![],
+    })
     .with_max_iterations(3);
 
     let host = Host::with_components(config, Box::new(runaway))
@@ -244,8 +256,7 @@ async fn loop_limit_kicks_in() {
     let err = host
         .run_turn("go forever")
         .await
-        .err()
-        .expect("expected loop-limit error");
+        .expect_err("expected loop-limit error");
     assert!(err.to_string().contains("3 iterations"), "{err}");
     host.shutdown().await;
 }

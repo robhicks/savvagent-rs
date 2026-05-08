@@ -25,9 +25,7 @@ mod session;
 mod tools;
 
 pub use config::{HostConfig, ProviderEndpoint, ToolEndpoint};
-pub use session::{
-    Host, HostError, ToolCall, ToolCallStatus, TurnEvent, TurnOutcome,
-};
+pub use session::{Host, HostError, ToolCall, ToolCallStatus, TurnEvent, TurnOutcome};
 
 #[doc(hidden)]
 pub use provider::RmcpProviderClient;

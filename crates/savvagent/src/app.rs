@@ -112,10 +112,14 @@ impl App {
                     .border_type(BorderType::Rounded),
             )
             .with_highlight_item_style(
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             )
             .with_highlight_dir_style(
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )
             .with_highlight_symbol("> ");
 
@@ -167,7 +171,11 @@ impl App {
                     result_preview: None,
                 });
             }
-            TurnEvent::ToolCallFinished { name: _, status, result } => {
+            TurnEvent::ToolCallFinished {
+                name: _,
+                status,
+                result,
+            } => {
                 if let Some(Entry::Tool {
                     status: s,
                     result_preview: p,
@@ -231,9 +239,11 @@ impl App {
             .iter()
             .map(|e| match e {
                 Entry::User(t) | Entry::Assistant(t) | Entry::Note(t) => t.len(),
-                Entry::Tool { arguments, result_preview, .. } => {
-                    arguments.len() + result_preview.as_deref().map(str::len).unwrap_or(0)
-                }
+                Entry::Tool {
+                    arguments,
+                    result_preview,
+                    ..
+                } => arguments.len() + result_preview.as_deref().map(str::len).unwrap_or(0),
             })
             .sum::<usize>()
             + self.live_text.len();
@@ -243,12 +253,30 @@ impl App {
     /// Slash commands surfaced in Ctrl-P.
     pub fn refresh_commands(&mut self) {
         self.commands = vec![
-            Command { name: "/connect".into(), description: "Choose a provider and set its API key".into() },
-            Command { name: "/clear".into(), description: "Reset conversation history".into() },
-            Command { name: "/save".into(), description: "Save transcript now".into() },
-            Command { name: "/view".into(), description: "View a file".into() },
-            Command { name: "/edit".into(), description: "Edit a file".into() },
-            Command { name: "/quit".into(), description: "Quit".into() },
+            Command {
+                name: "/connect".into(),
+                description: "Choose a provider and set its API key".into(),
+            },
+            Command {
+                name: "/clear".into(),
+                description: "Reset conversation history".into(),
+            },
+            Command {
+                name: "/save".into(),
+                description: "Save transcript now".into(),
+            },
+            Command {
+                name: "/view".into(),
+                description: "View a file".into(),
+            },
+            Command {
+                name: "/edit".into(),
+                description: "Edit a file".into(),
+            },
+            Command {
+                name: "/quit".into(),
+                description: "Quit".into(),
+            },
         ];
     }
 
@@ -287,7 +315,12 @@ impl App {
         }
         self.input_textarea = TextArea::from(current.lines().map(|s| s.to_string()));
         let row = self.input_textarea.lines().len().saturating_sub(1) as u16;
-        let col = self.input_textarea.lines().last().map(|l| l.len()).unwrap_or(0) as u16;
+        let col = self
+            .input_textarea
+            .lines()
+            .last()
+            .map(|l| l.len())
+            .unwrap_or(0) as u16;
         self.input_textarea
             .move_cursor(tui_textarea::CursorMove::Jump(row, col));
         self.close_file_picker();
@@ -322,25 +355,29 @@ impl App {
             _ => "text",
         };
         match std::fs::read_to_string(&path) {
-            Ok(content) => match Editor::new(lang, &content, ratatui_code_editor::theme::vesper()) {
-                Ok(editor) => {
-                    self.editor = Some(editor);
-                    self.active_file_path = Some(path);
-                    self.input_mode = if edit {
-                        InputMode::EditingFile
-                    } else {
-                        InputMode::ViewingFile
-                    };
+            Ok(content) => {
+                match Editor::new(lang, &content, ratatui_code_editor::theme::vesper()) {
+                    Ok(editor) => {
+                        self.editor = Some(editor);
+                        self.active_file_path = Some(path);
+                        self.input_mode = if edit {
+                            InputMode::EditingFile
+                        } else {
+                            InputMode::ViewingFile
+                        };
+                    }
+                    Err(e) => self.push_note(format!("Editor error: {e}")),
                 }
-                Err(e) => self.push_note(format!("Editor error: {e}")),
-            },
+            }
             Err(e) => self.push_note(format!("Read error: {e}")),
         }
     }
 
     /// Persist the open editor's buffer to disk.
     pub fn save_file(&mut self) {
-        let Some(path) = self.active_file_path.clone() else { return };
+        let Some(path) = self.active_file_path.clone() else {
+            return;
+        };
         let Some(editor) = &self.editor else { return };
         let content = editor.get_content();
         match std::fs::write(&path, content) {
@@ -352,7 +389,9 @@ impl App {
     /// Dispatch a `/...` command. Returns `true` if it was a slash command.
     pub fn handle_command(&mut self, command: &str) -> bool {
         let parts: Vec<&str> = command.split_whitespace().collect();
-        let Some(head) = parts.first() else { return false };
+        let Some(head) = parts.first() else {
+            return false;
+        };
         match *head {
             "/connect" => {
                 self.open_provider_selector();

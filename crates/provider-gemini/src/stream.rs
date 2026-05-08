@@ -26,9 +26,7 @@
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use savvagent_mcp::StreamEmitter;
-use savvagent_protocol::{
-    self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta,
-};
+use savvagent_protocol::{self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta};
 
 use crate::api;
 use crate::translate::{stop_reason_from_gemini, synthesize_tool_use_id};
@@ -83,13 +81,24 @@ struct Accumulator {
 
 #[derive(Debug, Clone)]
 enum BlockState {
-    Text { buf: String },
-    Thinking { buf: String, signature: Option<String> },
+    Text {
+        buf: String,
+    },
+    Thinking {
+        buf: String,
+        signature: Option<String>,
+    },
     /// Function calls arrive whole in Gemini's stream — recording the
     /// completed block here so we emit the right `ContentBlockStop` later.
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
     /// Image (inline data) — same: emitted whole.
-    Image { source: spp::ImageSource },
+    Image {
+        source: spp::ImageSource,
+    },
 }
 
 impl Accumulator {
@@ -124,7 +133,10 @@ impl Accumulator {
 
         let candidate = chunk.candidates.into_iter().next();
         let (parts, finish_reason) = match candidate {
-            Some(c) => (c.content.map(|c| c.parts).unwrap_or_default(), c.finish_reason),
+            Some(c) => (
+                c.content.map(|c| c.parts).unwrap_or_default(),
+                c.finish_reason,
+            ),
             None => (Vec::new(), None),
         };
 
@@ -200,11 +212,16 @@ impl Accumulator {
                 "image/webp" => spp::MediaType::Webp,
                 _ => spp::MediaType::Png,
             };
-            let source = spp::ImageSource::Base64 { media_type: mt, data: inline.data };
+            let source = spp::ImageSource::Base64 {
+                media_type: mt,
+                data: inline.data,
+            };
             let idx = self.next_block_index();
             out.push(StreamEvent::ContentBlockStart {
                 index: idx as u32,
-                block: ContentBlock::Image { source: source.clone() },
+                block: ContentBlock::Image {
+                    source: source.clone(),
+                },
             });
             out.push(StreamEvent::ContentBlockStop { index: idx as u32 });
             self.blocks.push(Some(BlockState::Image { source }));
@@ -229,7 +246,13 @@ impl Accumulator {
                     delta: BlockDelta::TextDelta { text },
                 });
             }
-            Some((idx, BlockState::Thinking { buf, signature: sig })) if is_thinking => {
+            Some((
+                idx,
+                BlockState::Thinking {
+                    buf,
+                    signature: sig,
+                },
+            )) if is_thinking => {
                 buf.push_str(&text);
                 if let Some(new_sig) = signature {
                     *sig = Some(new_sig.clone());
@@ -271,7 +294,9 @@ impl Accumulator {
                 } else {
                     out.push(StreamEvent::ContentBlockStart {
                         index: idx as u32,
-                        block: ContentBlock::Text { text: String::new() },
+                        block: ContentBlock::Text {
+                            text: String::new(),
+                        },
                     });
                     if !text.is_empty() {
                         out.push(StreamEvent::ContentBlockDelta {
@@ -291,7 +316,9 @@ impl Accumulator {
         for (i, slot) in self.blocks.iter_mut().enumerate().rev() {
             if let Some(state) = slot {
                 match state {
-                    BlockState::Text { .. } | BlockState::Thinking { .. } => return Some((i, state)),
+                    BlockState::Text { .. } | BlockState::Thinking { .. } => {
+                        return Some((i, state));
+                    }
                     BlockState::ToolUse { .. } | BlockState::Image { .. } => return None,
                 }
             }
@@ -317,9 +344,10 @@ impl Accumulator {
         }
         let block = match state {
             BlockState::Text { buf } => ContentBlock::Text { text: buf },
-            BlockState::Thinking { buf, signature } => {
-                ContentBlock::Thinking { text: buf, signature }
-            }
+            BlockState::Thinking { buf, signature } => ContentBlock::Thinking {
+                text: buf,
+                signature,
+            },
             BlockState::ToolUse { id, name, input } => ContentBlock::ToolUse { id, name, input },
             BlockState::Image { source } => ContentBlock::Image { source },
         };
@@ -444,7 +472,9 @@ impl SseDecoder {
         if data_lines.is_empty() {
             return self.try_pop_frame();
         }
-        Some(SseFrame { data: data_lines.join("\n") })
+        Some(SseFrame {
+            data: data_lines.join("\n"),
+        })
     }
 }
 
@@ -551,7 +581,9 @@ mod tests {
         let _ = acc.flush();
         let out = acc.finish().unwrap();
         assert_eq!(out.content.len(), 2);
-        assert!(matches!(&out.content[0], ContentBlock::Thinking { text, .. } if text == "let me think"));
+        assert!(
+            matches!(&out.content[0], ContentBlock::Thinking { text, .. } if text == "let me think")
+        );
         assert!(matches!(&out.content[1], ContentBlock::Text { text } if text == "answer is 42"));
     }
 }

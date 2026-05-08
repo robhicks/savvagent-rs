@@ -136,9 +136,18 @@ impl ClientHandler for CapturingClient {
     }
 }
 
-fn make_client() -> (CapturingClient, mpsc::UnboundedReceiver<ProgressNotificationParam>) {
+fn make_client() -> (
+    CapturingClient,
+    mpsc::UnboundedReceiver<ProgressNotificationParam>,
+) {
     let (tx, rx) = mpsc::unbounded_channel();
-    (CapturingClient { info: ClientInfo::default(), tx }, rx)
+    (
+        CapturingClient {
+            info: ClientInfo::default(),
+            tx,
+        },
+        rx,
+    )
 }
 
 fn req_text(prompt: &str) -> serde_json::Map<String, serde_json::Value> {
@@ -214,9 +223,9 @@ async fn streaming_complete_emits_progress_and_final_response() {
     let mut args = req_text("hi");
     args.insert("stream".into(), json!(true));
     let mut params = CallToolRequestParams::new("complete").with_arguments(args);
-    params.meta = Some(Meta::with_progress_token(ProgressToken(NumberOrString::String(
-        "tok-1".into(),
-    ))));
+    params.meta = Some(Meta::with_progress_token(ProgressToken(
+        NumberOrString::String("tok-1".into()),
+    )));
 
     let result = svc.call_tool(params).await.expect("call_tool");
     let resp: CompleteResponse = result.into_typed().expect("structured response");
@@ -273,11 +282,11 @@ async fn streaming_complete_emits_progress_and_final_response() {
         "last event must be message_stop: {events:#?}"
     );
     assert!(
-        names.iter().any(|n| *n == "content_block_start"),
+        names.contains(&"content_block_start"),
         "missing content_block_start: {events:#?}"
     );
     assert!(
-        names.iter().any(|n| *n == "content_block_stop"),
+        names.contains(&"content_block_stop"),
         "missing content_block_stop: {events:#?}"
     );
 
@@ -285,10 +294,10 @@ async fn streaming_complete_emits_progress_and_final_response() {
     let concat: String = events
         .iter()
         .filter_map(|e| match e {
-            StreamEvent::ContentBlockDelta { delta, .. } => match delta {
-                savvagent_protocol::BlockDelta::TextDelta { text } => Some(text.clone()),
-                _ => None,
-            },
+            StreamEvent::ContentBlockDelta {
+                delta: savvagent_protocol::BlockDelta::TextDelta { text },
+                ..
+            } => Some(text.clone()),
             _ => None,
         })
         .collect();

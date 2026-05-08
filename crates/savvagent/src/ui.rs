@@ -17,11 +17,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
-            Constraint::Min(1),     // log
-            Constraint::Length(1),  // status
-            Constraint::Length(3),  // input
-            Constraint::Length(1),  // metrics
+            Constraint::Length(3), // header
+            Constraint::Min(1),    // log
+            Constraint::Length(1), // status
+            Constraint::Length(3), // input
+            Constraint::Length(1), // metrics
         ])
         .split(area);
 
@@ -34,7 +34,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     } else {
         "Savvagent — disconnected · type /connect".to_string()
     };
-    let header_color = if app.connected { Color::Blue } else { Color::Magenta };
+    let header_color = if app.connected {
+        Color::Blue
+    } else {
+        Color::Magenta
+    };
     let header = Paragraph::new(header_text)
         .style(
             Style::default()
@@ -47,16 +51,18 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     render_log(app, frame, chunks[1]);
 
     let status = if app.is_loading {
-        Paragraph::new(" ● thinking…")
-            .style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            )
+        Paragraph::new(" ● thinking…").style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::ITALIC),
+        )
     } else {
         Paragraph::new(" ○ ready").style(Style::default().fg(Color::Blue))
     };
-    frame.render_widget(status.block(Block::default().borders(Borders::BOTTOM)), chunks[2]);
+    frame.render_widget(
+        status.block(Block::default().borders(Borders::BOTTOM)),
+        chunks[2],
+    );
 
     let mut textarea = app.input_textarea.clone();
     textarea.set_block(Block::default().borders(Borders::ALL));
@@ -110,7 +116,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 .borders(Borders::ALL)
                 .title(title)
                 .title_bottom(Line::from(hint).right_aligned());
-            let inner = popup.inner(Margin { horizontal: 1, vertical: 1 });
+            let inner = popup.inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
             frame.render_widget(block, popup);
             frame.render_widget(editor, inner);
         }
@@ -146,7 +155,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     if matches!(app.input_mode, InputMode::EditingFile) {
         if let Some(editor) = &app.editor {
             let popup = centered_rect(80, 80, area);
-            let inner = popup.inner(Margin { horizontal: 1, vertical: 1 });
+            let inner = popup.inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
             if let Some((x, y)) = editor.get_visible_cursor(&inner) {
                 frame.set_cursor_position((x, y));
             }
@@ -205,7 +217,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             .borders(Borders::ALL)
             .title(title)
             .title_bottom(Line::from(" [Enter] connect  [Esc] cancel ").right_aligned());
-        let inner = popup.inner(Margin { horizontal: 1, vertical: 1 });
+        let inner = popup.inner(Margin {
+            horizontal: 1,
+            vertical: 1,
+        });
         frame.render_widget(block, popup);
         let mut ta = app.api_key_textarea.clone();
         ta.set_block(Block::default());
@@ -243,7 +258,9 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
                     Span::styled(format!("  {badge} "), Style::default().fg(color)),
                     Span::styled(
                         format!("{name}({arguments})"),
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::DIM),
                     ),
                 ]));
                 if let Some(preview) = result_preview {
@@ -256,7 +273,9 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
             Entry::Note(text) => {
                 lines.push(Line::from(Span::styled(
                     format!("· {text}"),
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 )));
             }
         }
@@ -266,9 +285,11 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
         lines.push(line_block("Agent: ", &app.live_text, Color::Cyan));
     }
 
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(" Conversation "));
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Conversation "),
+    );
     frame.render_widget(para, area);
 }
 

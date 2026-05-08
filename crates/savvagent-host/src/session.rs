@@ -133,7 +133,9 @@ impl Host {
             config,
             provider,
             tools: Mutex::new(Some(tools)),
-            state: Mutex::new(SessionState { messages: Vec::new() }),
+            state: Mutex::new(SessionState {
+                messages: Vec::new(),
+            }),
             system_prompt,
         })
     }
@@ -153,7 +155,9 @@ impl Host {
             config,
             provider,
             tools: Mutex::new(Some(tools)),
-            state: Mutex::new(SessionState { messages: Vec::new() }),
+            state: Mutex::new(SessionState {
+                messages: Vec::new(),
+            }),
             system_prompt,
         })
     }
@@ -196,10 +200,7 @@ impl Host {
 
         let tool_defs = {
             let guard = self.tools.lock().await;
-            guard
-                .as_ref()
-                .map(|t| t.defs.clone())
-                .unwrap_or_default()
+            guard.as_ref().map(|t| t.defs.clone()).unwrap_or_default()
         };
 
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -213,7 +214,11 @@ impl Host {
             iterations += 1;
 
             if let Some(tx) = &events {
-                let _ = tx.send(TurnEvent::IterationStarted { iteration: iterations }).await;
+                let _ = tx
+                    .send(TurnEvent::IterationStarted {
+                        iteration: iterations,
+                    })
+                    .await;
             }
 
             let req = CompleteRequest {
@@ -292,13 +297,21 @@ impl Host {
                         tool_uses.len()
                     )));
                 }
-                let outcome = TurnOutcome { text: text_buf, tool_calls, iterations };
+                let outcome = TurnOutcome {
+                    text: text_buf,
+                    tool_calls,
+                    iterations,
+                };
                 {
                     let mut state = self.state.lock().await;
                     state.messages = messages;
                 }
                 if let Some(tx) = events {
-                    let _ = tx.send(TurnEvent::TurnComplete { outcome: outcome.clone() }).await;
+                    let _ = tx
+                        .send(TurnEvent::TurnComplete {
+                            outcome: outcome.clone(),
+                        })
+                        .await;
                 }
                 return Ok(outcome);
             }
@@ -329,7 +342,7 @@ impl Host {
                     let _ = tx
                         .send(TurnEvent::ToolCallFinished {
                             name: name.clone(),
-                            status: status.clone(),
+                            status,
                             result: outcome.payload.clone(),
                         })
                         .await;
@@ -407,10 +420,7 @@ const _: fn() = || {
 /// Convert a stream of provider [`StreamEvent`]s into [`TurnEvent::TextDelta`]s
 /// and forward them to the host caller. Non-text events are dropped (they're
 /// re-derivable from the final response, which the loop already has).
-async fn forward_text_deltas(
-    mut rx: mpsc::Receiver<StreamEvent>,
-    out: mpsc::Sender<TurnEvent>,
-) {
+async fn forward_text_deltas(mut rx: mpsc::Receiver<StreamEvent>, out: mpsc::Sender<TurnEvent>) {
     while let Some(ev) = rx.recv().await {
         if let StreamEvent::ContentBlockDelta {
             delta: BlockDelta::TextDelta { text },

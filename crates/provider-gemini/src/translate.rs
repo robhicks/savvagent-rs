@@ -101,8 +101,12 @@ pub(crate) fn stop_reason_from_gemini(s: Option<&str>) -> spp::StopReason {
     match s {
         Some("STOP") => spp::StopReason::EndTurn,
         Some("MAX_TOKENS") => spp::StopReason::MaxTokens,
-        Some("SAFETY") | Some("RECITATION") | Some("BLOCKLIST") | Some("PROHIBITED_CONTENT")
-        | Some("SPII") | Some("IMAGE_SAFETY") => spp::StopReason::Refusal,
+        Some("SAFETY")
+        | Some("RECITATION")
+        | Some("BLOCKLIST")
+        | Some("PROHIBITED_CONTENT")
+        | Some("SPII")
+        | Some("IMAGE_SAFETY") => spp::StopReason::Refusal,
         // Gemini emits a synthetic FUNCTION_CALL stop reason in some flows;
         // hosts rely on the presence of a `tool_use` block more than this.
         Some("MALFORMED_FUNCTION_CALL") => spp::StopReason::Other,
@@ -167,7 +171,11 @@ fn push_part_for_block(
             }),
             ..api::Part::default()
         }),
-        spp::ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+        spp::ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => {
             // Gemini routes function results by name; recover the name from
             // the matching ToolUse earlier in the conversation. If absent
             // (model never called it), fall back to a placeholder so we don't
@@ -301,7 +309,10 @@ pub(crate) fn part_to_spp(p: api::Part, tool_use_counter: &mut u32) -> Option<sp
             _ => spp::MediaType::Png,
         };
         return Some(spp::ContentBlock::Image {
-            source: spp::ImageSource::Base64 { media_type: mt, data: inline.data },
+            source: spp::ImageSource::Base64 {
+                media_type: mt,
+                data: inline.data,
+            },
         });
     }
     // function_response parts shouldn't appear in model output; if they do,
@@ -368,7 +379,9 @@ mod tests {
             messages: vec![
                 spp::Message {
                     role: spp::Role::User,
-                    content: vec![spp::ContentBlock::Text { text: "list /tmp".into() }],
+                    content: vec![spp::ContentBlock::Text {
+                        text: "list /tmp".into(),
+                    }],
                 },
                 spp::Message {
                     role: spp::Role::Assistant,
@@ -382,7 +395,9 @@ mod tests {
                     role: spp::Role::User,
                     content: vec![spp::ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: vec![spp::ContentBlock::Text { text: "a\nb".into() }],
+                        content: vec![spp::ContentBlock::Text {
+                            text: "a\nb".into(),
+                        }],
                         is_error: false,
                     }],
                 },

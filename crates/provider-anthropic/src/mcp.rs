@@ -11,10 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use rmcp::{
     ErrorData, Peer, RoleServer, ServerHandler,
-    handler::server::{
-        router::tool::ToolRouter,
-        wrapper::Parameters,
-    },
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CallToolResult, Implementation, Meta, ProgressNotificationParam, ProgressToken,
         ProtocolVersion, ServerCapabilities, ServerInfo,
@@ -56,7 +53,10 @@ impl AnthropicMcpServer {
     /// Wrap a shared provider — useful when the same provider drives multiple
     /// `StreamableHttpService` instances.
     pub fn from_shared(provider: Arc<AnthropicProvider>) -> Self {
-        Self { provider, tool_router: Self::tool_router() }
+        Self {
+            provider,
+            tool_router: Self::tool_router(),
+        }
     }
 }
 
@@ -74,7 +74,11 @@ impl AnthropicMcpServer {
         peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let want_stream = req.stream;
-        let token = if want_stream { meta.get_progress_token() } else { None };
+        let token = if want_stream {
+            meta.get_progress_token()
+        } else {
+            None
+        };
         tracing::info!(
             model = %req.model,
             messages = req.messages.len(),
@@ -158,7 +162,11 @@ struct PeerEmitter {
 
 impl PeerEmitter {
     fn new(peer: Peer<RoleServer>, token: ProgressToken) -> Self {
-        Self { peer, token, counter: AtomicU64::new(0) }
+        Self {
+            peer,
+            token,
+            counter: AtomicU64::new(0),
+        }
     }
 }
 

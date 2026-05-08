@@ -31,7 +31,7 @@ pub struct Content {
     pub parts: Vec<Part>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Part {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,19 +56,6 @@ impl Part {
         Self {
             text: Some(text.into()),
             ..Self::default()
-        }
-    }
-}
-
-impl Default for Part {
-    fn default() -> Self {
-        Self {
-            text: None,
-            thought: None,
-            thought_signature: None,
-            inline_data: None,
-            function_call: None,
-            function_response: None,
         }
     }
 }

@@ -26,8 +26,7 @@ use rmcp::{
         wrapper::{Json, Parameters},
     },
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
-    schemars,
-    tool, tool_handler, tool_router,
+    schemars, tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -202,7 +201,10 @@ impl From<FsToolError> for ErrorData {
 }
 
 fn io_err(op: &str, source: std::io::Error) -> FsToolError {
-    FsToolError::Io { op: op.to_string(), source }
+    FsToolError::Io {
+        op: op.to_string(),
+        source,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +228,9 @@ impl Default for FsTools {
 impl FsTools {
     /// Construct a new server instance with the default tool router.
     pub fn new() -> Self {
-        Self { tool_router: Self::tool_router() }
+        Self {
+            tool_router: Self::tool_router(),
+        }
     }
 
     /// Read a UTF-8 text file from disk, capped at `max_bytes`.
@@ -259,11 +263,16 @@ impl FsTools {
             return Err(FsToolError::FileTooLarge { bytes, limit }.into());
         }
 
-        let raw = tokio::fs::read(&path).await.map_err(|e| io_err("read", e))?;
-        let content = String::from_utf8(raw)
-            .map_err(|e| FsToolError::NotUtf8(e.to_string()))?;
+        let raw = tokio::fs::read(&path)
+            .await
+            .map_err(|e| io_err("read", e))?;
+        let content = String::from_utf8(raw).map_err(|e| FsToolError::NotUtf8(e.to_string()))?;
 
-        Ok(Json(ReadFileOutput { path: input.path, bytes, content }))
+        Ok(Json(ReadFileOutput {
+            path: input.path,
+            bytes,
+            content,
+        }))
     }
 
     /// Write `content` to `path`, fully overwriting any existing file.
@@ -293,7 +302,10 @@ impl FsTools {
             .await
             .map_err(|e| io_err("write", e))?;
 
-        Ok(Json(WriteFileOutput { path: input.path, bytes_written }))
+        Ok(Json(WriteFileOutput {
+            path: input.path,
+            bytes_written,
+        }))
     }
 
     /// List the entries of a directory.
@@ -315,20 +327,19 @@ impl FsTools {
             .await
             .map_err(|e| io_err("stat", e))?;
         if !metadata.is_dir() {
-            return Err(FsToolError::InvalidArgument(format!(
-                "{} is not a directory",
-                input.path
-            ))
-            .into());
+            return Err(
+                FsToolError::InvalidArgument(format!("{} is not a directory", input.path)).into(),
+            );
         }
 
         let walk_root = root.clone();
         let recursive = input.recursive;
-        let entries = tokio::task::spawn_blocking(move || -> Result<(Vec<DirEntry>, bool), FsToolError> {
-            walk_dir(&walk_root, recursive, limit)
-        })
-        .await
-        .map_err(|e| FsToolError::InvalidArgument(format!("walk task panicked: {e}")))??;
+        let entries =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<DirEntry>, bool), FsToolError> {
+                walk_dir(&walk_root, recursive, limit)
+            })
+            .await
+            .map_err(|e| FsToolError::InvalidArgument(format!("walk task panicked: {e}")))??;
 
         Ok(Json(ListDirOutput {
             path: input.path,
@@ -354,32 +365,33 @@ impl FsTools {
         let pattern = input.pattern.clone();
         let root_for_thread = root_str.clone();
 
-        let (matches, truncated) = tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), FsToolError> {
-            let joined = if root_for_thread == "." {
-                pattern.clone()
-            } else {
-                format!("{}/{}", root_for_thread.trim_end_matches('/'), pattern)
-            };
-            let mut out = Vec::new();
-            let mut truncated = false;
-            let iter = glob::glob(&joined).map_err(|e| FsToolError::Glob(e.to_string()))?;
-            for entry in iter {
-                if out.len() >= limit {
-                    truncated = true;
-                    break;
+        let (matches, truncated) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), FsToolError> {
+                let joined = if root_for_thread == "." {
+                    pattern.clone()
+                } else {
+                    format!("{}/{}", root_for_thread.trim_end_matches('/'), pattern)
+                };
+                let mut out = Vec::new();
+                let mut truncated = false;
+                let iter = glob::glob(&joined).map_err(|e| FsToolError::Glob(e.to_string()))?;
+                for entry in iter {
+                    if out.len() >= limit {
+                        truncated = true;
+                        break;
+                    }
+                    let p = entry.map_err(|e| FsToolError::Glob(e.to_string()))?;
+                    let rel = p
+                        .strip_prefix(Path::new(&root_for_thread))
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .into_owned();
+                    out.push(rel);
                 }
-                let p = entry.map_err(|e| FsToolError::Glob(e.to_string()))?;
-                let rel = p
-                    .strip_prefix(Path::new(&root_for_thread))
-                    .unwrap_or(&p)
-                    .to_string_lossy()
-                    .into_owned();
-                out.push(rel);
-            }
-            Ok((out, truncated))
-        })
-        .await
-        .map_err(|e| FsToolError::InvalidArgument(format!("glob task panicked: {e}")))??;
+                Ok((out, truncated))
+            })
+            .await
+            .map_err(|e| FsToolError::InvalidArgument(format!("glob task panicked: {e}")))??;
 
         Ok(Json(GlobOutput {
             pattern: input.pattern,
@@ -412,7 +424,11 @@ impl ServerHandler for FsTools {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn walk_dir(root: &Path, recursive: bool, limit: usize) -> Result<(Vec<DirEntry>, bool), FsToolError> {
+fn walk_dir(
+    root: &Path,
+    recursive: bool,
+    limit: usize,
+) -> Result<(Vec<DirEntry>, bool), FsToolError> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     let mut truncated = false;
@@ -574,10 +590,18 @@ mod tests {
     #[tokio::test]
     async fn list_dir_flat() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("a.txt"), b"a").await.unwrap();
-        tokio::fs::write(dir.path().join("b.txt"), b"bb").await.unwrap();
-        tokio::fs::create_dir(dir.path().join("nested")).await.unwrap();
-        tokio::fs::write(dir.path().join("nested/c.txt"), b"ccc").await.unwrap();
+        tokio::fs::write(dir.path().join("a.txt"), b"a")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.txt"), b"bb")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(dir.path().join("nested"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("nested/c.txt"), b"ccc")
+            .await
+            .unwrap();
 
         let tools = FsTools::new();
         let out = tools
@@ -599,7 +623,9 @@ mod tests {
     async fn list_dir_recursive() {
         let dir = tempdir().unwrap();
         tokio::fs::create_dir(dir.path().join("sub")).await.unwrap();
-        tokio::fs::write(dir.path().join("sub/x.txt"), b"x").await.unwrap();
+        tokio::fs::write(dir.path().join("sub/x.txt"), b"x")
+            .await
+            .unwrap();
 
         let tools = FsTools::new();
         let out = tools
@@ -617,7 +643,9 @@ mod tests {
     async fn list_dir_truncates() {
         let dir = tempdir().unwrap();
         for i in 0..5 {
-            tokio::fs::write(dir.path().join(format!("f{i}.txt")), b"x").await.unwrap();
+            tokio::fs::write(dir.path().join(format!("f{i}.txt")), b"x")
+                .await
+                .unwrap();
         }
 
         let tools = FsTools::new();
@@ -636,10 +664,18 @@ mod tests {
     #[tokio::test]
     async fn glob_matches_under_root() {
         let dir = tempdir().unwrap();
-        tokio::fs::write(dir.path().join("keep.rs"), b"").await.unwrap();
-        tokio::fs::write(dir.path().join("skip.txt"), b"").await.unwrap();
-        tokio::fs::create_dir(dir.path().join("deep")).await.unwrap();
-        tokio::fs::write(dir.path().join("deep/also.rs"), b"").await.unwrap();
+        tokio::fs::write(dir.path().join("keep.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("skip.txt"), b"")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(dir.path().join("deep"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("deep/also.rs"), b"")
+            .await
+            .unwrap();
 
         let tools = FsTools::new();
         let out = tools
@@ -658,33 +694,44 @@ mod tests {
     #[tokio::test]
     async fn rejects_empty_path() {
         let tools = FsTools::new();
-        assert!(tools
-            .read_file(Parameters(ReadFileInput { path: String::new(), max_bytes: None }))
-            .await
-            .is_err());
-        assert!(tools
-            .write_file(Parameters(WriteFileInput {
-                path: String::new(),
-                content: String::new(),
-                create_dirs: false
-            }))
-            .await
-            .is_err());
-        assert!(tools
-            .list_dir(Parameters(ListDirInput {
-                path: String::new(),
-                recursive: false,
-                max_entries: None,
-            }))
-            .await
-            .is_err());
-        assert!(tools
-            .glob(Parameters(GlobInput {
-                pattern: String::new(),
-                root: None,
-                max_matches: None,
-            }))
-            .await
-            .is_err());
+        assert!(
+            tools
+                .read_file(Parameters(ReadFileInput {
+                    path: String::new(),
+                    max_bytes: None
+                }))
+                .await
+                .is_err()
+        );
+        assert!(
+            tools
+                .write_file(Parameters(WriteFileInput {
+                    path: String::new(),
+                    content: String::new(),
+                    create_dirs: false
+                }))
+                .await
+                .is_err()
+        );
+        assert!(
+            tools
+                .list_dir(Parameters(ListDirInput {
+                    path: String::new(),
+                    recursive: false,
+                    max_entries: None,
+                }))
+                .await
+                .is_err()
+        );
+        assert!(
+            tools
+                .glob(Parameters(GlobInput {
+                    pattern: String::new(),
+                    root: None,
+                    max_matches: None,
+                }))
+                .await
+                .is_err()
+        );
     }
 }

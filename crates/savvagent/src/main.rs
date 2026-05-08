@@ -24,7 +24,7 @@ mod providers;
 mod tui;
 mod ui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let tool_bin = locate_tool_fs();
 
-    let initial = bootstrap_host(&project_root, tool_bin.as_ref()).await;
+    let initial = bootstrap_host(&project_root, tool_bin.as_deref()).await;
     let header_model = initial
         .as_ref()
         .map(|(_, model, _)| model.clone())
@@ -117,13 +117,19 @@ async fn main() -> Result<()> {
 /// auto-connect over the in-process bridge. Returns the host plus the model
 /// and provider id used (so the App's header is right).
 async fn bootstrap_host(
-    project_root: &PathBuf,
-    tool_bin: Option<&PathBuf>,
+    project_root: &Path,
+    tool_bin: Option<&Path>,
 ) -> Option<(Arc<Host>, String, Option<&'static str>)> {
     if let Ok(url) = std::env::var("SAVVAGENT_PROVIDER_URL") {
-        let model = std::env::var("SAVVAGENT_MODEL")
-            .unwrap_or_else(|_| "claude-haiku-4-5".to_string());
-        match start_host_remote(url, model.clone(), project_root.clone(), tool_bin.cloned()).await
+        let model =
+            std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
+        match start_host_remote(
+            url,
+            model.clone(),
+            project_root.to_path_buf(),
+            tool_bin.map(Path::to_path_buf),
+        )
+        .await
         {
             Ok(host) => return Some((host, model, None)),
             Err(e) => {
@@ -133,7 +139,9 @@ async fn bootstrap_host(
     }
 
     for spec in PROVIDERS {
-        let Ok(Some(key)) = creds::load(spec.id) else { continue };
+        let Ok(Some(key)) = creds::load(spec.id) else {
+            continue;
+        };
         match build_in_process_host(spec, &key, project_root, tool_bin).await {
             Ok(host) => {
                 let model = std::env::var("SAVVAGENT_MODEL")
@@ -152,13 +160,11 @@ async fn bootstrap_host(
 async fn build_in_process_host(
     spec: &'static ProviderSpec,
     api_key: &str,
-    project_root: &PathBuf,
-    tool_bin: Option<&PathBuf>,
+    project_root: &Path,
+    tool_bin: Option<&Path>,
 ) -> Result<Arc<Host>> {
-    let handler = (spec.build)(api_key)
-        .with_context(|| format!("building {} handler", spec.id))?;
-    let model = std::env::var("SAVVAGENT_MODEL")
-        .unwrap_or_else(|_| spec.default_model.to_string());
+    let handler = (spec.build)(api_key).with_context(|| format!("building {} handler", spec.id))?;
+    let model = std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| spec.default_model.to_string());
     let client: Box<dyn ProviderClient + Send + Sync> =
         Box::new(InProcessProviderClient::new(handler));
     // The endpoint variant is a placeholder when we hand the host a
@@ -170,9 +176,12 @@ async fn build_in_process_host(
         },
         model,
     )
-    .with_project_root(project_root.clone());
+    .with_project_root(project_root.to_path_buf());
     if let Some(bin) = tool_bin {
-        config = config.with_tool(ToolEndpoint::Stdio { command: bin.clone(), args: vec![] });
+        config = config.with_tool(ToolEndpoint::Stdio {
+            command: bin.to_path_buf(),
+            args: vec![],
+        });
     }
     let host = Host::with_components(config, client)
         .await
@@ -189,11 +198,12 @@ async fn start_host_remote(
     let mut config = HostConfig::new(ProviderEndpoint::StreamableHttp { url }, model)
         .with_project_root(project_root);
     if let Some(bin) = tool_bin {
-        config = config.with_tool(ToolEndpoint::Stdio { command: bin, args: vec![] });
+        config = config.with_tool(ToolEndpoint::Stdio {
+            command: bin,
+            args: vec![],
+        });
     }
-    let host = Host::start(config)
-        .await
-        .context("failed to start host")?;
+    let host = Host::start(config).await.context("failed to start host")?;
     Ok(Arc::new(host))
 }
 
@@ -265,7 +275,9 @@ async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let path = app.transcript_dir.join(format!("{ts}.json"));
-    host.save_transcript(&path).await.context("save transcript")?;
+    host.save_transcript(&path)
+        .await
+        .context("save transcript")?;
     Ok(path)
 }
 
@@ -274,8 +286,8 @@ async fn perform_connect(
     spec: &'static ProviderSpec,
     api_key: String,
     host_slot: &HostSlot,
-    project_root: &PathBuf,
-    tool_bin: Option<&PathBuf>,
+    project_root: &Path,
+    tool_bin: Option<&Path>,
     app: &mut App,
 ) {
     if let Err(e) = creds::save(spec.id, &api_key) {
@@ -313,8 +325,7 @@ async fn perform_connect(
 
     app.connected = true;
     app.active_provider_id = Some(spec.id);
-    app.model = std::env::var("SAVVAGENT_MODEL")
-        .unwrap_or_else(|_| spec.default_model.to_string());
+    app.model = std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| spec.default_model.to_string());
     app.push_note(format!("Connected to {}.", spec.display_name));
 }
 
@@ -432,9 +443,7 @@ async fn run_app(
                                 let host_for_run = host.clone();
                                 let prompt = value;
                                 let runner = tokio::spawn(async move {
-                                    host_for_run
-                                        .run_turn_streaming(prompt, ev_tx)
-                                        .await
+                                    host_for_run.run_turn_streaming(prompt, ev_tx).await
                                 });
                                 while let Some(ev) = ev_rx.recv().await {
                                     if tx.send(WorkerMsg::Event(ev)).await.is_err() {
@@ -512,7 +521,7 @@ async fn run_app(
                             key,
                             &host_slot,
                             &project_root,
-                            tool_bin.as_ref(),
+                            tool_bin.as_deref(),
                             app,
                         )
                         .await;
@@ -534,7 +543,10 @@ async fn run_app(
                     if let Some(editor) = &mut app.editor {
                         let area = terminal.size()?;
                         let popup = ui::centered_rect(80, 80, area.into());
-                        let inner = popup.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+                        let inner = popup.inner(ratatui::layout::Margin {
+                            horizontal: 1,
+                            vertical: 1,
+                        });
                         editor.input(*key, &inner)?;
                     }
                 }
@@ -550,7 +562,10 @@ async fn run_app(
                     if let Some(editor) = &mut app.editor {
                         let area = terminal.size()?;
                         let popup = ui::centered_rect(80, 80, area.into());
-                        let inner = popup.inner(ratatui::layout::Margin { horizontal: 1, vertical: 1 });
+                        let inner = popup.inner(ratatui::layout::Margin {
+                            horizontal: 1,
+                            vertical: 1,
+                        });
                         editor.input(*key, &inner)?;
                     }
                 }

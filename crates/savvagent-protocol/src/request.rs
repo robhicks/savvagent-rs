@@ -101,7 +101,9 @@ impl CompleteRequest {
             model: model.into(),
             messages: vec![Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: prompt.into() }],
+                content: vec![ContentBlock::Text {
+                    text: prompt.into(),
+                }],
             }],
             system: None,
             tools: Vec::new(),
@@ -126,7 +128,10 @@ mod tests {
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["model"], "test-model");
         assert_eq!(v["max_tokens"], 64);
-        assert!(v.get("temperature").is_none(), "None fields must be omitted");
+        assert!(
+            v.get("temperature").is_none(),
+            "None fields must be omitted"
+        );
         assert!(v.get("tools").is_none(), "empty Vec fields must be omitted");
         let back: CompleteRequest = serde_json::from_value(v).unwrap();
         assert_eq!(back.messages.len(), 1);

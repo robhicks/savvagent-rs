@@ -90,7 +90,10 @@ impl ChannelEmitter {
 #[async_trait]
 impl StreamEmitter for ChannelEmitter {
     async fn emit(&self, event: StreamEvent) -> Result<(), EmitError> {
-        self.tx.send(event).await.map_err(|_| EmitError::Disconnected)
+        self.tx
+            .send(event)
+            .await
+            .map_err(|_| EmitError::Disconnected)
     }
 }
 

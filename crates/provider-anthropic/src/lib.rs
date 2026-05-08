@@ -101,7 +101,11 @@ impl AnthropicProviderBuilder {
             .https_only(self.base_url.starts_with("https://"))
             .build()
             .map_err(|e| BuildError::HttpClient(e.to_string()))?;
-        Ok(AnthropicProvider { http, api_key, base_url: self.base_url })
+        Ok(AnthropicProvider {
+            http,
+            api_key,
+            base_url: self.base_url,
+        })
     }
 }
 
@@ -150,13 +154,12 @@ impl ProviderHandler for AnthropicProvider {
             tracing::trace!(ok = out.is_ok(), "SSE consumer returned");
             out
         } else {
-            let raw: api::MessageResponse =
-                resp.json().await.map_err(|e| ProviderError {
-                    kind: ErrorKind::Internal,
-                    message: format!("failed to parse response body: {e}"),
-                    retry_after_ms: None,
-                    provider_code: None,
-                })?;
+            let raw: api::MessageResponse = resp.json().await.map_err(|e| ProviderError {
+                kind: ErrorKind::Internal,
+                message: format!("failed to parse response body: {e}"),
+                retry_after_ms: None,
+                provider_code: None,
+            })?;
             Ok(translate::response_from_anthropic(raw))
         }
     }
@@ -197,8 +200,7 @@ async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
     };
 
     let body = resp.text().await.unwrap_or_default();
-    let (message, provider_code) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body)
-    {
+    let (message, provider_code) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
         let msg = v
             .get("error")
             .and_then(|e| e.get("message"))
@@ -215,7 +217,12 @@ async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
         (body, None)
     };
 
-    ProviderError { kind, message, retry_after_ms, provider_code }
+    ProviderError {
+        kind,
+        message,
+        retry_after_ms,
+        provider_code,
+    }
 }
 
 /// Default endpoint path the Streamable HTTP server is mounted at.
@@ -229,7 +236,11 @@ pub const DEFAULT_MCP_PATH: &str = "/mcp";
 pub fn router(provider: Arc<AnthropicProvider>) -> axum::Router {
     let provider_for_factory = provider.clone();
     let service = StreamableHttpService::new(
-        move || Ok(AnthropicMcpServer::from_shared(provider_for_factory.clone())),
+        move || {
+            Ok(AnthropicMcpServer::from_shared(
+                provider_for_factory.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
@@ -260,8 +271,7 @@ pub async fn run() -> std::process::ExitCode {
 
     let listen =
         env::var("SAVVAGENT_ANTHROPIC_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
-    let base_url =
-        env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    let base_url = env::var("ANTHROPIC_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
 
     let provider = match AnthropicProvider::builder().base_url(base_url).build() {
         Ok(p) => Arc::new(p),
