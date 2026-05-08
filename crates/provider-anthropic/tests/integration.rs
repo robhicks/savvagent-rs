@@ -8,6 +8,12 @@
 //! - streaming `complete` with progress notifications + final result
 //! - frozen SSE fixture → expected SPP `StreamEvent` sequence
 
+// The streaming test (and its SSE fixture, Duration timeout, StreamEvent
+// imports, etc.) is `#[cfg]`-gated off on Windows pending issue #1, leaving
+// some of the helper plumbing technically dead there. Allow it on Windows
+// rather than scattering cfg attributes across every shared definition.
+#![cfg_attr(target_os = "windows", allow(unused_imports, dead_code))]
+
 use std::sync::Arc;
 use std::time::Duration;
 

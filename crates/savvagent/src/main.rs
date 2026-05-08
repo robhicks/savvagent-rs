@@ -480,30 +480,18 @@ async fn run_app(
             }
             InputMode::CommandPalette => match key.code {
                 KeyCode::Esc => app.input_mode = InputMode::Editing,
-                KeyCode::Up => {
-                    if app.command_index > 0 {
-                        app.command_index -= 1;
-                    }
-                }
-                KeyCode::Down => {
-                    if app.command_index + 1 < app.commands.len() {
-                        app.command_index += 1;
-                    }
+                KeyCode::Up if app.command_index > 0 => app.command_index -= 1,
+                KeyCode::Down if app.command_index + 1 < app.commands.len() => {
+                    app.command_index += 1
                 }
                 KeyCode::Enter => app.select_command(),
                 _ => {}
             },
             InputMode::SelectingProvider => match key.code {
                 KeyCode::Esc => app.input_mode = InputMode::Editing,
-                KeyCode::Up => {
-                    if app.provider_index > 0 {
-                        app.provider_index -= 1;
-                    }
-                }
-                KeyCode::Down => {
-                    if app.provider_index + 1 < PROVIDERS.len() {
-                        app.provider_index += 1;
-                    }
+                KeyCode::Up if app.provider_index > 0 => app.provider_index -= 1,
+                KeyCode::Down if app.provider_index + 1 < PROVIDERS.len() => {
+                    app.provider_index += 1
                 }
                 KeyCode::Enter => {
                     let idx = app.provider_index;
