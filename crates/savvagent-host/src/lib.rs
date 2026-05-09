@@ -26,7 +26,10 @@ mod session;
 mod tools;
 
 pub use config::{HostConfig, ProviderEndpoint, ToolEndpoint};
-pub use permissions::{PermissionDecision, PermissionPolicy, Verdict};
+pub use permissions::{
+    ArgPattern, FrontMatterPermissions, PermissionDecision, PermissionPolicy, PermissionsToml,
+    Rule, SerializableRule, Verdict,
+};
 pub use savvagent_protocol::ToolDef;
 pub use session::{Host, HostError, ToolCall, ToolCallStatus, TurnEvent, TurnOutcome};
 

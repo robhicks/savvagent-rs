@@ -136,6 +136,10 @@ pub struct Host {
     tools: Mutex<Option<ToolRegistry>>,
     state: Mutex<SessionState>,
     system_prompt: Option<String>,
+    /// Layered permission policy: sensitive-path floor + SAVVAGENT.md
+    /// front-matter rules + persisted Always/Never rules from
+    /// `~/.savvagent/permissions.toml` + built-in defaults. See the
+    /// `permissions` module docs.
     policy: PermissionPolicy,
     /// Outstanding permission requests. Inserted when the loop emits
     /// `PermissionRequested`; the matching `oneshot` is consumed by
@@ -143,20 +147,6 @@ pub struct Host {
     pending: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
     /// Monotonic source for permission-request ids.
     next_request_id: AtomicU64,
-    /// Session-scoped Always/Never decisions. Checked before the policy on
-    /// every tool call. Strict equality on `(tool_name, exact-args JSON)` —
-    /// PR 4 (M9) replaces the args side with a normalized pattern + adds
-    /// disk persistence at `~/.savvagent/permissions.toml`.
-    session_rules: Mutex<Vec<SessionRule>>,
-}
-
-/// One in-memory permission decision the user persisted via Always/Never in
-/// the modal. Lives for the lifetime of this `Host`.
-#[derive(Debug, Clone)]
-struct SessionRule {
-    tool_name: String,
-    args_signature: String,
-    decision: PermissionDecision,
 }
 
 struct SessionState {
@@ -190,7 +180,6 @@ impl Host {
             policy,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
-            session_rules: Mutex::new(Vec::new()),
         })
     }
 
@@ -220,7 +209,6 @@ impl Host {
             policy,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
-            session_rules: Mutex::new(Vec::new()),
         })
     }
 
@@ -499,27 +487,26 @@ impl Host {
         }
     }
 
-    /// Persist an Always/Never decision for the rest of this session.
+    /// Persist a user-recorded Always/Never decision via the policy.
     ///
-    /// Keyed strictly on `(tool_name, exact-args JSON)`. A second user-typed
-    /// `bash run "ls -la"` with different args won't match a rule recorded
-    /// for `bash run "ls"` — that's the safe-by-default behavior for PR 2.
-    /// PR 4 introduces normalized arg patterns and disk persistence at
-    /// `~/.savvagent/permissions.toml`.
+    /// Builds an [`crate::permissions::ArgPattern`] from `(tool_name, args)`
+    /// and writes through to `~/.savvagent/permissions.toml`. Subsequent
+    /// matching calls — in this session and future ones — short-circuit
+    /// the modal. I/O errors are logged but not surfaced; the in-memory
+    /// rule update still wins immediately.
     pub async fn add_session_rule(
         &self,
         tool_name: &str,
         args: &Value,
         decision: PermissionDecision,
     ) {
-        let signature = serde_json::to_string(args).unwrap_or_default();
-        let mut rules = self.session_rules.lock().await;
-        rules.retain(|r| !(r.tool_name == tool_name && r.args_signature == signature));
-        rules.push(SessionRule {
-            tool_name: tool_name.to_string(),
-            args_signature: signature,
-            decision,
-        });
+        if let Err(e) = self.policy.add_rule(tool_name, args, decision).await {
+            tracing::warn!(
+                tool = tool_name,
+                error = %e,
+                "failed to persist permission rule to ~/.savvagent/permissions.toml",
+            );
+        }
     }
 
     /// Snapshot of every tool advertised by the connected tool servers, in
@@ -549,23 +536,6 @@ impl Host {
         input: &Value,
         events: Option<&mpsc::Sender<TurnEvent>>,
     ) -> Result<(), String> {
-        // Session-scoped Always/Never decisions short-circuit the policy.
-        let signature = serde_json::to_string(input).unwrap_or_default();
-        let session_decision = {
-            let rules = self.session_rules.lock().await;
-            rules
-                .iter()
-                .find(|r| r.tool_name == name && r.args_signature == signature)
-                .map(|r| r.decision)
-        };
-        match session_decision {
-            Some(PermissionDecision::Allow) => return Ok(()),
-            Some(PermissionDecision::Deny) => {
-                return Err("denied by session rule".into());
-            }
-            None => {}
-        }
-
         match self.policy.evaluate(name, input) {
             Verdict::Allow => Ok(()),
             Verdict::Deny { reason } => Err(reason),
@@ -710,13 +680,17 @@ mod policy_tests {
     }
 
     fn config_no_tools() -> HostConfig {
+        let project_root = std::env::temp_dir().join("savvagent-policy-test");
         HostConfig::new(
             ProviderEndpoint::StreamableHttp {
                 url: "inproc://test".into(),
             },
             "test-model".to_string(),
         )
-        .with_project_root(std::env::temp_dir().join("savvagent-policy-test"))
+        .with_project_root(project_root.clone())
+        // Use a transient (in-memory only) policy so tests don't touch the
+        // real `~/.savvagent/permissions.toml`.
+        .with_policy(PermissionPolicy::transient(project_root))
     }
 
     /// `read_file` against `.env` is a default-Deny — host must synthesize an
@@ -809,8 +783,11 @@ mod policy_tests {
         );
     }
 
-    /// A pre-registered session rule short-circuits the policy: the modal
-    /// never fires and `gate_tool_call` returns the rule's decision.
+    /// A pre-registered Always rule short-circuits the policy: the modal
+    /// never fires and `gate_tool_call` returns the rule's decision. After
+    /// M9 PR 4 the rule is keyed on a normalized [`ArgPattern`] (here:
+    /// command first-word `echo`) and stored in the policy's `toml_rules`
+    /// layer — disk I/O is suppressed because the test policy is transient.
     #[tokio::test]
     async fn session_rule_short_circuits_policy() {
         let provider: Box<dyn ProviderClient + Send + Sync> =
@@ -818,7 +795,6 @@ mod policy_tests {
         let host = Host::with_components(config_no_tools(), provider)
             .await
             .unwrap();
-        // Pre-record an Always-Allow for this exact (tool, args).
         host.add_session_rule(
             "run",
             &json!({"command": "echo hi"}),
