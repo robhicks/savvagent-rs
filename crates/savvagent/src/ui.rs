@@ -11,9 +11,16 @@ use savvagent_host::ToolCallStatus;
 
 use crate::app::{App, Entry, InputMode};
 use crate::providers::PROVIDERS;
+use crate::splash;
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
+
+    if app.show_splash {
+        splash::render(frame, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -72,6 +79,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         Some(p) => format!(" · transcript: {}", p.display()),
         None => String::new(),
     };
+    let version_text = format!("v{} ", env!("CARGO_PKG_VERSION"));
+    let metrics_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(version_text.len() as u16),
+        ])
+        .split(chunks[4]);
     let metrics = Paragraph::new(format!(
         " ctx≈{} tokens · entries: {}{}",
         app.context_size,
@@ -79,7 +94,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         transcript_label
     ))
     .style(Style::default().fg(Color::Blue));
-    frame.render_widget(metrics, chunks[4]);
+    frame.render_widget(metrics, metrics_chunks[0]);
+    let version = Paragraph::new(Line::from(version_text).right_aligned())
+        .style(Style::default().fg(Color::Blue));
+    frame.render_widget(version, metrics_chunks[1]);
 
     if app.is_file_picker_active {
         let popup = centered_rect(60, 40, area);
@@ -218,6 +236,47 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             )
             .highlight_symbol("> ");
         frame.render_widget(list, popup);
+    }
+
+    if matches!(app.input_mode, InputMode::PermissionPrompt) {
+        if let Some(req) = &app.pending_permission {
+            let popup = centered_rect(60, 40, area);
+            frame.render_widget(Clear, popup);
+
+            let args_pretty = serde_json::to_string_pretty(&req.args)
+                .unwrap_or_else(|_| req.args.to_string());
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            lines.push(Line::from(Span::styled(
+                format!("Tool: {}", req.name),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                req.summary.clone(),
+                Style::default().fg(Color::White),
+            )));
+            lines.push(Line::from(""));
+            for line in args_pretty.lines() {
+                lines.push(Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+
+            let body = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Permission requested ")
+                    .title_bottom(
+                        Line::from(
+                            " [y] allow  [n] deny  [a] always  [N] never  [Esc] deny ",
+                        )
+                        .right_aligned(),
+                    ),
+            );
+            frame.render_widget(body, popup);
+        }
     }
 
     if matches!(app.input_mode, InputMode::EnteringApiKey) {

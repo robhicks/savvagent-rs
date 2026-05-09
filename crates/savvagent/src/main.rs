@@ -21,6 +21,7 @@
 mod app;
 mod creds;
 mod providers;
+mod splash;
 mod tui;
 mod ui;
 
@@ -158,15 +159,30 @@ async fn bootstrap_host(
     None
 }
 
-/// Build a host whose `ProviderClient` is an [`InProcessProviderClient`].
+/// Build a host whose `ProviderClient` is an [`InProcessProviderClient`],
+/// using the per-provider default (or `SAVVAGENT_MODEL` env override) as
+/// the model id.
 async fn build_in_process_host(
     spec: &'static ProviderSpec,
     api_key: &str,
     project_root: &Path,
     tool_bin: Option<&Path>,
 ) -> Result<Arc<Host>> {
-    let handler = (spec.build)(api_key).with_context(|| format!("building {} handler", spec.id))?;
     let model = std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| spec.default_model.to_string());
+    build_in_process_host_with_model(spec, api_key, project_root, tool_bin, model).await
+}
+
+/// Same as [`build_in_process_host`] but with an explicit `model` id —
+/// used by `/model <id>` to reconnect against the same provider with a
+/// different model.
+async fn build_in_process_host_with_model(
+    spec: &'static ProviderSpec,
+    api_key: &str,
+    project_root: &Path,
+    tool_bin: Option<&Path>,
+    model: String,
+) -> Result<Arc<Host>> {
+    let handler = (spec.build)(api_key).with_context(|| format!("building {} handler", spec.id))?;
     let client: Box<dyn ProviderClient + Send + Sync> =
         Box::new(InProcessProviderClient::new(handler));
     // The endpoint variant is a placeholder when we hand the host a
@@ -283,11 +299,37 @@ async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Run a slash command and apply its side effects (transcript save for
-/// `/save`). Used both when the user types `/foo` + Enter and when they pick
-/// a no-arg command from the palette.
-async fn dispatch_slash_command(app: &mut App, cmd: &str, host_slot: &HostSlot) {
-    let was_save = cmd.trim_start() == "/save";
+/// Run a slash command and apply its side effects. Used both when the user
+/// types `/foo` + Enter and when they pick a no-arg command from the
+/// palette. Commands that need direct host access (`/tools`, `/model`,
+/// `/save`) are dispatched here; the rest fall through to
+/// [`App::handle_command`].
+async fn dispatch_slash_command(
+    app: &mut App,
+    cmd: &str,
+    host_slot: &HostSlot,
+    project_root: &Path,
+    tool_bin: Option<&Path>,
+) {
+    let trimmed = cmd.trim_start();
+    let (head, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((h, r)) => (h, r.trim()),
+        None => (trimmed, ""),
+    };
+
+    match head {
+        "/tools" => {
+            show_tools(app, host_slot).await;
+            return;
+        }
+        "/model" => {
+            handle_model_command(app, rest, host_slot, project_root, tool_bin).await;
+            return;
+        }
+        _ => {}
+    }
+
+    let was_save = trimmed == "/save";
     app.handle_command(cmd);
     if was_save {
         if let Some(host) = current_host(host_slot).await {
@@ -303,6 +345,123 @@ async fn dispatch_slash_command(app: &mut App, cmd: &str, host_slot: &HostSlot) 
             app.push_note("Not connected — nothing to save.");
         }
     }
+}
+
+/// Render `/tools` output: one note per registered tool, with the policy's
+/// no-args verdict as a coarse hint.
+async fn show_tools(app: &mut App, host_slot: &HostSlot) {
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note("Not connected — no tools to list.");
+        return;
+    };
+    let defs = host.tool_defs().await;
+    if defs.is_empty() {
+        app.push_note("No tools registered.");
+        return;
+    }
+    app.push_note(format!("{} tool(s):", defs.len()));
+    for def in &defs {
+        let verdict = host.default_verdict_for(&def.name);
+        let label = match verdict {
+            savvagent_host::Verdict::Allow => "allow",
+            savvagent_host::Verdict::Ask { .. } => "ask",
+            savvagent_host::Verdict::Deny { .. } => "deny",
+        };
+        let desc = if def.description.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", def.description)
+        };
+        app.push_note(format!("  [{label}] {}{}", def.name, desc));
+    }
+}
+
+/// `/model` (no args) shows the current model. `/model <id>` reconnects
+/// the active provider with the new id (optimistic — provider rejects at
+/// first turn if invalid).
+async fn handle_model_command(
+    app: &mut App,
+    rest: &str,
+    host_slot: &HostSlot,
+    project_root: &Path,
+    tool_bin: Option<&Path>,
+) {
+    if rest.is_empty() {
+        match app.active_provider_id {
+            Some(id) => app.push_note(format!("Current model: {}:{}", id, app.model)),
+            None => app.push_note(format!("Current model: {} (not connected)", app.model)),
+        }
+        return;
+    }
+
+    let new_model = rest.to_string();
+    let Some(spec_id) = app.active_provider_id else {
+        app.push_note("Not connected — `/connect` first, then `/model <id>`.");
+        return;
+    };
+    let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) else {
+        app.push_note(format!("Unknown active provider: {spec_id}"));
+        return;
+    };
+    let key = match creds::load(spec.id) {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            app.push_note("No saved key for the active provider — `/connect` first.");
+            return;
+        }
+        Err(e) => {
+            app.push_note(format!("Keyring error: {e}"));
+            return;
+        }
+    };
+
+    perform_model_change(spec, &key, new_model, host_slot, project_root, tool_bin, app).await;
+}
+
+/// Rebuild the host with `new_model` against the same provider + key, swap
+/// the host slot atomically, and clear conversation state (turn ids from
+/// the old session would dangle otherwise).
+async fn perform_model_change(
+    spec: &'static ProviderSpec,
+    api_key: &str,
+    new_model: String,
+    host_slot: &HostSlot,
+    project_root: &Path,
+    tool_bin: Option<&Path>,
+    app: &mut App,
+) {
+    app.push_note(format!("Switching to {}…", new_model));
+    let host = match build_in_process_host_with_model(
+        spec,
+        api_key,
+        project_root,
+        tool_bin,
+        new_model.clone(),
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            app.push_note(format!("Model switch failed: {e:#}"));
+            return;
+        }
+    };
+
+    let old = {
+        let mut guard = host_slot.write().await;
+        guard.replace(host)
+    };
+    if let Some(old) = old {
+        tokio::spawn(async move { old.shutdown().await });
+    }
+    if let Some(host) = current_host(host_slot).await {
+        host.clear_history().await;
+    }
+    app.entries.clear();
+    app.live_text.clear();
+    app.update_metrics();
+    app.model = new_model;
+    app.push_note(format!("Model is now {}.", app.model));
 }
 
 /// Persist the key, build the in-process handler, swap the host.
@@ -405,6 +564,11 @@ async fn run_app(
             return Ok(());
         }
 
+        if app.show_splash {
+            app.show_splash = false;
+            continue;
+        }
+
         match app.input_mode {
             InputMode::Editing => {
                 if app.is_file_picker_active {
@@ -434,7 +598,14 @@ async fn run_app(
                             }
                             if value.starts_with('/') {
                                 app.input_textarea = TextArea::default();
-                                dispatch_slash_command(app, &value, &host_slot).await;
+                                dispatch_slash_command(
+                                    app,
+                                    &value,
+                                    &host_slot,
+                                    &project_root,
+                                    tool_bin.as_deref(),
+                                )
+                                .await;
                                 continue;
                             }
                             let Some(host) = current_host(&host_slot).await else {
@@ -450,20 +621,11 @@ async fn run_app(
                             tokio::spawn(async move {
                                 let (ev_tx, mut ev_rx) = mpsc::channel(64);
                                 let host_for_run = host.clone();
-                                let host_for_resolve = host.clone();
                                 let prompt = value;
                                 let runner = tokio::spawn(async move {
                                     host_for_run.run_turn_streaming(prompt, ev_tx).await
                                 });
                                 while let Some(ev) = ev_rx.recv().await {
-                                    // M9 PR 1: auto-allow every Ask. PR 2 will
-                                    // replace this with a modal that prompts
-                                    // the user before resolving.
-                                    if let TurnEvent::PermissionRequested { id, .. } = &ev {
-                                        host_for_resolve
-                                            .resolve_permission(*id, PermissionDecision::Allow)
-                                            .await;
-                                    }
                                     if tx.send(WorkerMsg::Event(ev)).await.is_err() {
                                         break;
                                     }
@@ -517,7 +679,14 @@ async fn run_app(
                 }
                 KeyCode::Enter => {
                     if let Some(CommandSelection::Execute(cmd)) = app.select_command() {
-                        dispatch_slash_command(app, &cmd, &host_slot).await;
+                        dispatch_slash_command(
+                            app,
+                            &cmd,
+                            &host_slot,
+                            &project_root,
+                            tool_bin.as_deref(),
+                        )
+                        .await;
                     }
                 }
                 KeyCode::Backspace => {
@@ -632,6 +801,53 @@ async fn run_app(
                     }
                 }
             },
+            InputMode::PermissionPrompt => {
+                let action = match key.code {
+                    KeyCode::Char('y') => Some((PermissionDecision::Allow, false)),
+                    KeyCode::Char('n') | KeyCode::Esc => Some((PermissionDecision::Deny, false)),
+                    KeyCode::Char('a') => Some((PermissionDecision::Allow, true)),
+                    KeyCode::Char('N') => Some((PermissionDecision::Deny, true)),
+                    _ => None,
+                };
+                if let Some((decision, persist)) = action {
+                    resolve_pending_permission(app, &host_slot, decision, persist).await;
+                }
+            }
         }
     }
+}
+
+/// Pop the pending permission off the app and resolve it on the active
+/// host. With `persist = true`, also records a session rule so future
+/// requests with identical args short-circuit the modal.
+async fn resolve_pending_permission(
+    app: &mut App,
+    host_slot: &HostSlot,
+    decision: PermissionDecision,
+    persist: bool,
+) {
+    let Some(req) = app.pending_permission.take() else {
+        app.input_mode = InputMode::Editing;
+        return;
+    };
+    let host = current_host(host_slot).await;
+    if let Some(host) = &host {
+        if persist {
+            host.add_session_rule(&req.name, &req.args, decision).await;
+        }
+        host.resolve_permission(req.id, decision).await;
+    } else {
+        // Host swapped while modal was up — the old host's gate will return
+        // Err on its dropped oneshot, which is the cleanup path. Nothing
+        // for us to do here.
+    }
+    app.input_mode = InputMode::Editing;
+
+    let label = match (decision, persist) {
+        (PermissionDecision::Allow, false) => "allowed once",
+        (PermissionDecision::Allow, true) => "always allowed (this session)",
+        (PermissionDecision::Deny, false) => "denied",
+        (PermissionDecision::Deny, true) => "always denied (this session)",
+    };
+    app.push_note(format!("{}: {label}", req.name));
 }

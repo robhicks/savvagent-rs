@@ -27,6 +27,22 @@ pub enum InputMode {
     SelectingProvider,
     /// API-key input — second step of `/connect`. Masked.
     EnteringApiKey,
+    /// Tool-permission modal up; the turn loop is paused on a `oneshot`.
+    PermissionPrompt,
+}
+
+/// Snapshot of a pending [`TurnEvent::PermissionRequested`] used to render
+/// the modal and resolve the host's outstanding `oneshot`.
+#[derive(Debug, Clone)]
+pub struct PendingPermission {
+    /// Opaque host-side request id; pass back to `Host::resolve_permission`.
+    pub id: u64,
+    /// Tool the model wants to invoke.
+    pub name: String,
+    /// Short human-readable summary from the policy.
+    pub summary: String,
+    /// Full argument JSON, rendered (truncated) below the summary.
+    pub args: Value,
 }
 
 /// One row in the conversation log.
@@ -114,6 +130,15 @@ pub struct App {
     pub api_key_textarea: TextArea<'static>,
     /// Provider chosen in the selector and being keyed in now.
     pub pending_provider: Option<&'static ProviderSpec>,
+
+    /// Whether the startup splash banner is still being shown. Cleared on the
+    /// first key press the main loop sees (any key, including modifiers).
+    pub show_splash: bool,
+
+    /// Active permission request, if the host is paused on a `oneshot`. Set
+    /// when `TurnEvent::PermissionRequested` arrives, cleared when the user
+    /// answers the modal.
+    pub pending_permission: Option<PendingPermission>,
 }
 
 impl App {
@@ -166,6 +191,8 @@ impl App {
             provider_index: 0,
             api_key_textarea: TextArea::default(),
             pending_provider: None,
+            show_splash: true,
+            pending_permission: None,
         };
         app.refresh_commands();
         app
@@ -208,9 +235,20 @@ impl App {
                     *p = Some(truncate(&result, 240));
                 }
             }
-            TurnEvent::PermissionRequested { .. } => {
-                // PR 1: the worker auto-allows; nothing visible. PR 2 replaces
-                // this with a modal driven from a dedicated InputMode.
+            TurnEvent::PermissionRequested {
+                id,
+                name,
+                summary,
+                args,
+            } => {
+                self.flush_live_text();
+                self.pending_permission = Some(PendingPermission {
+                    id,
+                    name,
+                    summary,
+                    args,
+                });
+                self.input_mode = InputMode::PermissionPrompt;
             }
             TurnEvent::ToolCallDenied { name, reason } => {
                 self.flush_live_text();
@@ -304,6 +342,16 @@ impl App {
                 name: "/edit".into(),
                 description: "Edit a file".into(),
                 needs_arg: true,
+            },
+            Command {
+                name: "/tools".into(),
+                description: "List registered tools and their default permission verdict".into(),
+                needs_arg: false,
+            },
+            Command {
+                name: "/model".into(),
+                description: "Show the current model (or `/model <id>` to switch)".into(),
+                needs_arg: false,
             },
             Command {
                 name: "/quit".into(),
@@ -673,5 +721,20 @@ mod tests {
         app.palette_push_char('c');
         assert!(app.palette_pop_char());
         assert!(!app.palette_pop_char());
+    }
+
+    #[test]
+    fn permission_request_enters_prompt_mode() {
+        let mut app = fresh_app();
+        app.apply_turn_event(TurnEvent::PermissionRequested {
+            id: 42,
+            name: "run".into(),
+            summary: "run: ls".into(),
+            args: serde_json::json!({"command": "ls"}),
+        });
+        assert!(matches!(app.input_mode, InputMode::PermissionPrompt));
+        let req = app.pending_permission.expect("pending should be set");
+        assert_eq!(req.id, 42);
+        assert_eq!(req.name, "run");
     }
 }

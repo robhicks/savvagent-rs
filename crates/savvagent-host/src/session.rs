@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use savvagent_mcp::ProviderClient;
 use savvagent_protocol::{
     BlockDelta, CompleteRequest, ContentBlock, Message, ProviderError, Role, StopReason,
-    StreamEvent,
+    StreamEvent, ToolDef,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -143,6 +143,20 @@ pub struct Host {
     pending: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
     /// Monotonic source for permission-request ids.
     next_request_id: AtomicU64,
+    /// Session-scoped Always/Never decisions. Checked before the policy on
+    /// every tool call. Strict equality on `(tool_name, exact-args JSON)` —
+    /// PR 4 (M9) replaces the args side with a normalized pattern + adds
+    /// disk persistence at `~/.savvagent/permissions.toml`.
+    session_rules: Mutex<Vec<SessionRule>>,
+}
+
+/// One in-memory permission decision the user persisted via Always/Never in
+/// the modal. Lives for the lifetime of this `Host`.
+#[derive(Debug, Clone)]
+struct SessionRule {
+    tool_name: String,
+    args_signature: String,
+    decision: PermissionDecision,
 }
 
 struct SessionState {
@@ -176,6 +190,7 @@ impl Host {
             policy,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
+            session_rules: Mutex::new(Vec::new()),
         })
     }
 
@@ -205,6 +220,7 @@ impl Host {
             policy,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
+            session_rules: Mutex::new(Vec::new()),
         })
     }
 
@@ -483,6 +499,45 @@ impl Host {
         }
     }
 
+    /// Persist an Always/Never decision for the rest of this session.
+    ///
+    /// Keyed strictly on `(tool_name, exact-args JSON)`. A second user-typed
+    /// `bash run "ls -la"` with different args won't match a rule recorded
+    /// for `bash run "ls"` — that's the safe-by-default behavior for PR 2.
+    /// PR 4 introduces normalized arg patterns and disk persistence at
+    /// `~/.savvagent/permissions.toml`.
+    pub async fn add_session_rule(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        decision: PermissionDecision,
+    ) {
+        let signature = serde_json::to_string(args).unwrap_or_default();
+        let mut rules = self.session_rules.lock().await;
+        rules.retain(|r| !(r.tool_name == tool_name && r.args_signature == signature));
+        rules.push(SessionRule {
+            tool_name: tool_name.to_string(),
+            args_signature: signature,
+            decision,
+        });
+    }
+
+    /// Snapshot of every tool advertised by the connected tool servers, in
+    /// the order they were registered. Used by the TUI's `/tools` command.
+    pub async fn tool_defs(&self) -> Vec<ToolDef> {
+        let guard = self.tools.lock().await;
+        guard.as_ref().map(|t| t.defs.clone()).unwrap_or_default()
+    }
+
+    /// What the policy would return for `tool_name` with empty arguments —
+    /// a coarse "verdict at a glance" used by the TUI's `/tools` listing.
+    /// Path-conditional verdicts (e.g. `write_file`) collapse to the
+    /// no-path branch, which is intentionally the more conservative choice.
+    pub fn default_verdict_for(&self, tool_name: &str) -> Verdict {
+        self.policy
+            .evaluate(tool_name, &Value::Object(serde_json::Map::new()))
+    }
+
     /// Run policy against `(name, input)` and either return `Ok(())` (caller
     /// proceeds with the call) or `Err(reason)` (caller synthesizes a denied
     /// `tool_result`). For [`Verdict::Ask`], emits a
@@ -494,6 +549,23 @@ impl Host {
         input: &Value,
         events: Option<&mpsc::Sender<TurnEvent>>,
     ) -> Result<(), String> {
+        // Session-scoped Always/Never decisions short-circuit the policy.
+        let signature = serde_json::to_string(input).unwrap_or_default();
+        let session_decision = {
+            let rules = self.session_rules.lock().await;
+            rules
+                .iter()
+                .find(|r| r.tool_name == name && r.args_signature == signature)
+                .map(|r| r.decision)
+        };
+        match session_decision {
+            Some(PermissionDecision::Allow) => return Ok(()),
+            Some(PermissionDecision::Deny) => {
+                return Err("denied by session rule".into());
+            }
+            None => {}
+        }
+
         match self.policy.evaluate(name, input) {
             Verdict::Allow => Ok(()),
             Verdict::Deny { reason } => Err(reason),
@@ -735,6 +807,40 @@ mod policy_tests {
             "expected dispatch to reach registry, got: {}",
             call.result
         );
+    }
+
+    /// A pre-registered session rule short-circuits the policy: the modal
+    /// never fires and `gate_tool_call` returns the rule's decision.
+    #[tokio::test]
+    async fn session_rule_short_circuits_policy() {
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("run", json!({"command": "echo hi"})));
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+        // Pre-record an Always-Allow for this exact (tool, args).
+        host.add_session_rule(
+            "run",
+            &json!({"command": "echo hi"}),
+            PermissionDecision::Allow,
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let outcome = host.run_turn_streaming("hi", tx).await.unwrap();
+
+        let mut saw_permission = false;
+        while let Some(ev) = rx.recv().await {
+            if matches!(ev, TurnEvent::PermissionRequested { .. }) {
+                saw_permission = true;
+            }
+        }
+        assert!(
+            !saw_permission,
+            "session rule should suppress PermissionRequested"
+        );
+        // Allow lets the call reach the empty registry → "unknown tool".
+        assert!(outcome.tool_calls[0].result.contains("unknown tool"));
     }
 
     /// `non-streaming` `run_turn` has no event channel, so any Ask collapses

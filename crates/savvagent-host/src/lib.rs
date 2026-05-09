@@ -27,6 +27,7 @@ mod tools;
 
 pub use config::{HostConfig, ProviderEndpoint, ToolEndpoint};
 pub use permissions::{PermissionDecision, PermissionPolicy, Verdict};
+pub use savvagent_protocol::ToolDef;
 pub use session::{Host, HostError, ToolCall, ToolCallStatus, TurnEvent, TurnOutcome};
 
 #[doc(hidden)]
