@@ -184,7 +184,7 @@ See `crates/savvagent-protocol/SPEC.md` for the complete spec and JSON schemas.
 
 ## 7. Milestones
 
-M1–M6 are shipped (v0.1.0). M7 (v0.2.0) and M8 (v0.3.0) added Layer-1 path containment and the `/`-palette; **M9 is the proposed v0.4.0 milestone** focused on Layer-2 permissions plus `tool-bash`.
+M1–M9 are shipped. M7 (v0.2.0) added Layer-1 path containment, M8 (v0.3.0) the `/`-palette, M9 (v0.4.0) Layer-2 permissions + `tool-bash` + the `/tools`/`/model` introspection commands. Sandboxing, additional providers, and session resume remain on the v0.5+ backlog.
 
 ### M1 · Protocol & traits (✅ done)
 - `savvagent-protocol` v0.1.0 with round-trip tests.
@@ -222,41 +222,20 @@ M1–M6 are shipped (v0.1.0). M7 (v0.2.0) and M8 (v0.3.0) added Layer-1 path con
 - Typing `/` opens a command palette with live prefix filtering; previously the only entry points were typing the full command or pressing `Ctrl-P`.
 - `/clear` resets per-turn history without dropping the active provider connection.
 
-### M9 · v0.4.0 — Tool permissions + `tool-bash` + introspection (proposed)
+### M9 · v0.4.0 — Tool permissions + `tool-bash` + introspection (✅ done)
 
-**Theme.** Close the highest-priority §9 follow-up (Layer-2 permission prompts), then introduce `tool-bash` so the host has a meaningful target for the new gating, and round out the TUI's introspection commands. Layer-3 OS sandboxing, additional providers, and session resume are explicitly deferred to v0.5.0+.
+Closed the highest-priority §9 follow-up (Layer-2 permission prompts), shipped `tool-bash` as the first meaningful gating target, and rounded out the TUI with `/tools` and `/model` introspection commands.
 
-**Why this bundle.** Permissions, `tool-bash`, and the new introspection commands are mutually load-bearing: shipping `tool-bash` without gating would regress safety; shipping permissions without `tool-bash` leaves `read_file` / `write_file` as the only enforcement surface (and they're already mostly `allow`). `/tools` and `/model` are the commands users will reach for once tool gating exists, so they belong in the same release.
+**Delivered across four independently-reviewable PRs:**
 
-**Scope (acceptance criteria).**
+- **PR 1 — host-only foundation.** `permissions.rs` with `Verdict { Allow, Ask, Deny }`, `PermissionDecision`, `Host::resolve_permission`, `TurnEvent::PermissionRequested` / `ToolCallDenied`. The `tools` Mutex is released *before* the oneshot await per the §5.3 CLAUDE.md "never hold a lock across awaits" pattern. The TUI auto-allowed every Ask in this PR so behavior stayed at parity with v0.3 until PR 2 wired the modal.
+- **PR 2 — TUI surface.** `InputMode::PermissionPrompt`, the modal (`y` allow / `n` deny / `a` always / `N` never / Esc deny), `/tools` listing tools with `[allow|ask|deny]` badges, `/model` showing current and `/model <id>` reconnecting via the existing host-swap path with optimistic validation. PR 2 also bundled the user-iterated startup splash banner.
+- **PR 3 — `tool-bash`.** New `crates/tool-bash` stdio MCP server with `run { command, cwd?, timeout_ms? }`, structured `{ exit_code, stdout, stderr, elapsed_ms, *_truncated, timed_out }` output, default 30 s timeout (5 min cap), 1 MiB per-stream output cap, Layer-1 `cwd` containment via `SAVVAGENT_TOOL_BASH_ROOT`. **No in-tool allowlist** — every invocation flows through the host's `bash: ask` default. The TUI's single `tool_bin: Option<&Path>` argument became a `ToolBins { fs, bash }` struct so future tool servers plug in by adding a field.
+- **PR 4 — layered config + persistence.** `ArgPattern { Any, Path, Command }` replaces PR 2's strict-equality session rules. `Path` patterns match component-wise via `Path::starts_with` (so an editing pass on `permissions.toml` from `src/lib.rs` to `src` generalizes correctly); `Command` patterns match the first whitespace-separated token of `args["command"]`. `evaluate` walks four sources and returns the first match: sensitive-path floor → `SAVVAGENT.md` front-matter → `~/.savvagent/permissions.toml` → built-in defaults. Within a source, first match wins (firewall semantics — place more-specific deny entries above more-general allow entries). `add_rule` writes through to disk so Always/Never decisions persist across sessions. Front-matter parsed via `serde_yaml_ng` + a manual `---` splitter (no `gray_matter` dep), with silent fallback on parse error.
 
-1. **`permissions.rs` in `savvagent-host`** — new module exposing `Verdict { Allow, Ask, Deny }` and `PermissionPolicy::evaluate(tool_name, args) -> Verdict`. Layered sources, highest precedence first:
-   1. CLI / `HostConfig::with_permission_overrides`
-   2. `SAVVAGENT.md` YAML front-matter (new — adds front-matter parsing to `project.rs`)
-   3. `~/.savvagent/permissions.toml`
-   4. Built-in defaults: `read_file: allow`, `write_file: allow` inside `project_root` and `ask` outside, `bash: ask` always, paths under `.env` / `~/.ssh`: `deny`.
-2. **Turn-loop integration in `session.rs`** — `Host::run_turn_streaming` consults `policy.evaluate` before every `ToolRegistry::call`:
-   - `Allow` proceeds unchanged.
-   - `Deny` synthesizes a `tool_result` with `is_error: true` and a "denied by policy" payload; emits `TurnEvent::ToolCallDenied { name, reason }`.
-   - `Ask` emits `TurnEvent::PermissionRequested { id, name, summary, args }` and awaits a matching `Host::resolve_permission(id, decision)` via a `oneshot`. Constraint: the `tools` Mutex must be released *before* the await — see CLAUDE.md "never hold a lock across awaits."
-3. **TUI permission modal** in `app.rs` / `ui.rs` — new `Mode::PermissionPrompt { id, request }` pauses input and renders the request (tool, summary, expandable args). Keys: `y` allow once, `n` deny once, `a` always (persists to `~/.savvagent/permissions.toml`), `N` never (same), `Esc` deny.
-4. **`crates/tool-bash`** — new stdio MCP server mirroring `tool-fs`'s layout. One tool, `run { command, cwd?, timeout_ms? }` (default 30 s), returning structured `{ exit_code, stdout, stderr, elapsed_ms }`. Layer 1 containment via `SAVVAGENT_TOOL_BASH_ROOT` (host sets it to `project_root`). **No allowlist in the tool itself** — gating is the host's job. Bin: `savvagent-tool-bash`, located via `$PATH` or `SAVVAGENT_TOOL_BASH_BIN`, registered in `crates/savvagent/src/main.rs`.
-5. **`/tools` and `/model` slash commands** — `/tools` lists registered tools (name + description from `tools/list`) and their current permission verdict. `/model` (no args) shows the current `provider:model`; `/model <id>` triggers a **reconnect through the existing host-swap path** (`Arc<RwLock<Option<Arc<Host>>>>`, same as `/connect` minus the credential prompt) with the new model. Validation is optimistic — the provider rejects at first turn if the id is wrong, with a clear error. Wiring the optional SPP `list_models` tool everywhere is *not* part of M9; it can ship later as an independent cleanup that upgrades `/model` from optimistic to validated. Both commands join the `/` palette.
-6. **No SPP changes** — permissions are host↔TUI only and do not traverse the provider wire. SPEC.md gets a one-line non-impact note.
+**Inviolable security floor.** `.env*` files and any path under `.ssh/` always return `Deny`, even when an explicit `allow` rule appears in front-matter or `permissions.toml`. Verified by a dedicated permissions test.
 
-**Delivery (sequencing).** Four PRs, each independently reviewable:
-- **PR 1 — host-only foundation.** `permissions.rs`, `TurnEvent::PermissionRequested` / `ToolCallDenied`, `Host::resolve_permission`. TUI temporarily auto-allows every Ask so behavior stays at parity with v0.3.
-- **PR 2 — TUI surface.** Permission modal, `/tools`, `/model`. Defaults from PR 1 are now actually enforceable end-to-end.
-- **PR 3 — `tool-bash`.** New crate + register in TUI `main.rs`; `bash: ask` default puts every invocation through the modal.
-- **PR 4 — layered config.** `SAVVAGENT.md` front-matter parsing via a ~20-LOC manual `---` split + `serde_yaml_ng` (no `gray_matter` dep — the body is already injected verbatim into the system prompt, so a Markdown-aware library buys nothing). Parse failures fall back silently to "no front-matter." Plus `~/.savvagent/permissions.toml` read + write-through and Always/Never persistence keyed on `(tool_name, normalized arg pattern)`.
-
-**Risks.**
-- *Lock ordering.* Holding the `tools` Mutex across the oneshot await would deadlock turn execution. The fix is structural: take the registry handle, drop the guard, then await — same pattern §5.3 of CLAUDE.md prescribes for the host swap.
-- *Persisted decisions are a security surface.* Always/Never entries get written to disk and trusted on later runs; scope keys to `(tool_name, normalized arg pattern)`, never raw command strings, and surface the live set in `/tools` so they're auditable.
-- *Front-matter is a project-file format change.* First time `SAVVAGENT.md` becomes structured. Parser pinned to `serde_yaml_ng` over a manual `---` split (PR 4); fall back silently to "no front-matter" on parse error, and never refuse to start because front-matter is malformed.
-- *Modal over a streaming turn.* The pause-and-resume pattern is new in the turn loop; cover it with a host-level integration test that uses a mock `ProviderClient` to drive an Ask path and asserts the resolution unblocks the loop.
-
-**Out of scope (deferred to v0.5.0+).** Layer-3 OS sandboxing, OpenAI / Ollama providers, session resume, `tool-grep` / structured `tool-edit` / richer `glob`, crates.io publication.
+**Out of scope (kept for v0.5.0+).** Layer-3 OS sandboxing (bubblewrap / sandbox-exec), OpenAI / Ollama providers, session resume, `tool-grep` / structured `tool-edit`, richer `glob`, crates.io publication, glob path patterns, SPP `list_models` for `/model` validation.
 
 ### Backlog beyond v0.4.0
 
