@@ -29,7 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use app::{App, Entry, InputMode};
+use app::{App, CommandSelection, Entry, InputMode};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
 use savvagent_host::{Host, HostConfig, ProviderEndpoint, ToolEndpoint, TurnEvent};
@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
     app.active_provider_id = initial_provider;
     if !app.connected {
         app.push_note(
-            "Not connected. Press Ctrl-P → /connect (or type /connect) to set up a provider.",
+            "Not connected. Type / (or press Ctrl-P) and pick /connect to set up a provider.",
         );
     }
     if tool_bin.is_none() {
@@ -281,6 +281,28 @@ async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Run a slash command and apply its side effects (transcript save for
+/// `/save`). Used both when the user types `/foo` + Enter and when they pick
+/// a no-arg command from the palette.
+async fn dispatch_slash_command(app: &mut App, cmd: &str, host_slot: &HostSlot) {
+    let was_save = cmd.trim_start() == "/save";
+    app.handle_command(cmd);
+    if was_save {
+        if let Some(host) = current_host(host_slot).await {
+            match save_transcript_now(app, &host).await {
+                Ok(p) if !p.as_os_str().is_empty() => {
+                    app.push_note(format!("Saved {}", p.display()));
+                    app.last_transcript = Some(p);
+                }
+                Ok(_) => app.push_note("Nothing to save."),
+                Err(e) => app.push_note(format!("Save error: {e}")),
+            }
+        } else {
+            app.push_note("Not connected — nothing to save.");
+        }
+    }
+}
+
 /// Persist the key, build the in-process handler, swap the host.
 async fn perform_connect(
     spec: &'static ProviderSpec,
@@ -409,23 +431,8 @@ async fn run_app(
                                 continue;
                             }
                             if value.starts_with('/') {
-                                let was_save = value.trim_start() == "/save";
-                                app.handle_command(&value);
                                 app.input_textarea = TextArea::default();
-                                if was_save {
-                                    if let Some(host) = current_host(&host_slot).await {
-                                        match save_transcript_now(app, &host).await {
-                                            Ok(p) if !p.as_os_str().is_empty() => {
-                                                app.push_note(format!("Saved {}", p.display()));
-                                                app.last_transcript = Some(p);
-                                            }
-                                            Ok(_) => app.push_note("Nothing to save."),
-                                            Err(e) => app.push_note(format!("Save error: {e}")),
-                                        }
-                                    } else {
-                                        app.push_note("Not connected — nothing to save.");
-                                    }
-                                }
+                                dispatch_slash_command(app, &value, &host_slot).await;
                                 continue;
                             }
                             let Some(host) = current_host(&host_slot).await else {
@@ -472,6 +479,16 @@ async fn run_app(
                             app.input_textarea.input(evt);
                             app.open_file_picker();
                         }
+                        KeyCode::Char('/')
+                            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                                && app
+                                    .input_textarea
+                                    .lines()
+                                    .iter()
+                                    .all(|l| l.is_empty()) =>
+                        {
+                            app.open_command_palette();
+                        }
                         _ => {
                             app.input_textarea.input(evt);
                         }
@@ -479,12 +496,32 @@ async fn run_app(
                 }
             }
             InputMode::CommandPalette => match key.code {
-                KeyCode::Esc => app.input_mode = InputMode::Editing,
+                KeyCode::Esc => app.close_command_palette(),
                 KeyCode::Up if app.command_index > 0 => app.command_index -= 1,
-                KeyCode::Down if app.command_index + 1 < app.commands.len() => {
-                    app.command_index += 1
+                KeyCode::Down => {
+                    let visible = app.filtered_command_indices().len();
+                    if app.command_index + 1 < visible {
+                        app.command_index += 1;
+                    }
                 }
-                KeyCode::Enter => app.select_command(),
+                KeyCode::Enter => {
+                    if let Some(CommandSelection::Execute(cmd)) = app.select_command() {
+                        dispatch_slash_command(app, &cmd, &host_slot).await;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if !app.palette_pop_char() {
+                        // Empty filter — backspace past the implicit `/` closes
+                        // the palette and returns to a clean prompt.
+                        app.close_command_palette();
+                    }
+                }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    app.palette_push_char(c);
+                }
                 _ => {}
             },
             InputMode::SelectingProvider => match key.code {

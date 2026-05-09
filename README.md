@@ -81,8 +81,11 @@ them.
 
 Inside the TUI:
 
-1. Press <kbd>Ctrl-P</kbd> to open the command palette, choose `/connect`
-   (or just type `/connect` and press <kbd>Enter</kbd>).
+1. Press <kbd>Ctrl-P</kbd> *or* type `/` on an empty prompt to open the
+   command palette. Keep typing to filter (e.g. `/co` narrows to
+   `/connect`); <kbd>↑</kbd>/<kbd>↓</kbd> move, <kbd>Enter</kbd> selects,
+   <kbd>Esc</kbd> cancels. You can also just type the full command
+   (`/connect`) and press <kbd>Enter</kbd>.
 2. Pick a provider with <kbd>↑</kbd>/<kbd>↓</kbd>, hit <kbd>Enter</kbd>.
 3. Paste your API key (input is masked) and <kbd>Enter</kbd>.
 
@@ -123,6 +126,28 @@ cargo run -p savvagent-host --example headless -- "list my Cargo.toml"
 `bacon.toml` defines several jobs (`check`, `check-all`, `clippy`,
 `clippy-all`, `test`, `doc`, `run`); pick whichever matches what you're
 iterating on.
+
+### Running the TUI in watch mode
+
+There is no built-in watch mode for the TUI itself — bacon's `run` job
+captures stdout, which doesn't play nicely with an interactive terminal
+UI. For an actual restart-on-change loop, use `cargo-watch` in its own
+terminal so the TUI gets a real TTY:
+
+```bash
+cargo install cargo-watch   # one-time
+cargo watch -c -x 'run -p savvagent'
+```
+
+`tool-fs` is spawned at runtime, so make sure a workspace `cargo build`
+has produced `savvagent-tool-fs`. If you want both steps explicit:
+
+```bash
+cargo watch -c -x build -x 'run -p savvagent'
+```
+
+For pure type-checking / clippy / test feedback while you edit, keep
+`bacon` running in a separate pane.
 
 ### Running providers as standalone MCP servers
 

@@ -57,6 +57,20 @@ pub struct Command {
     pub name: String,
     /// One-liner shown in the palette.
     pub description: String,
+    /// `true` for commands that take an argument (e.g. `/view <path>`). When
+    /// the user picks one of these from the palette we prefill the prompt
+    /// instead of executing it; commands without args run on Enter.
+    pub needs_arg: bool,
+}
+
+/// Outcome of [`App::select_command`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandSelection {
+    /// The command takes no argument — caller should run it now.
+    Execute(String),
+    /// The command takes an argument — the prompt has been prefilled with
+    /// `"<name> "` and we're back in editing mode for the user to type it.
+    Prefill(String),
 }
 
 /// TUI app state.
@@ -86,6 +100,9 @@ pub struct App {
 
     pub commands: Vec<Command>,
     pub command_index: usize,
+    /// Live filter typed after `/` while the command palette is open. Without
+    /// the leading slash. Empty when the palette was opened via Ctrl-P.
+    pub palette_filter: String,
 
     /// True once `/connect` has linked the TUI to a running provider.
     pub connected: bool,
@@ -143,6 +160,7 @@ impl App {
             active_file_path: None,
             commands: Vec::new(),
             command_index: 0,
+            palette_filter: String::new(),
             connected: false,
             active_provider_id: None,
             provider_index: 0,
@@ -250,32 +268,38 @@ impl App {
         self.context_size = chars / 4;
     }
 
-    /// Slash commands surfaced in Ctrl-P.
+    /// Slash commands surfaced in the palette.
     pub fn refresh_commands(&mut self) {
         self.commands = vec![
             Command {
                 name: "/connect".into(),
                 description: "Switch provider (uses stored key, or prompts if missing)".into(),
+                needs_arg: false,
             },
             Command {
                 name: "/clear".into(),
                 description: "Reset conversation history".into(),
+                needs_arg: false,
             },
             Command {
                 name: "/save".into(),
                 description: "Save transcript now".into(),
+                needs_arg: false,
             },
             Command {
                 name: "/view".into(),
                 description: "View a file".into(),
+                needs_arg: true,
             },
             Command {
                 name: "/edit".into(),
                 description: "Edit a file".into(),
+                needs_arg: true,
             },
             Command {
                 name: "/quit".into(),
                 description: "Quit".into(),
+                needs_arg: false,
             },
         ];
     }
@@ -285,13 +309,78 @@ impl App {
         self.refresh_commands();
         self.input_mode = InputMode::CommandPalette;
         self.command_index = 0;
+        self.palette_filter.clear();
     }
 
-    /// Pre-fill the input textarea with the selected command name.
-    pub fn select_command(&mut self) {
-        let cmd = self.commands[self.command_index].name.clone();
-        self.input_textarea = TextArea::from(vec![format!("{cmd} ")]);
+    /// Indices into `self.commands` that match the current filter. If the
+    /// filter is empty, returns every index.
+    pub fn filtered_command_indices(&self) -> Vec<usize> {
+        if self.palette_filter.is_empty() {
+            return (0..self.commands.len()).collect();
+        }
+        let needle = self.palette_filter.to_lowercase();
+        self.commands
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                let name = c.name.strip_prefix('/').unwrap_or(&c.name).to_lowercase();
+                name.starts_with(&needle)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Append a char to the palette filter and reset the cursor.
+    pub fn palette_push_char(&mut self, c: char) {
+        self.palette_filter.push(c);
+        self.command_index = 0;
+    }
+
+    /// Pop one char from the palette filter. Returns `false` if it was already
+    /// empty (the caller can use this to close the palette on Backspace past
+    /// the leading `/`).
+    pub fn palette_pop_char(&mut self) -> bool {
+        let popped = self.palette_filter.pop().is_some();
+        self.command_index = 0;
+        popped
+    }
+
+    /// Close the palette without selecting anything.
+    pub fn close_command_palette(&mut self) {
         self.input_mode = InputMode::Editing;
+        self.palette_filter.clear();
+        self.command_index = 0;
+    }
+
+    /// Resolve the highlighted palette item. Operates on the filtered view —
+    /// `command_index` is the position within the visible list, not within
+    /// `self.commands`. Closes the palette either way; returns whether the
+    /// caller should execute the command now or just leave the prefilled
+    /// prompt for the user to finish typing arguments.
+    pub fn select_command(&mut self) -> Option<CommandSelection> {
+        let filtered = self.filtered_command_indices();
+        let real_idx = match filtered.get(self.command_index).copied() {
+            Some(i) => i,
+            None => {
+                self.close_command_palette();
+                return None;
+            }
+        };
+        let cmd = &self.commands[real_idx];
+        let name = cmd.name.clone();
+        let needs_arg = cmd.needs_arg;
+
+        self.input_mode = InputMode::Editing;
+        self.palette_filter.clear();
+        self.command_index = 0;
+
+        if needs_arg {
+            self.input_textarea = TextArea::from(vec![format!("{name} ")]);
+            Some(CommandSelection::Prefill(name))
+        } else {
+            self.input_textarea = TextArea::default();
+            Some(CommandSelection::Execute(name))
+        }
     }
 
     /// Insert the currently-highlighted file as `@path` in the textarea.
@@ -488,4 +577,92 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fresh_app() -> App {
+        App::new("test-model".into(), PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn empty_filter_lists_every_command() {
+        let app = fresh_app();
+        let filtered = app.filtered_command_indices();
+        assert_eq!(filtered.len(), app.commands.len());
+    }
+
+    #[test]
+    fn filter_narrows_by_prefix_case_insensitive() {
+        let mut app = fresh_app();
+        app.palette_filter = "co".into();
+        let names: Vec<&str> = app
+            .filtered_command_indices()
+            .into_iter()
+            .map(|i| app.commands[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["/connect"]);
+
+        app.palette_filter = "C".into();
+        let names: Vec<&str> = app
+            .filtered_command_indices()
+            .into_iter()
+            .map(|i| app.commands[i].name.as_str())
+            .collect();
+        assert!(names.contains(&"/connect"));
+        assert!(names.contains(&"/clear"));
+    }
+
+    #[test]
+    fn filter_with_no_matches_returns_empty_list() {
+        let mut app = fresh_app();
+        app.palette_filter = "xyz".into();
+        assert!(app.filtered_command_indices().is_empty());
+    }
+
+    #[test]
+    fn select_no_arg_command_returns_execute_with_empty_input() {
+        let mut app = fresh_app();
+        app.input_mode = InputMode::CommandPalette;
+        app.palette_filter = "c".into();
+        // Two visible commands at this point: /connect (0) and /clear (1).
+        app.command_index = 1;
+        let outcome = app.select_command();
+        assert_eq!(outcome, Some(CommandSelection::Execute("/clear".into())));
+        assert!(matches!(app.input_mode, InputMode::Editing));
+        assert_eq!(app.input_textarea.lines(), &[String::new()]);
+        assert!(app.palette_filter.is_empty());
+    }
+
+    #[test]
+    fn select_arg_command_returns_prefill_with_seeded_input() {
+        let mut app = fresh_app();
+        app.input_mode = InputMode::CommandPalette;
+        app.palette_filter = "vi".into();
+        app.command_index = 0;
+        let outcome = app.select_command();
+        assert_eq!(outcome, Some(CommandSelection::Prefill("/view".into())));
+        assert_eq!(app.input_textarea.lines(), &["/view ".to_string()]);
+    }
+
+    #[test]
+    fn select_with_no_match_closes_palette() {
+        let mut app = fresh_app();
+        app.input_mode = InputMode::CommandPalette;
+        app.palette_filter = "zzz".into();
+        let outcome = app.select_command();
+        assert!(outcome.is_none());
+        assert!(matches!(app.input_mode, InputMode::Editing));
+    }
+
+    #[test]
+    fn pop_past_empty_signals_close() {
+        let mut app = fresh_app();
+        app.palette_push_char('c');
+        assert!(app.palette_pop_char());
+        assert!(!app.palette_pop_char());
+    }
 }

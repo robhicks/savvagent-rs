@@ -128,12 +128,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     if matches!(app.input_mode, InputMode::CommandPalette) {
         let popup = centered_rect(50, 30, area);
         frame.render_widget(Clear, popup);
-        let items: Vec<ListItem> = app
-            .commands
+        let filtered = app.filtered_command_indices();
+        let items: Vec<ListItem> = filtered
             .iter()
             .enumerate()
-            .map(|(i, cmd)| {
-                let style = if i == app.command_index {
+            .map(|(visible_idx, &cmd_idx)| {
+                let cmd = &app.commands[cmd_idx];
+                let style = if visible_idx == app.command_index {
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD)
@@ -146,8 +147,21 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 ]))
             })
             .collect();
+        let title = if app.palette_filter.is_empty() {
+            " Commands ".to_string()
+        } else {
+            format!(" Commands · /{} ", app.palette_filter)
+        };
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(" Commands "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .title_bottom(
+                        Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ")
+                            .right_aligned(),
+                    ),
+            )
             .highlight_symbol("> ");
         frame.render_widget(list, popup);
     }
