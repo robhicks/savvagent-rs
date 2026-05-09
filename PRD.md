@@ -1,6 +1,6 @@
 # Savvagent — Product Requirements Document
 
-**Status:** Draft v0.2 · **Owner:** Rob Hicks · **Last updated:** 2026-05-07
+**Status:** Draft v0.4 · **Owner:** Rob Hicks · **Last updated:** 2026-05-09
 
 ---
 
@@ -184,7 +184,7 @@ See `crates/savvagent-protocol/SPEC.md` for the complete spec and JSON schemas.
 
 ## 7. Milestones
 
-M1–M5 have all landed; M6 (the v0.1.0 release) is the only remaining numbered milestone.
+M1–M6 are shipped (v0.1.0). M7 (v0.2.0) and M8 (v0.3.0) added Layer-1 path containment and the `/`-palette; **M9 is the proposed v0.4.0 milestone** focused on Layer-2 permissions plus `tool-bash`.
 
 ### M1 · Protocol & traits (✅ done)
 - `savvagent-protocol` v0.1.0 with round-trip tests.
@@ -208,24 +208,64 @@ M1–M5 have all landed; M6 (the v0.1.0 release) is the only remaining numbered 
 - `/connect` swaps the active host atomically (keyring-backed credentials, `Arc<RwLock<Option<Arc<Host>>>>`); `/save` persists transcripts on demand; `/view` and `/edit` open files in the in-TUI viewer/editor.
 - A second provider (`provider-gemini`) ships alongside Anthropic, validating the in-process bridge.
 
-### M6 · Public release v0.1.0 (in progress)
-- Distribute via **precompiled binaries** — `.tar.xz` for Linux (x86_64 / aarch64) and macOS arm64, `.zip` for Windows x86_64, plus shell (`curl | sh`) and PowerShell (`irm | iex`) install scripts that download the right artifact from GitHub Releases. Driven by [`cargo-dist`](https://opensource.axo.dev/cargo-dist/) — config in `[workspace.metadata.dist]`, workflow at `.github/workflows/release.yml`. Publishing to crates.io is *not* a release requirement (deferred until there's a clear external consumer for the libraries).
-- README with one-paragraph install + first-run instructions covering both the install script and manual tarball use.
-- License: MIT OR Apache-2.0 (already configured in workspace).
-- **Open work before tag:**
-  - Measure & defend the §8 perf targets — keystroke-to-render p99 ≤ 100 ms, host overhead over network RTT ≤ 20 ms, stripped binary sizes.
-  - Decide on the TUI editor widget (see `tui-textarea` in §9).
+### M6 · Public release v0.1.0 (✅ done)
+- Distributed via [`cargo-dist`](https://opensource.axo.dev/cargo-dist/): `.tar.xz` for Linux (x86_64 / aarch64) and macOS arm64, `.zip` for Windows x86_64, plus shell (`curl | sh`) and PowerShell (`irm | iex`) installers from GitHub Releases. Config in `[workspace.metadata.dist]`, workflow at `.github/workflows/release.yml`.
+- License: MIT OR Apache-2.0.
+- Crates.io publication remains deferred until there's an external consumer for the libraries.
+- TUI editor widget decision (see §9): `tui-textarea` for the prompt input; `ratatui-code-editor` retained for the in-TUI viewer/editor pending a future consolidation pass.
 
-### Post-v0.1 (v0.2 candidates, not committed)
+### M7 · v0.2.0 — `tool-fs` Layer 1 path containment + `/connect` UX (✅ done)
+- `tool-fs` confines paths to `SAVVAGENT_TOOL_FS_ROOT` (set by the host to the project root); rejects `..`, symlink escapes, and out-of-root absolute paths. Closes the v0.1 §9 "Layer 1 path hygiene" gap.
+- `/connect` gained a skip-prompt path for users who already have a key in the keyring or env.
 
-- Providers: OpenAI, local (Ollama). (Anthropic and Gemini are already in.)
-- Tools: bash (with allowlist), edit (structured), grep, glob (richer than fs glob).
-- **Permissions / confirmation prompts** (Layer 2). Allow/ask/deny rules keyed by `(tool_name, path_pattern, command_pattern)`, configurable in `~/.savvagent/config.toml` and `SAVVAGENT.md` front-matter. Intercepted in `Host` before `ToolRegistry::call`; the TUI pauses the turn loop and prompts `y / n / always / never`. Sensible defaults: `read_file: allow`, `write_file: ask` outside project root, `bash: ask` always, `.env` / `~/.ssh`: deny.
-- **Tool sandboxing** (Layer 3). OS-level per-process isolation for tool MCP servers. Linux via `bubblewrap` (project-root bind-mount, `--unshare-net`, `--die-with-parent`, optional seccomp-bpf belt); macOS via `sandbox-exec` profile; Windows deferred (AppContainer + Job Objects is the eventual target). The host wraps the spawn — the multi-call binary's `savvagent tool-fs` becomes the inner exec, so tools themselves don't change. Runtime cost is ~zero (kernel namespaces, native syscall speed); startup adds 10–50 ms once per session because `tool-fs` is a long-lived stdio child. Opt-in via `--sandbox` flag and per-tool config in v0.2; default-on candidate for v0.3 once defaults are proven non-annoying.
-- **Crates.io publication** of `savvagent-protocol`, `savvagent-mcp`, and `savvagent-host` once an external consumer wants them as libraries.
+### M8 · v0.3.0 — Slash-command palette + `/clear` (✅ done)
+- Typing `/` opens a command palette with live prefix filtering; previously the only entry points were typing the full command or pressing `Ctrl-P`.
+- `/clear` resets per-turn history without dropping the active provider connection.
+
+### M9 · v0.4.0 — Tool permissions + `tool-bash` + introspection (proposed)
+
+**Theme.** Close the highest-priority §9 follow-up (Layer-2 permission prompts), then introduce `tool-bash` so the host has a meaningful target for the new gating, and round out the TUI's introspection commands. Layer-3 OS sandboxing, additional providers, and session resume are explicitly deferred to v0.5.0+.
+
+**Why this bundle.** Permissions, `tool-bash`, and the new introspection commands are mutually load-bearing: shipping `tool-bash` without gating would regress safety; shipping permissions without `tool-bash` leaves `read_file` / `write_file` as the only enforcement surface (and they're already mostly `allow`). `/tools` and `/model` are the commands users will reach for once tool gating exists, so they belong in the same release.
+
+**Scope (acceptance criteria).**
+
+1. **`permissions.rs` in `savvagent-host`** — new module exposing `Verdict { Allow, Ask, Deny }` and `PermissionPolicy::evaluate(tool_name, args) -> Verdict`. Layered sources, highest precedence first:
+   1. CLI / `HostConfig::with_permission_overrides`
+   2. `SAVVAGENT.md` YAML front-matter (new — adds front-matter parsing to `project.rs`)
+   3. `~/.savvagent/permissions.toml`
+   4. Built-in defaults: `read_file: allow`, `write_file: allow` inside `project_root` and `ask` outside, `bash: ask` always, paths under `.env` / `~/.ssh`: `deny`.
+2. **Turn-loop integration in `session.rs`** — `Host::run_turn_streaming` consults `policy.evaluate` before every `ToolRegistry::call`:
+   - `Allow` proceeds unchanged.
+   - `Deny` synthesizes a `tool_result` with `is_error: true` and a "denied by policy" payload; emits `TurnEvent::ToolCallDenied { name, reason }`.
+   - `Ask` emits `TurnEvent::PermissionRequested { id, name, summary, args }` and awaits a matching `Host::resolve_permission(id, decision)` via a `oneshot`. Constraint: the `tools` Mutex must be released *before* the await — see CLAUDE.md "never hold a lock across awaits."
+3. **TUI permission modal** in `app.rs` / `ui.rs` — new `Mode::PermissionPrompt { id, request }` pauses input and renders the request (tool, summary, expandable args). Keys: `y` allow once, `n` deny once, `a` always (persists to `~/.savvagent/permissions.toml`), `N` never (same), `Esc` deny.
+4. **`crates/tool-bash`** — new stdio MCP server mirroring `tool-fs`'s layout. One tool, `run { command, cwd?, timeout_ms? }` (default 30 s), returning structured `{ exit_code, stdout, stderr, elapsed_ms }`. Layer 1 containment via `SAVVAGENT_TOOL_BASH_ROOT` (host sets it to `project_root`). **No allowlist in the tool itself** — gating is the host's job. Bin: `savvagent-tool-bash`, located via `$PATH` or `SAVVAGENT_TOOL_BASH_BIN`, registered in `crates/savvagent/src/main.rs`.
+5. **`/tools` and `/model` slash commands** — `/tools` lists registered tools (name + description from `tools/list`) and their current permission verdict. `/model` (no args) shows the current `provider:model`; `/model <id>` triggers a **reconnect through the existing host-swap path** (`Arc<RwLock<Option<Arc<Host>>>>`, same as `/connect` minus the credential prompt) with the new model. Validation is optimistic — the provider rejects at first turn if the id is wrong, with a clear error. Wiring the optional SPP `list_models` tool everywhere is *not* part of M9; it can ship later as an independent cleanup that upgrades `/model` from optimistic to validated. Both commands join the `/` palette.
+6. **No SPP changes** — permissions are host↔TUI only and do not traverse the provider wire. SPEC.md gets a one-line non-impact note.
+
+**Delivery (sequencing).** Four PRs, each independently reviewable:
+- **PR 1 — host-only foundation.** `permissions.rs`, `TurnEvent::PermissionRequested` / `ToolCallDenied`, `Host::resolve_permission`. TUI temporarily auto-allows every Ask so behavior stays at parity with v0.3.
+- **PR 2 — TUI surface.** Permission modal, `/tools`, `/model`. Defaults from PR 1 are now actually enforceable end-to-end.
+- **PR 3 — `tool-bash`.** New crate + register in TUI `main.rs`; `bash: ask` default puts every invocation through the modal.
+- **PR 4 — layered config.** `SAVVAGENT.md` front-matter parsing via a ~20-LOC manual `---` split + `serde_yaml_ng` (no `gray_matter` dep — the body is already injected verbatim into the system prompt, so a Markdown-aware library buys nothing). Parse failures fall back silently to "no front-matter." Plus `~/.savvagent/permissions.toml` read + write-through and Always/Never persistence keyed on `(tool_name, normalized arg pattern)`.
+
+**Risks.**
+- *Lock ordering.* Holding the `tools` Mutex across the oneshot await would deadlock turn execution. The fix is structural: take the registry handle, drop the guard, then await — same pattern §5.3 of CLAUDE.md prescribes for the host swap.
+- *Persisted decisions are a security surface.* Always/Never entries get written to disk and trusted on later runs; scope keys to `(tool_name, normalized arg pattern)`, never raw command strings, and surface the live set in `/tools` so they're auditable.
+- *Front-matter is a project-file format change.* First time `SAVVAGENT.md` becomes structured. Parser pinned to `serde_yaml_ng` over a manual `---` split (PR 4); fall back silently to "no front-matter" on parse error, and never refuse to start because front-matter is malformed.
+- *Modal over a streaming turn.* The pause-and-resume pattern is new in the turn loop; cover it with a host-level integration test that uses a mock `ProviderClient` to drive an Ask path and asserts the resolution unblocks the loop.
+
+**Out of scope (deferred to v0.5.0+).** Layer-3 OS sandboxing, OpenAI / Ollama providers, session resume, `tool-grep` / structured `tool-edit` / richer `glob`, crates.io publication.
+
+### Backlog beyond v0.4.0
+
+- **Sandboxing (Layer 3).** OS-level per-process isolation for tool MCP servers. Linux via `bubblewrap` (project-root bind-mount, `--unshare-net`, `--die-with-parent`, optional seccomp-bpf); macOS via `sandbox-exec` profile; Windows deferred (AppContainer + Job Objects is the eventual target). Host wraps the spawn — tools themselves don't change. Opt-in in v0.5; default-on candidate once Layer-2 defaults are proven non-annoying in the wild.
+- **Providers.** `provider-openai`, `provider-local` (Ollama). Both fit the `<200 LOC` §8 hackability goal.
+- **Tools.** `tool-grep`, structured `tool-edit`, richer `glob` than the fs server's.
 - **Session resume.** Per-turn transcripts already persist; reload + replay is the gap.
-- More slash commands beyond the existing `/connect`, `/save`, `/view`, and `/edit`: `/clear`, `/model`, `/tools`.
-- v0.3+: LSP integration, IDE extensions (ACP-style), desktop app.
+- **Crates.io publication** of `savvagent-protocol`, `savvagent-mcp`, `savvagent-host` once an external consumer wants them as libraries.
+- **v0.6+.** LSP integration, ACP-style IDE extensions, desktop client.
 
 ---
 
@@ -244,10 +284,10 @@ For v0.1 release, "done" means:
 
 - **rmcp maturity.** `rmcp` v1.6 is the assumed substrate; if its Streamable HTTP server has gaps, we may need to vendor / patch. Mitigation: M2 is the integration test — we'll know early.
 - **MCP framing for streaming.** Wrapping vendor SSE → MCP progress notifications is a per-provider concern. We're betting the SPP `StreamEvent` shape is stable enough not to leak vendor quirks; round-trip tests guard this.
-- **Project context format.** Is `SAVVAGENT.md` enough, or do we need YAML front-matter for tool allowlists, model pinning, etc.? Open until M4.
-- **Tool sandboxing in v0.1.** Layer 1 path hygiene has landed (`tool-fs` honours `SAVVAGENT_TOOL_FS_ROOT`, set by the host to the project root; rejects `..`, symlink escapes, and out-of-root absolute paths). We're still shipping without OS-level sandboxing or permission prompts, only a warning. Acceptable for v0.1 because the user is opting in via the install script, but Layers 2 and 3 are the highest-priority follow-up in v0.2 — see the layered plan in §7 (Layer 2 permission prompts, Layer 3 OS-level isolation via bubblewrap / sandbox-exec).
+- **Project context format.** *Resolved in M9.* `SAVVAGENT.md` gains optional YAML front-matter for permission overrides; the body remains free-form Markdown injected into the system prompt. Front-matter parse errors fall back silently to "no front-matter" so a malformed file never blocks startup.
+- **Tool sandboxing layer status.** Layer 1 (path hygiene) ✅ landed in M7. Layer 2 (permission prompts) is the M9 deliverable. Layer 3 (OS-level isolation via bubblewrap / sandbox-exec) is deferred to v0.5+; the host already owns the tool spawn path, so wrapping it later is additive.
 - **Multi-client transport.** v0.1 has the TUI link the host as a library. If we ever add a desktop client, we'll need a real wire (websocket? ACP? gRPC?). Deferred — the host's Rust API is the boundary that matters today.
-- **TUI editor widget.** Both the prompt input and any in-TUI file editing need a text-area widget with multi-line editing, cursor movement, selection, and undo. Candidate: [`tui-textarea`](https://github.com/rhysd/tui-textarea) — a ratatui-compatible widget by rhysd that already provides these (plus search, syntax-aware behavior via optional features). Decision deferred to M5; tradeoff is the dep weight and styling flexibility vs. rolling our own minimal editor on top of `ratatui::Buffer`. The current `ratatui-code-editor` use is the placeholder we'd replace.
+- **TUI editor widget.** *Settled in M5/M6.* `tui-textarea` (the `tui-textarea-2` fork) is in for the prompt input. `ratatui-code-editor` remains for the in-TUI viewer/editor; consolidating onto a single widget is a future cleanup, not a release blocker.
 - **Context management / retrieval.** Long sessions and large repos will outgrow the model's context window; we'll need a strategy for selecting which transcript turns, files, and tool outputs to keep in-context. Candidate to evaluate: [`vecstore`](https://crates.io/crates/vecstore) — a pure-Rust embedded vector store that could back semantic recall over transcript history and project files. Decision deferred (post-M5); tradeoffs include embedding model choice (local vs. provider-hosted), index footprint, and whether retrieval lives in the host or behind an MCP tool server.
 
 ---
