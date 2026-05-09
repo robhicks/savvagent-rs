@@ -495,7 +495,33 @@ async fn run_app(
                 }
                 KeyCode::Enter => {
                     let idx = app.provider_index;
-                    app.enter_api_key_for(idx);
+                    if let Some(spec) = PROVIDERS.get(idx) {
+                        match creds::load(spec.id) {
+                            Ok(Some(key)) => {
+                                app.input_mode = InputMode::Editing;
+                                app.push_note(format!(
+                                    "Using stored key for {}.",
+                                    spec.display_name
+                                ));
+                                perform_connect(
+                                    spec,
+                                    key,
+                                    &host_slot,
+                                    &project_root,
+                                    tool_bin.as_deref(),
+                                    app,
+                                )
+                                .await;
+                            }
+                            Ok(None) => app.enter_api_key_for(idx),
+                            Err(e) => {
+                                app.push_note(format!("Keyring error: {e}"));
+                                app.enter_api_key_for(idx);
+                            }
+                        }
+                    } else {
+                        app.input_mode = InputMode::Editing;
+                    }
                 }
                 _ => {}
             },

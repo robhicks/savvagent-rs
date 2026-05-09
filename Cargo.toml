@@ -12,7 +12,7 @@ members = [
 default-members = ["crates/savvagent"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/robhicks/savvagent-rs"
@@ -20,12 +20,12 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Local crates
-savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.1.0" }
-savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.1.0" }
-savvagent-host = { path = "crates/savvagent-host", version = "0.1.0" }
-provider-anthropic = { path = "crates/provider-anthropic", version = "0.1.0" }
-provider-gemini = { path = "crates/provider-gemini", version = "0.1.0" }
-tool-fs = { path = "crates/tool-fs", version = "0.1.0" }
+savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.2.0" }
+savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.2.0" }
+savvagent-host = { path = "crates/savvagent-host", version = "0.2.0" }
+provider-anthropic = { path = "crates/provider-anthropic", version = "0.2.0" }
+provider-gemini = { path = "crates/provider-gemini", version = "0.2.0" }
+tool-fs = { path = "crates/tool-fs", version = "0.2.0" }
 
 # Async runtime + utilities
 tokio = { version = "1.52", features = ["full"] }

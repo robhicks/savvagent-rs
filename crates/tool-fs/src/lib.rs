@@ -13,6 +13,12 @@
 //! v0.1 ships **without sandboxing**. Tools run with the full privileges of the
 //! invoking user. Hosts are expected to confirm destructive calls before
 //! routing them.
+//!
+//! Optional Layer 1 path hygiene: construct via [`FsTools::with_root`] (or set
+//! `SAVVAGENT_TOOL_FS_ROOT` for the bundled binary) to confine all four tools
+//! to a single project root. Inputs containing `..` are rejected, relative
+//! paths resolve against the root, and symlink escapes are caught by
+//! `std::fs::canonicalize`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -184,6 +190,12 @@ pub enum FsToolError {
     /// Glob pattern failed to compile.
     #[error("invalid glob pattern: {0}")]
     Glob(String),
+    /// Resolved path falls outside the configured project root.
+    #[error("path is outside project root: {path}")]
+    OutsideRoot {
+        /// The offending path, as supplied by the caller.
+        path: String,
+    },
 }
 
 impl From<FsToolError> for ErrorData {
@@ -192,7 +204,9 @@ impl From<FsToolError> for ErrorData {
             FsToolError::InvalidArgument(_) | FsToolError::Glob(_) => {
                 ErrorData::invalid_params(err.to_string(), None)
             }
-            FsToolError::FileTooLarge { .. } | FsToolError::NotUtf8(_) => {
+            FsToolError::FileTooLarge { .. }
+            | FsToolError::NotUtf8(_)
+            | FsToolError::OutsideRoot { .. } => {
                 ErrorData::invalid_request(err.to_string(), None)
             }
             FsToolError::Io { .. } => ErrorData::internal_error(err.to_string(), None),
@@ -216,6 +230,8 @@ fn io_err(op: &str, source: std::io::Error) -> FsToolError {
 pub struct FsTools {
     #[allow(dead_code)] // Read by the `#[tool_handler]` macro expansion.
     tool_router: ToolRouter<Self>,
+    /// When `Some`, all tools confine inputs to this canonicalized directory.
+    root: Option<PathBuf>,
 }
 
 impl Default for FsTools {
@@ -226,11 +242,30 @@ impl Default for FsTools {
 
 #[tool_router]
 impl FsTools {
-    /// Construct a new server instance with the default tool router.
+    /// Construct a new server instance with the default tool router and **no**
+    /// path containment. Tools resolve paths against the process CWD with the
+    /// full privileges of the invoking user.
     pub fn new() -> Self {
         Self {
             tool_router: Self::tool_router(),
+            root: None,
         }
+    }
+
+    /// Construct a containment-mode server. All four tools will refuse to
+    /// touch paths outside `root`, even via `..` or symlinks. `root` must
+    /// exist and is canonicalized once at construction.
+    pub fn with_root(root: impl AsRef<Path>) -> std::io::Result<Self> {
+        let canon = std::fs::canonicalize(root.as_ref())?;
+        Ok(Self {
+            tool_router: Self::tool_router(),
+            root: Some(canon),
+        })
+    }
+
+    /// Returns the configured project root, if containment is enabled.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 
     /// Read a UTF-8 text file from disk, capped at `max_bytes`.
@@ -246,7 +281,7 @@ impl FsTools {
             return Err(FsToolError::InvalidArgument("path is empty".into()).into());
         }
         let limit = input.max_bytes.unwrap_or(DEFAULT_MAX_READ_BYTES);
-        let path = PathBuf::from(&input.path);
+        let path = self.resolve_existing(&input.path)?;
 
         let metadata = tokio::fs::metadata(&path)
             .await
@@ -287,7 +322,7 @@ impl FsTools {
         if input.path.is_empty() {
             return Err(FsToolError::InvalidArgument("path is empty".into()).into());
         }
-        let path = PathBuf::from(&input.path);
+        let path = self.resolve_for_write(&input.path)?;
 
         if input.create_dirs {
             if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -321,7 +356,7 @@ impl FsTools {
             return Err(FsToolError::InvalidArgument("path is empty".into()).into());
         }
         let limit = input.max_entries.unwrap_or(DEFAULT_MAX_LIST_ENTRIES) as usize;
-        let root = PathBuf::from(&input.path);
+        let root = self.resolve_existing(&input.path)?;
 
         let metadata = tokio::fs::metadata(&root)
             .await
@@ -360,18 +395,36 @@ impl FsTools {
         if input.pattern.is_empty() {
             return Err(FsToolError::InvalidArgument("pattern is empty".into()).into());
         }
+        if path_has_parent_dir(Path::new(&input.pattern)) {
+            return Err(FsToolError::OutsideRoot {
+                path: input.pattern.clone(),
+            }
+            .into());
+        }
         let limit = input.max_matches.unwrap_or(DEFAULT_MAX_GLOB_MATCHES) as usize;
         let root_str = input.root.clone().unwrap_or_else(|| ".".into());
+
+        // Resolve the glob's own root. With containment, "." means the project
+        // root; without, it means the process CWD (existing behavior).
+        let resolved_root = if let Some(project_root) = self.root.as_deref() {
+            let r = self.resolve_existing(&root_str)?;
+            // Belt-and-suspenders: resolve_existing already enforces this.
+            if !is_within(&r, project_root) {
+                return Err(FsToolError::OutsideRoot { path: root_str }.into());
+            }
+            r
+        } else {
+            PathBuf::from(&root_str)
+        };
+
         let pattern = input.pattern.clone();
-        let root_for_thread = root_str.clone();
+        let strip_prefix = resolved_root.clone();
+        let project_root = self.root.clone();
 
         let (matches, truncated) =
             tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), FsToolError> {
-                let joined = if root_for_thread == "." {
-                    pattern.clone()
-                } else {
-                    format!("{}/{}", root_for_thread.trim_end_matches('/'), pattern)
-                };
+                let joined_path = resolved_root.join(&pattern);
+                let joined = joined_path.to_string_lossy().into_owned();
                 let mut out = Vec::new();
                 let mut truncated = false;
                 let iter = glob::glob(&joined).map_err(|e| FsToolError::Glob(e.to_string()))?;
@@ -381,8 +434,16 @@ impl FsTools {
                         break;
                     }
                     let p = entry.map_err(|e| FsToolError::Glob(e.to_string()))?;
+                    // Containment filter: drop any match whose canonical path
+                    // falls outside the project root (e.g. via a symlink).
+                    if let Some(root) = project_root.as_deref() {
+                        match std::fs::canonicalize(&p) {
+                            Ok(canon) if is_within(&canon, root) => {}
+                            _ => continue,
+                        }
+                    }
                     let rel = p
-                        .strip_prefix(Path::new(&root_for_thread))
+                        .strip_prefix(&strip_prefix)
                         .unwrap_or(&p)
                         .to_string_lossy()
                         .into_owned();
@@ -399,6 +460,99 @@ impl FsTools {
             matches,
             truncated,
         }))
+    }
+
+    // -- path resolution helpers --------------------------------------------
+
+    /// Resolve an input path that **must already exist** (read/list).
+    ///
+    /// With containment on:
+    /// - reject any input containing `..`,
+    /// - join relative paths onto the project root,
+    /// - canonicalize the result and require it to lie under the root.
+    ///
+    /// With containment off, the path is returned verbatim — preserves the
+    /// pre-existing CWD-relative behavior used by [`FsTools::new`].
+    fn resolve_existing(&self, raw: &str) -> Result<PathBuf, FsToolError> {
+        let Some(root) = self.root.as_deref() else {
+            return Ok(PathBuf::from(raw));
+        };
+        let input = Path::new(raw);
+        if path_has_parent_dir(input) {
+            return Err(FsToolError::OutsideRoot {
+                path: raw.to_string(),
+            });
+        }
+        let candidate = if input.is_absolute() {
+            input.to_path_buf()
+        } else {
+            root.join(input)
+        };
+        let canon = std::fs::canonicalize(&candidate).map_err(|e| io_err("canonicalize", e))?;
+        if !is_within(&canon, root) {
+            return Err(FsToolError::OutsideRoot {
+                path: raw.to_string(),
+            });
+        }
+        Ok(canon)
+    }
+
+    /// Resolve an input path that **may not yet exist** (write).
+    ///
+    /// Walks up to the first existing ancestor, canonicalizes it, then
+    /// re-appends the missing tail. This catches symlinked ancestors before
+    /// any directory creation happens.
+    fn resolve_for_write(&self, raw: &str) -> Result<PathBuf, FsToolError> {
+        let Some(root) = self.root.as_deref() else {
+            return Ok(PathBuf::from(raw));
+        };
+        let input = Path::new(raw);
+        if path_has_parent_dir(input) {
+            return Err(FsToolError::OutsideRoot {
+                path: raw.to_string(),
+            });
+        }
+        let candidate = if input.is_absolute() {
+            input.to_path_buf()
+        } else {
+            root.join(input)
+        };
+
+        // Find the first existing ancestor and canonicalize it.
+        let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+        let mut cursor: &Path = &candidate;
+        let canon_existing = loop {
+            match std::fs::canonicalize(cursor) {
+                Ok(c) => break c,
+                Err(_) => match cursor.parent() {
+                    Some(parent) => {
+                        if let Some(name) = cursor.file_name() {
+                            tail.push(name);
+                        }
+                        cursor = parent;
+                    }
+                    None => {
+                        // Hit the filesystem root with nothing canonicalizable.
+                        return Err(FsToolError::OutsideRoot {
+                            path: raw.to_string(),
+                        });
+                    }
+                },
+            }
+        };
+
+        // Reattach the missing tail in original order.
+        let mut resolved = canon_existing;
+        for name in tail.into_iter().rev() {
+            resolved.push(name);
+        }
+
+        if !is_within(&resolved, root) {
+            return Err(FsToolError::OutsideRoot {
+                path: raw.to_string(),
+            });
+        }
+        Ok(resolved)
     }
 }
 
@@ -423,6 +577,19 @@ impl ServerHandler for FsTools {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// True if `path` contains any `..` component.
+fn path_has_parent_dir(path: &Path) -> bool {
+    use std::path::Component;
+    path.components().any(|c| matches!(c, Component::ParentDir))
+}
+
+/// True if `path` is `root` itself or lies underneath it.
+///
+/// Both arguments are expected to be canonical (caller's responsibility).
+fn is_within(path: &Path, root: &Path) -> bool {
+    path == root || path.starts_with(root)
+}
 
 fn walk_dir(
     root: &Path,
@@ -483,9 +650,42 @@ pub async fn run() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    let service = FsTools::new().serve(stdio()).await?;
+    let tools = build_tools_from_env();
+    let service = tools.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Build an [`FsTools`] honoring `SAVVAGENT_TOOL_FS_ROOT`. Falls back to the
+/// process CWD; if both fail to canonicalize, returns the unrestricted
+/// constructor so the binary still serves something useful.
+fn build_tools_from_env() -> FsTools {
+    let env_root = std::env::var("SAVVAGENT_TOOL_FS_ROOT")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(root) = env_root {
+        match FsTools::with_root(&root) {
+            Ok(t) => {
+                tracing::info!(root = %root, "tool-fs containment enabled (env)");
+                return t;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    root = %root,
+                    error = %e,
+                    "SAVVAGENT_TOOL_FS_ROOT failed to canonicalize; falling back to CWD",
+                );
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir()
+        && let Ok(t) = FsTools::with_root(&cwd)
+    {
+        tracing::info!(root = %cwd.display(), "tool-fs containment enabled (cwd)");
+        return t;
+    }
+    tracing::warn!("tool-fs running without containment (no usable root)");
+    FsTools::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -689,6 +889,224 @@ mod tests {
         assert!(out.0.matches.iter().any(|m| m.ends_with("keep.rs")));
         assert!(out.0.matches.iter().any(|m| m.ends_with("also.rs")));
         assert!(!out.0.matches.iter().any(|m| m.ends_with("skip.txt")));
+    }
+
+    // ---- Layer 1 path containment (FsTools::with_root) -------------------
+
+    #[tokio::test]
+    async fn with_root_rejects_absolute_outside() {
+        let inside = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        tokio::fs::write(&outside_file, b"shh").await.unwrap();
+
+        let tools = FsTools::with_root(inside.path()).unwrap();
+        let err = tools
+            .read_file(Parameters(ReadFileInput {
+                path: outside_file.to_string_lossy().into_owned(),
+                max_bytes: None,
+            }))
+            .await
+            .err()
+            .expect("expected error");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn with_root_rejects_parent_traversal() {
+        let inside = tempdir().unwrap();
+        // Make a real file outside the root the traversal would target.
+        let parent = inside.path().parent().unwrap();
+        let escape = parent.join("escape-target.txt");
+        let _ = tokio::fs::write(&escape, b"x").await; // best-effort
+
+        let tools = FsTools::with_root(inside.path()).unwrap();
+        let err = tools
+            .read_file(Parameters(ReadFileInput {
+                path: "../escape-target.txt".into(),
+                max_bytes: None,
+            }))
+            .await
+            .err()
+            .expect("expected error");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+
+        let _ = tokio::fs::remove_file(&escape).await;
+    }
+
+    #[tokio::test]
+    async fn with_root_resolves_relative_under_root() {
+        let inside = tempdir().unwrap();
+        tokio::fs::create_dir(inside.path().join("sub"))
+            .await
+            .unwrap();
+        tokio::fs::write(inside.path().join("sub/x.txt"), b"contents")
+            .await
+            .unwrap();
+
+        let tools = FsTools::with_root(inside.path()).unwrap();
+        let out = tools
+            .read_file(Parameters(ReadFileInput {
+                path: "sub/x.txt".into(),
+                max_bytes: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out.0.content, "contents");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn with_root_rejects_symlink_escape() {
+        let inside = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let outside_file = outside.path().join("target.txt");
+        tokio::fs::write(&outside_file, b"shh").await.unwrap();
+
+        let link = inside.path().join("link");
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+
+        let tools = FsTools::with_root(inside.path()).unwrap();
+        let err = tools
+            .read_file(Parameters(ReadFileInput {
+                path: "link".into(),
+                max_bytes: None,
+            }))
+            .await
+            .err()
+            .expect("expected error");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn with_root_write_rejects_outside() {
+        let inside = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("written.txt");
+
+        let tools = FsTools::with_root(inside.path()).unwrap();
+        let err = tools
+            .write_file(Parameters(WriteFileInput {
+                path: target.to_string_lossy().into_owned(),
+                content: "nope".into(),
+                create_dirs: false,
+            }))
+            .await
+            .err()
+            .expect("expected error");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+        assert!(
+            !target.exists(),
+            "containment must not create files outside the root"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_root_write_creates_dirs_inside_root() {
+        let inside = tempdir().unwrap();
+
+        let tools = FsTools::with_root(inside.path()).unwrap();
+        let out = tools
+            .write_file(Parameters(WriteFileInput {
+                path: "a/b/c.txt".into(),
+                content: "ok".into(),
+                create_dirs: true,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out.0.bytes_written, 2);
+        let written = tokio::fs::read_to_string(inside.path().join("a/b/c.txt"))
+            .await
+            .unwrap();
+        assert_eq!(written, "ok");
+    }
+
+    #[tokio::test]
+    async fn with_root_glob_filters_outside_matches() {
+        // Inside the root: keep.rs, deep/also.rs.
+        // Outside the root: a sibling file the glob would otherwise match
+        // through a symlink.
+        let inside = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        tokio::fs::write(inside.path().join("keep.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(inside.path().join("deep"))
+            .await
+            .unwrap();
+        tokio::fs::write(inside.path().join("deep/also.rs"), b"")
+            .await
+            .unwrap();
+        tokio::fs::write(outside.path().join("escape.rs"), b"")
+            .await
+            .unwrap();
+
+        // On unix, plant a symlink-to-outside inside the root so the glob
+        // walker would otherwise traverse it.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), inside.path().join("escape-link")).unwrap();
+
+        let tools = FsTools::with_root(inside.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*.rs".into(),
+                root: Some(".".into()),
+                max_matches: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            out.0.matches.iter().any(|m| m.ends_with("keep.rs")),
+            "{:?}",
+            out.0.matches
+        );
+        assert!(
+            out.0.matches.iter().any(|m| m.ends_with("also.rs")),
+            "{:?}",
+            out.0.matches
+        );
+        assert!(
+            !out.0.matches.iter().any(|m| m.contains("escape.rs")),
+            "containment must not surface matches outside the root: {:?}",
+            out.0.matches
+        );
+    }
+
+    #[tokio::test]
+    async fn with_root_glob_rejects_parent_traversal() {
+        let inside = tempdir().unwrap();
+        let tools = FsTools::with_root(inside.path()).unwrap();
+        let err = tools
+            .glob(Parameters(GlobInput {
+                pattern: "../*.rs".into(),
+                root: Some(".".into()),
+                max_matches: None,
+            }))
+            .await
+            .err()
+            .expect("expected error");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
     }
 
     #[tokio::test]

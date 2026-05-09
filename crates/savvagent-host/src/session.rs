@@ -126,7 +126,7 @@ impl Host {
                 Box::new(RmcpProviderClient::connect(url).await?)
             }
         };
-        let tools = ToolRegistry::connect(&config.tools).await?;
+        let tools = ToolRegistry::connect(&config.tools, &config.project_root).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         Ok(Self {
@@ -148,7 +148,7 @@ impl Host {
         config: HostConfig,
         provider: Box<dyn ProviderClient + Send + Sync>,
     ) -> Result<Self, HostError> {
-        let tools = ToolRegistry::connect(&config.tools).await?;
+        let tools = ToolRegistry::connect(&config.tools, &config.project_root).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         Ok(Self {

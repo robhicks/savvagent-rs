@@ -8,6 +8,7 @@
 //! [`ToolCallOutcome`].
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -36,7 +37,11 @@ struct ToolServer {
 
 impl ToolRegistry {
     /// Spawn each configured tool server and aggregate their tool lists.
-    pub async fn connect(endpoints: &[ToolEndpoint]) -> Result<Self> {
+    ///
+    /// `project_root` is forwarded to children via `SAVVAGENT_TOOL_FS_ROOT`
+    /// so that the bundled `savvagent-tool-fs` binary confines paths to the
+    /// host's project root by default.
+    pub async fn connect(endpoints: &[ToolEndpoint], project_root: &Path) -> Result<Self> {
         let mut servers = Vec::with_capacity(endpoints.len());
         let mut routes: HashMap<String, usize> = HashMap::new();
         let mut defs = Vec::new();
@@ -47,6 +52,7 @@ impl ToolRegistry {
                     let label = command.display().to_string();
                     let mut cmd = tokio::process::Command::new(command);
                     cmd.args(args);
+                    cmd.env("SAVVAGENT_TOOL_FS_ROOT", project_root);
                     let transport = TokioChildProcess::new(cmd)
                         .with_context(|| format!("spawn tool server: {label}"))?;
                     let service = ()

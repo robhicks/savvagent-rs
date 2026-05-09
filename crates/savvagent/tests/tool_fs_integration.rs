@@ -33,8 +33,11 @@ async fn round_trip_through_child_process() {
     let dir = tempdir().unwrap();
     let dir_str = dir.path().to_string_lossy().into_owned();
 
-    let transport =
-        TokioChildProcess::new(tokio::process::Command::new(BIN).configure(|_| {})).unwrap();
+    let dir_for_env = dir.path().to_path_buf();
+    let transport = TokioChildProcess::new(tokio::process::Command::new(BIN).configure(|c| {
+        c.env("SAVVAGENT_TOOL_FS_ROOT", &dir_for_env);
+    }))
+    .unwrap();
     let client = ().serve(transport).await.expect("client init");
 
     // 1. write_file — create a new file with parent dirs.
@@ -117,8 +120,11 @@ async fn read_file_too_large_surfaces_error() {
     let path = dir.path().join("big.txt");
     tokio::fs::write(&path, vec![b'x'; 64]).await.unwrap();
 
-    let transport =
-        TokioChildProcess::new(tokio::process::Command::new(BIN).configure(|_| {})).unwrap();
+    let dir_for_env = dir.path().to_path_buf();
+    let transport = TokioChildProcess::new(tokio::process::Command::new(BIN).configure(|c| {
+        c.env("SAVVAGENT_TOOL_FS_ROOT", &dir_for_env);
+    }))
+    .unwrap();
     let client = ().serve(transport).await.expect("client init");
 
     let err = client

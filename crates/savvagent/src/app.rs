@@ -255,7 +255,7 @@ impl App {
         self.commands = vec![
             Command {
                 name: "/connect".into(),
-                description: "Choose a provider and set its API key".into(),
+                description: "Switch provider (uses stored key, or prompts if missing)".into(),
             },
             Command {
                 name: "/clear".into(),
