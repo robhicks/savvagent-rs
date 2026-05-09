@@ -19,12 +19,14 @@
 #![warn(missing_docs)]
 
 mod config;
+mod permissions;
 mod project;
 mod provider;
 mod session;
 mod tools;
 
 pub use config::{HostConfig, ProviderEndpoint, ToolEndpoint};
+pub use permissions::{PermissionDecision, PermissionPolicy, Verdict};
 pub use session::{Host, HostError, ToolCall, ToolCallStatus, TurnEvent, TurnOutcome};
 
 #[doc(hidden)]

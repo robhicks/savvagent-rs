@@ -32,7 +32,9 @@ use anyhow::{Context, Result};
 use app::{App, CommandSelection, Entry, InputMode};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
-use savvagent_host::{Host, HostConfig, ProviderEndpoint, ToolEndpoint, TurnEvent};
+use savvagent_host::{
+    Host, HostConfig, PermissionDecision, ProviderEndpoint, ToolEndpoint, TurnEvent,
+};
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
 use tui_textarea::TextArea;
@@ -448,11 +450,20 @@ async fn run_app(
                             tokio::spawn(async move {
                                 let (ev_tx, mut ev_rx) = mpsc::channel(64);
                                 let host_for_run = host.clone();
+                                let host_for_resolve = host.clone();
                                 let prompt = value;
                                 let runner = tokio::spawn(async move {
                                     host_for_run.run_turn_streaming(prompt, ev_tx).await
                                 });
                                 while let Some(ev) = ev_rx.recv().await {
+                                    // M9 PR 1: auto-allow every Ask. PR 2 will
+                                    // replace this with a modal that prompts
+                                    // the user before resolving.
+                                    if let TurnEvent::PermissionRequested { id, .. } = &ev {
+                                        host_for_resolve
+                                            .resolve_permission(*id, PermissionDecision::Allow)
+                                            .await;
+                                    }
                                     if tx.send(WorkerMsg::Event(ev)).await.is_err() {
                                         break;
                                     }

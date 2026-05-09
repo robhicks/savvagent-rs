@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::permissions::PermissionPolicy;
+
 /// Where the host should reach the LLM provider.
 #[derive(Debug, Clone)]
 pub enum ProviderEndpoint {
@@ -46,6 +48,9 @@ pub struct HostConfig {
     /// Hard cap on tool-use iterations within a single turn. Guards against
     /// pathological loops.
     pub max_iterations: u32,
+    /// Permission policy override. `None` means the host builds a default
+    /// policy ([`PermissionPolicy::default_for`]) from `project_root`.
+    pub policy: Option<PermissionPolicy>,
 }
 
 impl HostConfig {
@@ -60,6 +65,7 @@ impl HostConfig {
             project_root: PathBuf::from("."),
             system_prompt: None,
             max_iterations: 20,
+            policy: None,
         }
     }
 
@@ -90,6 +96,13 @@ impl HostConfig {
     /// Override the iteration cap.
     pub fn with_max_iterations(mut self, n: u32) -> Self {
         self.max_iterations = n;
+        self
+    }
+
+    /// Override the permission policy. When unset, the host builds
+    /// [`PermissionPolicy::default_for(project_root)`] at startup.
+    pub fn with_policy(mut self, policy: PermissionPolicy) -> Self {
+        self.policy = Some(policy);
         self
     }
 }

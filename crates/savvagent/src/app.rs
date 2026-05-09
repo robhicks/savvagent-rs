@@ -208,6 +208,15 @@ impl App {
                     *p = Some(truncate(&result, 240));
                 }
             }
+            TurnEvent::PermissionRequested { .. } => {
+                // PR 1: the worker auto-allows; nothing visible. PR 2 replaces
+                // this with a modal driven from a dedicated InputMode.
+            }
+            TurnEvent::ToolCallDenied { name, reason } => {
+                self.flush_live_text();
+                self.entries
+                    .push(Entry::Note(format!("denied {name}: {reason}")));
+            }
             TurnEvent::TurnComplete { outcome } => {
                 // If streaming delivered text deltas, flush them. Otherwise
                 // fall back to the authoritative final text on the outcome —

@@ -1,6 +1,8 @@
 //! Conversation state and the tool-use loop.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use savvagent_mcp::ProviderClient;
 use savvagent_protocol::{
@@ -9,9 +11,10 @@ use savvagent_protocol::{
 };
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::config::{HostConfig, ProviderEndpoint};
+use crate::permissions::{PermissionDecision, PermissionPolicy, Verdict};
 use crate::project;
 use crate::provider::RmcpProviderClient;
 use crate::tools::ToolRegistry;
@@ -96,6 +99,28 @@ pub enum TurnEvent {
         /// String payload that was returned to the model.
         result: String,
     },
+    /// Policy returned [`Verdict::Ask`] for a tool call. The turn is paused
+    /// until the embedder calls [`Host::resolve_permission`] with the matching
+    /// `id`. Emitted before any `ToolCallStarted` for this call.
+    PermissionRequested {
+        /// Opaque request id; pass back to [`Host::resolve_permission`].
+        id: u64,
+        /// Tool the model wants to invoke.
+        name: String,
+        /// Short, human-readable summary for the modal.
+        summary: String,
+        /// Full argument JSON, in case the UI wants to render it expanded.
+        args: Value,
+    },
+    /// A tool call was refused (by policy or by the user). No `ToolCallStarted`
+    /// or `ToolCallFinished` is emitted for this call — only this event plus a
+    /// synthetic error `tool_result` appended to the conversation.
+    ToolCallDenied {
+        /// Tool name.
+        name: String,
+        /// Reason that's also embedded in the synthetic `tool_result`.
+        reason: String,
+    },
     /// The whole turn finished.
     TurnComplete {
         /// Final outcome — same value `run_turn_streaming` returns.
@@ -111,6 +136,13 @@ pub struct Host {
     tools: Mutex<Option<ToolRegistry>>,
     state: Mutex<SessionState>,
     system_prompt: Option<String>,
+    policy: PermissionPolicy,
+    /// Outstanding permission requests. Inserted when the loop emits
+    /// `PermissionRequested`; the matching `oneshot` is consumed by
+    /// [`Host::resolve_permission`].
+    pending: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
+    /// Monotonic source for permission-request ids.
+    next_request_id: AtomicU64,
 }
 
 struct SessionState {
@@ -129,6 +161,10 @@ impl Host {
         let tools = ToolRegistry::connect(&config.tools, &config.project_root).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
+        let policy = config
+            .policy
+            .clone()
+            .unwrap_or_else(|| PermissionPolicy::default_for(&config.project_root));
         Ok(Self {
             config,
             provider,
@@ -137,6 +173,9 @@ impl Host {
                 messages: Vec::new(),
             }),
             system_prompt,
+            policy,
+            pending: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
         })
     }
 
@@ -151,6 +190,10 @@ impl Host {
         let tools = ToolRegistry::connect(&config.tools, &config.project_root).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
+        let policy = config
+            .policy
+            .clone()
+            .unwrap_or_else(|| PermissionPolicy::default_for(&config.project_root));
         Ok(Self {
             config,
             provider,
@@ -159,6 +202,9 @@ impl Host {
                 messages: Vec::new(),
             }),
             system_prompt,
+            policy,
+            pending: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
         })
     }
 
@@ -319,47 +365,76 @@ impl Host {
             // Execute every requested tool call and append a single user
             // turn of tool_result blocks (Anthropic's expected shape).
             let mut tool_results: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
-            for (id, name, input) in tool_uses {
-                if let Some(tx) = &events {
-                    let _ = tx
-                        .send(TurnEvent::ToolCallStarted {
-                            name: name.clone(),
-                            arguments: input.clone(),
-                        })
-                        .await;
-                }
-                let outcome = {
-                    let guard = self.tools.lock().await;
-                    let registry = guard.as_ref().expect("tools registry present");
-                    registry.call(&name, input.clone()).await
-                };
-                let status = if outcome.is_error {
-                    ToolCallStatus::Errored
-                } else {
-                    ToolCallStatus::Ok
-                };
-                if let Some(tx) = &events {
-                    let _ = tx
-                        .send(TurnEvent::ToolCallFinished {
-                            name: name.clone(),
+            for (tool_use_id, name, input) in tool_uses {
+                let gate = self.gate_tool_call(&name, &input, events.as_ref()).await;
+                match gate {
+                    Ok(()) => {
+                        if let Some(tx) = &events {
+                            let _ = tx
+                                .send(TurnEvent::ToolCallStarted {
+                                    name: name.clone(),
+                                    arguments: input.clone(),
+                                })
+                                .await;
+                        }
+                        let outcome = {
+                            let guard = self.tools.lock().await;
+                            let registry = guard.as_ref().expect("tools registry present");
+                            registry.call(&name, input.clone()).await
+                        };
+                        let status = if outcome.is_error {
+                            ToolCallStatus::Errored
+                        } else {
+                            ToolCallStatus::Ok
+                        };
+                        if let Some(tx) = &events {
+                            let _ = tx
+                                .send(TurnEvent::ToolCallFinished {
+                                    name: name.clone(),
+                                    status,
+                                    result: outcome.payload.clone(),
+                                })
+                                .await;
+                        }
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id,
+                            content: vec![ContentBlock::Text {
+                                text: outcome.payload.clone(),
+                            }],
+                            is_error: outcome.is_error,
+                        });
+                        tool_calls.push(ToolCall {
+                            name,
+                            arguments: input,
                             status,
-                            result: outcome.payload.clone(),
-                        })
-                        .await;
+                            result: outcome.payload,
+                        });
+                    }
+                    Err(reason) => {
+                        if let Some(tx) = &events {
+                            let _ = tx
+                                .send(TurnEvent::ToolCallDenied {
+                                    name: name.clone(),
+                                    reason: reason.clone(),
+                                })
+                                .await;
+                        }
+                        let payload = format!("denied by policy: {reason}");
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id,
+                            content: vec![ContentBlock::Text {
+                                text: payload.clone(),
+                            }],
+                            is_error: true,
+                        });
+                        tool_calls.push(ToolCall {
+                            name,
+                            arguments: input,
+                            status: ToolCallStatus::Errored,
+                            result: payload,
+                        });
+                    }
                 }
-                tool_results.push(ContentBlock::ToolResult {
-                    tool_use_id: id,
-                    content: vec![ContentBlock::Text {
-                        text: outcome.payload.clone(),
-                    }],
-                    is_error: outcome.is_error,
-                });
-                tool_calls.push(ToolCall {
-                    name,
-                    arguments: input,
-                    status,
-                    result: outcome.payload,
-                });
             }
             messages.push(Message {
                 role: Role::User,
@@ -394,6 +469,63 @@ impl Host {
     /// Borrow the active config.
     pub fn config(&self) -> &HostConfig {
         &self.config
+    }
+
+    /// Resolve a previously-emitted [`TurnEvent::PermissionRequested`].
+    ///
+    /// Called by the embedder (TUI) once the user picks Allow / Deny in the
+    /// modal. A no-op if `id` is unknown — that handles double-resolves and
+    /// races where the turn was cancelled before the user answered.
+    pub async fn resolve_permission(&self, id: u64, decision: PermissionDecision) {
+        let sender = self.pending.lock().await.remove(&id);
+        if let Some(tx) = sender {
+            let _ = tx.send(decision);
+        }
+    }
+
+    /// Run policy against `(name, input)` and either return `Ok(())` (caller
+    /// proceeds with the call) or `Err(reason)` (caller synthesizes a denied
+    /// `tool_result`). For [`Verdict::Ask`], emits a
+    /// [`TurnEvent::PermissionRequested`] and awaits the matching
+    /// [`Self::resolve_permission`] via a oneshot.
+    async fn gate_tool_call(
+        &self,
+        name: &str,
+        input: &Value,
+        events: Option<&mpsc::Sender<TurnEvent>>,
+    ) -> Result<(), String> {
+        match self.policy.evaluate(name, input) {
+            Verdict::Allow => Ok(()),
+            Verdict::Deny { reason } => Err(reason),
+            Verdict::Ask { summary } => {
+                let Some(tx) = events else {
+                    // No interactive surface — Ask collapses to Deny so the
+                    // model gets a clear "non-interactive turn" tool_result
+                    // instead of hanging on a oneshot that nobody resolves.
+                    return Err("non-interactive turn".into());
+                };
+                let req_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+                let (resolve_tx, resolve_rx) = oneshot::channel();
+                self.pending.lock().await.insert(req_id, resolve_tx);
+                let send_result = tx
+                    .send(TurnEvent::PermissionRequested {
+                        id: req_id,
+                        name: name.to_string(),
+                        summary,
+                        args: input.clone(),
+                    })
+                    .await;
+                if send_result.is_err() {
+                    self.pending.lock().await.remove(&req_id);
+                    return Err("event channel closed before permission could be requested".into());
+                }
+                match resolve_rx.await {
+                    Ok(PermissionDecision::Allow) => Ok(()),
+                    Ok(PermissionDecision::Deny) => Err("denied by user".into()),
+                    Err(_) => Err("permission channel dropped".into()),
+                }
+            }
+        }
     }
 
     /// Cleanly shut down tool-server children. The provider session is
@@ -431,5 +563,199 @@ async fn forward_text_deltas(mut rx: mpsc::Receiver<StreamEvent>, out: mpsc::Sen
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use async_trait::async_trait;
+    use savvagent_mcp::ProviderClient;
+    use savvagent_protocol::{
+        CompleteRequest, CompleteResponse, ContentBlock, ProviderError, StopReason, Usage,
+    };
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::config::{HostConfig, ProviderEndpoint};
+
+    /// Mock provider that on the first `complete` returns one `tool_use` and
+    /// on every subsequent call returns `end_turn`. The first response asks
+    /// for `tool_name` with the supplied JSON `tool_args`.
+    struct ScriptedProvider {
+        calls: AtomicUsize,
+        tool_name: String,
+        tool_args: Value,
+    }
+
+    impl ScriptedProvider {
+        fn new(tool_name: impl Into<String>, tool_args: Value) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                tool_name: tool_name.into(),
+                tool_args,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProviderClient for ScriptedProvider {
+        async fn complete(
+            &self,
+            req: CompleteRequest,
+            _events: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            let (content, stop_reason) = if n == 0 {
+                (
+                    vec![ContentBlock::ToolUse {
+                        id: "tu_1".into(),
+                        name: self.tool_name.clone(),
+                        input: self.tool_args.clone(),
+                    }],
+                    StopReason::ToolUse,
+                )
+            } else {
+                (
+                    vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
+                    StopReason::EndTurn,
+                )
+            };
+            Ok(CompleteResponse {
+                id: format!("resp-{n}"),
+                model: req.model,
+                content,
+                stop_reason,
+                stop_sequence: None,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    fn config_no_tools() -> HostConfig {
+        HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(std::env::temp_dir().join("savvagent-policy-test"))
+    }
+
+    /// `read_file` against `.env` is a default-Deny — host must synthesize an
+    /// error tool_result and emit `ToolCallDenied`, never touching the
+    /// registry.
+    #[tokio::test]
+    async fn deny_path_synthesizes_error_and_emits_event() {
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("read_file", json!({"path": ".env"})));
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let outcome = host.run_turn_streaming("hi", tx).await.unwrap();
+
+        // The model thought a tool ran; we report it as Errored with a
+        // policy-denied payload.
+        assert_eq!(outcome.tool_calls.len(), 1);
+        let call = &outcome.tool_calls[0];
+        assert_eq!(call.name, "read_file");
+        assert_eq!(call.status, ToolCallStatus::Errored);
+        assert!(call.result.contains("denied by policy"), "{}", call.result);
+
+        let mut saw_denied = false;
+        let mut saw_started = false;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                TurnEvent::ToolCallDenied { ref name, .. } if name == "read_file" => {
+                    saw_denied = true;
+                }
+                TurnEvent::ToolCallStarted { .. } => {
+                    saw_started = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_denied, "expected a ToolCallDenied event");
+        assert!(
+            !saw_started,
+            "ToolCallStarted should not fire for a denied call"
+        );
+    }
+
+    /// `run` is default-Ask — host must emit `PermissionRequested` and wait
+    /// for `resolve_permission`. After Allow, the registry runs (returns
+    /// "unknown tool" since none registered, which is fine — we're testing
+    /// the gating, not the call).
+    #[tokio::test]
+    async fn ask_path_blocks_until_resolved() {
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("run", json!({"command": "echo hi"})));
+        let host = Arc::new(
+            Host::with_components(config_no_tools(), provider)
+                .await
+                .unwrap(),
+        );
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let host_for_run = Arc::clone(&host);
+        let runner = tokio::spawn(async move { host_for_run.run_turn_streaming("hi", tx).await });
+
+        // Drain events until we see PermissionRequested, then resolve Allow.
+        let mut request_id: Option<u64> = None;
+        while let Some(ev) = rx.recv().await {
+            if let TurnEvent::PermissionRequested { id, ref name, .. } = ev {
+                assert_eq!(name, "run");
+                request_id = Some(id);
+                break;
+            }
+        }
+        let id = request_id.expect("PermissionRequested never arrived");
+        host.resolve_permission(id, PermissionDecision::Allow).await;
+
+        // Drain the rest.
+        while rx.recv().await.is_some() {}
+
+        let outcome = runner.await.unwrap().unwrap();
+        // The Allow let the call reach the (empty) registry, which returns an
+        // "unknown tool" error. That's the contract we want — the gate said
+        // "go" and the call dispatched.
+        assert_eq!(outcome.tool_calls.len(), 1);
+        let call = &outcome.tool_calls[0];
+        assert_eq!(call.name, "run");
+        assert_eq!(call.status, ToolCallStatus::Errored);
+        assert!(
+            call.result.contains("unknown tool"),
+            "expected dispatch to reach registry, got: {}",
+            call.result
+        );
+    }
+
+    /// `non-streaming` `run_turn` has no event channel, so any Ask collapses
+    /// to a Deny rather than hanging on a oneshot that nobody resolves.
+    #[tokio::test]
+    async fn ask_with_no_events_collapses_to_deny() {
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("run", json!({"command": "echo hi"})));
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+
+        let outcome = host.run_turn("hi").await.unwrap();
+        assert_eq!(outcome.tool_calls.len(), 1);
+        assert_eq!(outcome.tool_calls[0].status, ToolCallStatus::Errored);
+        assert!(
+            outcome.tool_calls[0]
+                .result
+                .contains("non-interactive turn"),
+            "{}",
+            outcome.tool_calls[0].result
+        );
     }
 }
