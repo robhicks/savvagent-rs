@@ -55,7 +55,7 @@ What we change:
 
 ### Goals (v0.1 MVP)
 
-- A working terminal agent that can hold a multi-turn conversation with Claude, read and edit files in the current project, and run commands — with sub-100 ms TUI input latency under typical use.
+- A working terminal agent that can hold a multi-turn conversation with Anthropic or Gemini, read and edit files in the current project, and run commands — with sub-100 ms TUI input latency under typical use.
 - A clean separation in which `savvagent-host` knows nothing about Anthropic, and `provider-anthropic` knows nothing about the TUI.
 - A protocol (SPP) frozen enough to publish v0.1 on crates.io.
 - Installing Savvagent on Linux/macOS/Windows should be downloading a single archive (or running a one-line install script) plus authenticating with a provider — either an env var like `ANTHROPIC_API_KEY` or running `/connect` once to store the key in the OS keyring. Each platform archive bundles the TUI plus the `savvagent-tool-fs` / `savvagent-anthropic` / `savvagent-gemini` MCP servers under a single installer.
@@ -205,7 +205,7 @@ M1–M5 have all landed; M6 (the v0.1.0 release) is the only remaining numbered 
 
 ### M5 · `savvagent` TUI on the host (✅ done)
 - TUI routes every turn through `savvagent-host` with a streaming-token render path; transcripts persist to `~/.savvagent/transcripts/<unix>.json`.
-- `/connect` swaps the active host atomically (keyring-backed credentials, `Arc<RwLock<Option<Arc<Host>>>>`); `/save` persists transcripts on demand.
+- `/connect` swaps the active host atomically (keyring-backed credentials, `Arc<RwLock<Option<Arc<Host>>>>`); `/save` persists transcripts on demand; `/view` and `/edit` open files in the in-TUI viewer/editor.
 - A second provider (`provider-gemini`) ships alongside Anthropic, validating the in-process bridge.
 
 ### M6 · Public release v0.1.0 (in progress)
@@ -225,7 +225,7 @@ M1–M5 have all landed; M6 (the v0.1.0 release) is the only remaining numbered 
 - **Tool sandboxing** (Layer 3). OS-level per-process isolation for tool MCP servers. Linux via `bubblewrap` (project-root bind-mount, `--unshare-net`, `--die-with-parent`, optional seccomp-bpf belt); macOS via `sandbox-exec` profile; Windows deferred (AppContainer + Job Objects is the eventual target). The host wraps the spawn — the multi-call binary's `savvagent tool-fs` becomes the inner exec, so tools themselves don't change. Runtime cost is ~zero (kernel namespaces, native syscall speed); startup adds 10–50 ms once per session because `tool-fs` is a long-lived stdio child. Opt-in via `--sandbox` flag and per-tool config in v0.2; default-on candidate for v0.3 once defaults are proven non-annoying.
 - **Crates.io publication** of `savvagent-protocol`, `savvagent-mcp`, and `savvagent-host` once an external consumer wants them as libraries.
 - **Session resume.** Per-turn transcripts already persist; reload + replay is the gap.
-- More slash commands beyond the existing `/connect` and `/save`: `/clear`, `/model`, `/tools`.
+- More slash commands beyond the existing `/connect`, `/save`, `/view`, and `/edit`: `/clear`, `/model`, `/tools`.
 - v0.3+: LSP integration, IDE extensions (ACP-style), desktop app.
 
 ---
