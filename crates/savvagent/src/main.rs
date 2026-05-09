@@ -15,8 +15,9 @@
 //!
 //! Other configuration:
 //!
-//! - `SAVVAGENT_MODEL`        (overrides the per-provider default)
-//! - `SAVVAGENT_TOOL_FS_BIN`  (default `savvagent-tool-fs` on $PATH)
+//! - `SAVVAGENT_MODEL`          (overrides the per-provider default)
+//! - `SAVVAGENT_TOOL_FS_BIN`    (default `savvagent-tool-fs` on $PATH)
+//! - `SAVVAGENT_TOOL_BASH_BIN`  (default `savvagent-tool-bash` on $PATH)
 
 mod app;
 mod creds;
@@ -49,15 +50,40 @@ enum WorkerMsg {
 
 type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
 
+/// Resolved paths for every bundled tool-server binary the TUI knows how to
+/// register. Each field is `None` when the binary couldn't be found; the
+/// host just doesn't advertise that tool's surface in `tools/list`.
+#[derive(Clone, Default)]
+struct ToolBins {
+    fs: Option<PathBuf>,
+    bash: Option<PathBuf>,
+}
+
+impl ToolBins {
+    /// Append every populated entry as a stdio [`ToolEndpoint`] on `config`.
+    fn apply(&self, mut config: HostConfig) -> HostConfig {
+        for path in [self.fs.as_deref(), self.bash.as_deref()].into_iter().flatten() {
+            config = config.with_tool(ToolEndpoint::Stdio {
+                command: path.to_path_buf(),
+                args: vec![],
+            });
+        }
+        config
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     init_tracing();
 
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let tool_bin = locate_tool_fs();
+    let tool_bins = ToolBins {
+        fs: locate_bundled_bin("savvagent-tool-fs", "SAVVAGENT_TOOL_FS_BIN"),
+        bash: locate_bundled_bin("savvagent-tool-bash", "SAVVAGENT_TOOL_BASH_BIN"),
+    };
 
-    let initial = bootstrap_host(&project_root, tool_bin.as_deref()).await;
+    let initial = bootstrap_host(&project_root, &tool_bins).await;
     let header_model = initial
         .as_ref()
         .map(|(_, model, _)| model.clone())
@@ -85,9 +111,14 @@ async fn main() -> Result<()> {
             "Not connected. Type / (or press Ctrl-P) and pick /connect to set up a provider.",
         );
     }
-    if tool_bin.is_none() {
+    if tool_bins.fs.is_none() {
         app.push_note(
-            "Note: savvagent-tool-fs not found — tools disabled. Run `cargo build` or set SAVVAGENT_TOOL_FS_BIN.",
+            "Note: savvagent-tool-fs not found — fs tools disabled. Run `cargo build` or set SAVVAGENT_TOOL_FS_BIN.",
+        );
+    }
+    if tool_bins.bash.is_none() {
+        app.push_note(
+            "Note: savvagent-tool-bash not found — bash disabled. Run `cargo build` or set SAVVAGENT_TOOL_BASH_BIN.",
         );
     }
     let res = run_app(
@@ -95,7 +126,7 @@ async fn main() -> Result<()> {
         &mut app,
         host_slot.clone(),
         project_root,
-        tool_bin,
+        tool_bins,
     )
     .await;
 
@@ -121,19 +152,12 @@ async fn main() -> Result<()> {
 /// and provider id used (so the App's header is right).
 async fn bootstrap_host(
     project_root: &Path,
-    tool_bin: Option<&Path>,
+    tool_bins: &ToolBins,
 ) -> Option<(Arc<Host>, String, Option<&'static str>)> {
     if let Ok(url) = std::env::var("SAVVAGENT_PROVIDER_URL") {
         let model =
             std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
-        match start_host_remote(
-            url,
-            model.clone(),
-            project_root.to_path_buf(),
-            tool_bin.map(Path::to_path_buf),
-        )
-        .await
-        {
+        match start_host_remote(url, model.clone(), project_root.to_path_buf(), tool_bins).await {
             Ok(host) => return Some((host, model, None)),
             Err(e) => {
                 eprintln!("warning: SAVVAGENT_PROVIDER_URL set but connect failed: {e:#}");
@@ -145,7 +169,7 @@ async fn bootstrap_host(
         let Ok(Some(key)) = creds::load(spec.id) else {
             continue;
         };
-        match build_in_process_host(spec, &key, project_root, tool_bin).await {
+        match build_in_process_host(spec, &key, project_root, tool_bins).await {
             Ok(host) => {
                 let model = std::env::var("SAVVAGENT_MODEL")
                     .unwrap_or_else(|_| spec.default_model.to_string());
@@ -166,10 +190,10 @@ async fn build_in_process_host(
     spec: &'static ProviderSpec,
     api_key: &str,
     project_root: &Path,
-    tool_bin: Option<&Path>,
+    tool_bins: &ToolBins,
 ) -> Result<Arc<Host>> {
     let model = std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| spec.default_model.to_string());
-    build_in_process_host_with_model(spec, api_key, project_root, tool_bin, model).await
+    build_in_process_host_with_model(spec, api_key, project_root, tool_bins, model).await
 }
 
 /// Same as [`build_in_process_host`] but with an explicit `model` id —
@@ -179,7 +203,7 @@ async fn build_in_process_host_with_model(
     spec: &'static ProviderSpec,
     api_key: &str,
     project_root: &Path,
-    tool_bin: Option<&Path>,
+    tool_bins: &ToolBins,
     model: String,
 ) -> Result<Arc<Host>> {
     let handler = (spec.build)(api_key).with_context(|| format!("building {} handler", spec.id))?;
@@ -188,19 +212,15 @@ async fn build_in_process_host_with_model(
     // The endpoint variant is a placeholder when we hand the host a
     // pre-built ProviderClient via `with_components`; pick a recognizable
     // dummy URL so a stray log line says where it came from.
-    let mut config = HostConfig::new(
-        ProviderEndpoint::StreamableHttp {
-            url: format!("inproc://{}", spec.id),
-        },
-        model,
-    )
-    .with_project_root(project_root.to_path_buf());
-    if let Some(bin) = tool_bin {
-        config = config.with_tool(ToolEndpoint::Stdio {
-            command: bin.to_path_buf(),
-            args: vec![],
-        });
-    }
+    let config = tool_bins.apply(
+        HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: format!("inproc://{}", spec.id),
+            },
+            model,
+        )
+        .with_project_root(project_root.to_path_buf()),
+    );
     let host = Host::with_components(config, client)
         .await
         .context("Host::with_components")?;
@@ -211,42 +231,38 @@ async fn start_host_remote(
     url: String,
     model: String,
     project_root: PathBuf,
-    tool_bin: Option<PathBuf>,
+    tool_bins: &ToolBins,
 ) -> Result<Arc<Host>> {
-    let mut config = HostConfig::new(ProviderEndpoint::StreamableHttp { url }, model)
-        .with_project_root(project_root);
-    if let Some(bin) = tool_bin {
-        config = config.with_tool(ToolEndpoint::Stdio {
-            command: bin,
-            args: vec![],
-        });
-    }
+    let config = tool_bins.apply(
+        HostConfig::new(ProviderEndpoint::StreamableHttp { url }, model)
+            .with_project_root(project_root),
+    );
     let host = Host::start(config).await.context("failed to start host")?;
     Ok(Arc::new(host))
 }
 
-/// Resolve the `savvagent-tool-fs` binary. Tries (in order):
+/// Resolve a bundled tool-server binary by name. Tries (in order):
 ///
-/// 1. `SAVVAGENT_TOOL_FS_BIN` env override (must point at an existing file).
+/// 1. `<env_override>` env var (must point at an existing file).
 /// 2. A sibling of the running TUI executable — i.e. `target/<profile>/`
 ///    when launched via `cargo run`, or the install dir when installed.
-/// 3. Bare `savvagent-tool-fs` resolved via `PATH`.
+/// 3. Bare `<name>` resolved via `PATH`.
 ///
 /// Returns `None` if none of the candidates exists. The caller surfaces a
-/// note so the user knows tools are disabled.
-fn locate_tool_fs() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("SAVVAGENT_TOOL_FS_BIN") {
+/// note so the user knows that tool surface is disabled.
+fn locate_bundled_bin(name: &str, env_override: &str) -> Option<PathBuf> {
+    if let Ok(p) = std::env::var(env_override) {
         let path = PathBuf::from(p);
         return path.exists().then_some(path);
     }
     let bin_name = if cfg!(windows) {
-        "savvagent-tool-fs.exe"
+        format!("{name}.exe")
     } else {
-        "savvagent-tool-fs"
+        name.to_string()
     };
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let candidate = dir.join(bin_name);
+            let candidate = dir.join(&bin_name);
             if candidate.exists() {
                 return Some(candidate);
             }
@@ -254,7 +270,7 @@ fn locate_tool_fs() -> Option<PathBuf> {
     }
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
-            let candidate = dir.join(bin_name);
+            let candidate = dir.join(&bin_name);
             if candidate.exists() {
                 return Some(candidate);
             }
@@ -309,7 +325,7 @@ async fn dispatch_slash_command(
     cmd: &str,
     host_slot: &HostSlot,
     project_root: &Path,
-    tool_bin: Option<&Path>,
+    tool_bins: &ToolBins,
 ) {
     let trimmed = cmd.trim_start();
     let (head, rest) = match trimmed.split_once(char::is_whitespace) {
@@ -323,7 +339,7 @@ async fn dispatch_slash_command(
             return;
         }
         "/model" => {
-            handle_model_command(app, rest, host_slot, project_root, tool_bin).await;
+            handle_model_command(app, rest, host_slot, project_root, tool_bins).await;
             return;
         }
         _ => {}
@@ -384,7 +400,7 @@ async fn handle_model_command(
     rest: &str,
     host_slot: &HostSlot,
     project_root: &Path,
-    tool_bin: Option<&Path>,
+    tool_bins: &ToolBins,
 ) {
     if rest.is_empty() {
         match app.active_provider_id {
@@ -415,7 +431,7 @@ async fn handle_model_command(
         }
     };
 
-    perform_model_change(spec, &key, new_model, host_slot, project_root, tool_bin, app).await;
+    perform_model_change(spec, &key, new_model, host_slot, project_root, tool_bins, app).await;
 }
 
 /// Rebuild the host with `new_model` against the same provider + key, swap
@@ -427,7 +443,7 @@ async fn perform_model_change(
     new_model: String,
     host_slot: &HostSlot,
     project_root: &Path,
-    tool_bin: Option<&Path>,
+    tool_bins: &ToolBins,
     app: &mut App,
 ) {
     app.push_note(format!("Switching to {}…", new_model));
@@ -435,7 +451,7 @@ async fn perform_model_change(
         spec,
         api_key,
         project_root,
-        tool_bin,
+        tool_bins,
         new_model.clone(),
     )
     .await
@@ -470,7 +486,7 @@ async fn perform_connect(
     api_key: String,
     host_slot: &HostSlot,
     project_root: &Path,
-    tool_bin: Option<&Path>,
+    tool_bins: &ToolBins,
     app: &mut App,
 ) {
     if let Err(e) = creds::save(spec.id, &api_key) {
@@ -480,7 +496,7 @@ async fn perform_connect(
 
     app.push_note(format!("Connecting to {}…", spec.display_name));
 
-    let host = match build_in_process_host(spec, &api_key, project_root, tool_bin).await {
+    let host = match build_in_process_host(spec, &api_key, project_root, tool_bins).await {
         Ok(h) => h,
         Err(e) => {
             app.push_note(format!("Connect to {} failed: {e:#}", spec.id));
@@ -517,7 +533,7 @@ async fn run_app(
     app: &mut App,
     host_slot: HostSlot,
     project_root: PathBuf,
-    tool_bin: Option<PathBuf>,
+    tool_bins: ToolBins,
 ) -> Result<()> {
     let (worker_tx, mut worker_rx) = mpsc::channel::<WorkerMsg>(128);
 
@@ -550,6 +566,10 @@ async fn run_app(
 
         if app.should_quit {
             return Ok(());
+        }
+
+        if app.show_splash && app.splash_shown_at.elapsed() >= splash::SPLASH_DURATION {
+            app.show_splash = false;
         }
 
         if !event::poll(Duration::from_millis(50))? {
@@ -603,7 +623,7 @@ async fn run_app(
                                     &value,
                                     &host_slot,
                                     &project_root,
-                                    tool_bin.as_deref(),
+                                    &tool_bins,
                                 )
                                 .await;
                                 continue;
@@ -684,7 +704,7 @@ async fn run_app(
                             &cmd,
                             &host_slot,
                             &project_root,
-                            tool_bin.as_deref(),
+                            &tool_bins,
                         )
                         .await;
                     }
@@ -725,7 +745,7 @@ async fn run_app(
                                     key,
                                     &host_slot,
                                     &project_root,
-                                    tool_bin.as_deref(),
+                                    &tool_bins,
                                     app,
                                 )
                                 .await;
@@ -752,7 +772,7 @@ async fn run_app(
                             key,
                             &host_slot,
                             &project_root,
-                            tool_bin.as_deref(),
+                            &tool_bins,
                             app,
                         )
                         .await;

@@ -38,9 +38,11 @@ struct ToolServer {
 impl ToolRegistry {
     /// Spawn each configured tool server and aggregate their tool lists.
     ///
-    /// `project_root` is forwarded to children via `SAVVAGENT_TOOL_FS_ROOT`
-    /// so that the bundled `savvagent-tool-fs` binary confines paths to the
-    /// host's project root by default.
+    /// `project_root` is forwarded to every spawned child via two parallel
+    /// env vars — `SAVVAGENT_TOOL_FS_ROOT` and `SAVVAGENT_TOOL_BASH_ROOT` —
+    /// so the bundled tool binaries confine themselves to the host's project
+    /// root by default. Setting both on every tool is harmless: each tool
+    /// reads only the var it cares about.
     pub async fn connect(endpoints: &[ToolEndpoint], project_root: &Path) -> Result<Self> {
         let mut servers = Vec::with_capacity(endpoints.len());
         let mut routes: HashMap<String, usize> = HashMap::new();
@@ -53,6 +55,7 @@ impl ToolRegistry {
                     let mut cmd = tokio::process::Command::new(command);
                     cmd.args(args);
                     cmd.env("SAVVAGENT_TOOL_FS_ROOT", project_root);
+                    cmd.env("SAVVAGENT_TOOL_BASH_ROOT", project_root);
                     let transport = TokioChildProcess::new(cmd)
                         .with_context(|| format!("spawn tool server: {label}"))?;
                     let service = ()

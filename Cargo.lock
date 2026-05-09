@@ -2960,6 +2960,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tool-bash",
  "tool-fs",
  "tracing",
  "tracing-subscriber",
@@ -3674,6 +3675,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2abe9b86193656635d2411dc43050282ca48aa31c2451210f4202550afb7526"
 dependencies = [
  "winnow",
+]
+
+[[package]]
+name = "tool-bash"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

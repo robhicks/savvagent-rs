@@ -1,4 +1,7 @@
-//! Startup splash. Painted as a full-frame overlay until any key dismisses it.
+//! Startup splash. Painted as a full-frame overlay until any key dismisses it,
+//! or [`SPLASH_DURATION`] elapses — whichever comes first.
+
+use std::time::Duration;
 
 use ratatui::{
     Frame,
@@ -7,6 +10,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
+
+/// How long the splash lingers before auto-dismissing.
+pub const SPLASH_DURATION: Duration = Duration::from_secs(3);
 
 const LOGO: &[&str] = &[
     "███████╗ █████╗ ██╗   ██╗██╗   ██╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗",

@@ -2,6 +2,7 @@
 //! conversation log built incrementally from streaming [`TurnEvent`]s.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
@@ -132,8 +133,12 @@ pub struct App {
     pub pending_provider: Option<&'static ProviderSpec>,
 
     /// Whether the startup splash banner is still being shown. Cleared on the
-    /// first key press the main loop sees (any key, including modifiers).
+    /// first key press the main loop sees (any key, including modifiers), or
+    /// after [`SPLASH_DURATION`] elapses since [`splash_shown_at`].
     pub show_splash: bool,
+    /// When the splash was first painted. Used by the main loop to auto-dismiss
+    /// after [`SPLASH_DURATION`] when the user doesn't press a key.
+    pub splash_shown_at: Instant,
 
     /// Active permission request, if the host is paused on a `oneshot`. Set
     /// when `TurnEvent::PermissionRequested` arrives, cleared when the user
@@ -192,6 +197,7 @@ impl App {
             api_key_textarea: TextArea::default(),
             pending_provider: None,
             show_splash: true,
+            splash_shown_at: Instant::now(),
             pending_permission: None,
         };
         app.refresh_commands();
