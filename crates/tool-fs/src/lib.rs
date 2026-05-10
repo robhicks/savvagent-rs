@@ -494,9 +494,11 @@ impl FsTools {
         let text = String::from_utf8(bytes).map_err(|e| FsToolError::NotUtf8(e.to_string()))?;
         let (new_text, n) = edit::apply_replace(&text, &input.old, &input.new, input.count)?;
         let path_for_write = path.clone();
-        tokio::task::spawn_blocking(move || edit::atomic_write(&path_for_write, new_text.as_bytes()))
-            .await
-            .map_err(join_err)??;
+        tokio::task::spawn_blocking(move || {
+            edit::atomic_write(&path_for_write, new_text.as_bytes())
+        })
+        .await
+        .map_err(join_err)??;
         Ok(Json(edit::ReplaceOutput {
             path: input.path,
             replacements: n,
@@ -523,9 +525,11 @@ impl FsTools {
         let text = String::from_utf8(bytes).map_err(|e| FsToolError::NotUtf8(e.to_string()))?;
         let (new_text, n) = edit::apply_insert(&text, input.after_line, &input.text)?;
         let path_for_write = path.clone();
-        tokio::task::spawn_blocking(move || edit::atomic_write(&path_for_write, new_text.as_bytes()))
-            .await
-            .map_err(join_err)??;
+        tokio::task::spawn_blocking(move || {
+            edit::atomic_write(&path_for_write, new_text.as_bytes())
+        })
+        .await
+        .map_err(join_err)??;
         Ok(Json(edit::InsertOutput {
             path: input.path,
             lines_inserted: n,
@@ -562,9 +566,11 @@ impl FsTools {
             };
         }
         let path_for_write = path.clone();
-        tokio::task::spawn_blocking(move || edit::atomic_write(&path_for_write, current.as_bytes()))
-            .await
-            .map_err(join_err)??;
+        tokio::task::spawn_blocking(move || {
+            edit::atomic_write(&path_for_write, current.as_bytes())
+        })
+        .await
+        .map_err(join_err)??;
         Ok(Json(edit::MultiEditOutput {
             path: input.path,
             edits_applied: input.edits.len() as u32,
@@ -589,7 +595,6 @@ impl FsTools {
         }
         Ok(())
     }
-
 
     /// Resolve an input path that **must already exist** (read/list).
     ///
@@ -1355,7 +1360,9 @@ mod tests {
     async fn multi_edit_tool_round_trip() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("a.txt");
-        tokio::fs::write(&p, b"line1\nline2\nline3\n").await.unwrap();
+        tokio::fs::write(&p, b"line1\nline2\nline3\n")
+            .await
+            .unwrap();
 
         let tools = FsTools::with_root(dir.path()).unwrap();
         let out = tools
