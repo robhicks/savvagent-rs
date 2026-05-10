@@ -20,6 +20,7 @@ use savvagent_protocol::ToolDef;
 use serde_json::Value;
 
 use crate::config::ToolEndpoint;
+use crate::sandbox::{SandboxConfig, SandboxWrapper, apply_sandbox};
 
 /// Aggregate view of all connected tool servers.
 pub(crate) struct ToolRegistry {
@@ -43,7 +44,16 @@ impl ToolRegistry {
     /// so the bundled tool binaries confine themselves to the host's project
     /// root by default. Setting both on every tool is harmless: each tool
     /// reads only the var it cares about.
-    pub async fn connect(endpoints: &[ToolEndpoint], project_root: &Path) -> Result<Self> {
+    ///
+    /// `sandbox` is applied to each spawn when [`SandboxConfig::enabled`] is
+    /// `true` and the platform wrapper binary (`bwrap` / `sandbox-exec`) is
+    /// found on `$PATH`. If it's missing, the tool runs unwrapped with a
+    /// warning — sandboxing is never a hard prerequisite.
+    pub async fn connect(
+        endpoints: &[ToolEndpoint],
+        project_root: &Path,
+        sandbox: &SandboxConfig,
+    ) -> Result<Self> {
         let mut servers = Vec::with_capacity(endpoints.len());
         let mut routes: HashMap<String, usize> = HashMap::new();
         let mut defs = Vec::new();
@@ -56,6 +66,19 @@ impl ToolRegistry {
                     cmd.args(args);
                     cmd.env("SAVVAGENT_TOOL_FS_ROOT", project_root);
                     cmd.env("SAVVAGENT_TOOL_BASH_ROOT", project_root);
+
+                    // Apply the OS sandbox wrapper if configured.
+                    let wrapper = apply_sandbox(&mut cmd, command, project_root, sandbox);
+                    match wrapper {
+                        SandboxWrapper::None => {}
+                        SandboxWrapper::Bwrap => {
+                            tracing::info!("sandbox[bwrap]: {label}");
+                        }
+                        SandboxWrapper::SandboxExec => {
+                            tracing::info!("sandbox[sandbox-exec]: {label}");
+                        }
+                    }
+
                     let transport = TokioChildProcess::new(cmd)
                         .with_context(|| format!("spawn tool server: {label}"))?;
                     let service = ()

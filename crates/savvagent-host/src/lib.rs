@@ -22,6 +22,7 @@ mod config;
 mod permissions;
 mod project;
 mod provider;
+mod sandbox;
 mod session;
 mod tools;
 
@@ -30,6 +31,7 @@ pub use permissions::{
     ArgPattern, FrontMatterPermissions, PermissionDecision, PermissionPolicy, PermissionsToml,
     Rule, SerializableRule, Verdict,
 };
+pub use sandbox::{SandboxConfig, SandboxWrapper, ToolSandboxOverride};
 pub use savvagent_protocol::ToolDef;
 pub use session::{
     Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError,

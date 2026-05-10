@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::permissions::PermissionPolicy;
+use crate::sandbox::SandboxConfig;
 
 /// Where the host should reach the LLM provider.
 #[derive(Debug, Clone)]
@@ -51,11 +52,18 @@ pub struct HostConfig {
     /// Permission policy override. `None` means the host builds a default
     /// policy ([`PermissionPolicy::default_for`]) from `project_root`.
     pub policy: Option<PermissionPolicy>,
+    /// OS-level sandbox configuration for tool spawns (Layer 3).
+    ///
+    /// When `None`, the host loads `~/.savvagent/sandbox.toml` via
+    /// [`SandboxConfig::load`]. Sandboxing is disabled by default
+    /// (`SandboxConfig::enabled = false`); set it to `true` to activate.
+    pub sandbox: Option<SandboxConfig>,
 }
 
 impl HostConfig {
     /// New config with sensible defaults: 4096 max tokens, 20 iteration cap,
-    /// project root = current dir, no static tools, no system-prompt override.
+    /// project root = current dir, no static tools, no system-prompt override,
+    /// sandbox loaded from disk (`SandboxConfig::load`).
     pub fn new(provider: ProviderEndpoint, model: impl Into<String>) -> Self {
         Self {
             provider,
@@ -66,6 +74,7 @@ impl HostConfig {
             system_prompt: None,
             max_iterations: 20,
             policy: None,
+            sandbox: None,
         }
     }
 
@@ -103,6 +112,13 @@ impl HostConfig {
     /// [`PermissionPolicy::default_for(project_root)`] at startup.
     pub fn with_policy(mut self, policy: PermissionPolicy) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Override the sandbox configuration. When unset, the host loads
+    /// `~/.savvagent/sandbox.toml` at startup (default: disabled).
+    pub fn with_sandbox(mut self, sandbox: SandboxConfig) -> Self {
+        self.sandbox = Some(sandbox);
         self
     }
 }
