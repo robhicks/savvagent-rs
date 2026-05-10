@@ -294,3 +294,54 @@ mod insert_tests {
         assert_eq!(out, "a\r\nx\r\nb\r\n");
     }
 }
+
+#[cfg(test)]
+mod atomic_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn atomic_write_round_trip() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("file.txt");
+        std::fs::write(&target, b"old").unwrap();
+
+        atomic_write(&target, b"new").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+
+        // No leftover tmp files.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".savvagent-tmp.")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "leftover: {leftovers:?}");
+    }
+
+    #[test]
+    fn atomic_write_failure_leaves_original_intact() {
+        let dir = tempdir().unwrap();
+        // Target is a directory, not a file — rename will fail.
+        let target = dir.path().join("not-a-file");
+        std::fs::create_dir(&target).unwrap();
+
+        let err = atomic_write(&target, b"data").unwrap_err();
+        assert!(matches!(err, FsToolError::Io { .. }), "{err}");
+
+        // No leftover tmp files in parent.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".savvagent-tmp.")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "leftover: {leftovers:?}");
+    }
+}
