@@ -18,15 +18,20 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
-use savvagent_mcp::StreamEmitter;
-use savvagent_protocol::{
-    self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta,
-};
+use savvagent_mcp::{EmitError, StreamEmitter};
+use savvagent_protocol::{self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta};
 
 use crate::api;
 use crate::translate::{parse_tool_arguments, stop_reason_from_str, usage_from_openai};
 
 /// Drive an OpenAI SSE streaming response to completion.
+///
+/// If the consumer disconnects (i.e. [`StreamEmitter::emit`] returns
+/// [`EmitError::Disconnected`]) we abandon the call rather than continue
+/// pulling chunks from upstream and burning tokens. Transport-level emit
+/// errors are tolerated — those are typically transient hiccups in the MCP
+/// progress channel and the caller will still get the final structured
+/// response.
 pub async fn consume_sse(
     resp: reqwest::Response,
     emit: &dyn StreamEmitter,
@@ -36,15 +41,28 @@ pub async fn consume_sse(
 
     while let SseItem::Chunk(chunk) = sse.next().await? {
         for ev in acc.consume_chunk(chunk) {
-            let _ = emit.emit(ev).await;
+            if let Err(EmitError::Disconnected) = emit.emit(ev).await {
+                return Err(consumer_disconnected());
+            }
         }
     }
 
     for ev in acc.flush() {
-        let _ = emit.emit(ev).await;
+        if let Err(EmitError::Disconnected) = emit.emit(ev).await {
+            return Err(consumer_disconnected());
+        }
     }
 
     acc.finish()
+}
+
+fn consumer_disconnected() -> spp::ProviderError {
+    spp::ProviderError {
+        kind: spp::ErrorKind::Internal,
+        message: "stream consumer disconnected".into(),
+        retry_after_ms: None,
+        provider_code: None,
+    }
 }
 
 #[derive(Default)]
@@ -66,8 +84,14 @@ struct Accumulator {
 
 #[derive(Debug)]
 enum BlockState {
-    Text { buf: String },
-    ToolUse { id: String, name: String, json_buf: String },
+    Text {
+        buf: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        json_buf: String,
+    },
 }
 
 impl Accumulator {
@@ -119,7 +143,9 @@ impl Accumulator {
                 // Append to the text block (always index 0 unless tool blocks
                 // precede it, which OpenAI doesn't do in practice).
                 let idx = self.find_text_block_index();
-                if let Some(BlockState::Text { buf }) = idx.and_then(|i| self.blocks.get_mut(i as usize)) {
+                if let Some(BlockState::Text { buf }) =
+                    idx.and_then(|i| self.blocks.get_mut(i as usize))
+                {
                     buf.push_str(&text);
                 }
                 if let Some(idx) = idx {
@@ -142,7 +168,11 @@ impl Accumulator {
             if self.tool_block_map[oi].is_none() {
                 // First delta for this tool-call: allocate an SPP block.
                 let id = tc.id.unwrap_or_default();
-                let name = tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
+                let name = tc
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.name.clone())
+                    .unwrap_or_default();
                 let block_idx = self.alloc_block(BlockState::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -259,6 +289,7 @@ fn stream_decode_error(msg: &str) -> spp::ProviderError {
 
 // ---- SSE decoder ----
 
+#[derive(Debug)]
 enum SseItem {
     Chunk(api::ChatCompletionChunk),
     Done,
@@ -273,6 +304,16 @@ impl SseDecoder {
     fn new(resp: reqwest::Response) -> Self {
         Self {
             inner: resp.bytes_stream().boxed(),
+            buf: BytesMut::with_capacity(8 * 1024),
+        }
+    }
+
+    /// Build a decoder from a raw byte-chunk stream. For tests where we don't
+    /// want to spin up an HTTP server just to feed bytes into the decoder.
+    #[cfg(test)]
+    fn from_stream(s: futures::stream::BoxStream<'static, reqwest::Result<Bytes>>) -> Self {
+        Self {
+            inner: s,
             buf: BytesMut::with_capacity(8 * 1024),
         }
     }
@@ -293,7 +334,18 @@ impl SseDecoder {
                     });
                 }
                 None => {
-                    // Stream ended; treat as done.
+                    // Stream ended. If we still have buffered bytes that
+                    // didn't form a complete `\n\n`-terminated frame, the
+                    // upstream truncated mid-frame — surface that as a
+                    // network error rather than silently report success.
+                    if !self.buf.is_empty() {
+                        return Err(spp::ProviderError {
+                            kind: spp::ErrorKind::Network,
+                            message: "stream truncated mid-frame".into(),
+                            retry_after_ms: None,
+                            provider_code: None,
+                        });
+                    }
                     return Ok(SseItem::Done);
                 }
             }
@@ -459,5 +511,35 @@ mod tests {
         let acc = Accumulator::default();
         let result = acc.finish();
         assert!(result.is_err(), "empty stream must return an error");
+    }
+
+    /// SSE byte streams that end without a terminating `\n\n` for the final
+    /// frame must surface as a `Network` error, not silently report `Done`
+    /// (which previously masked truncation and lost the partial chunk).
+    #[tokio::test]
+    async fn sse_decoder_errors_on_truncated_trailing_frame() {
+        // Valid first frame, then a partial second frame missing `\n\n`.
+        let bytes = bytes::Bytes::from_static(
+            b"data: {\"id\":\"c1\",\"model\":\"gpt-4o-mini\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"c1\",\"model\":\"gpt-4o-mini\""
+        );
+        let s = futures::stream::iter(vec![Ok::<_, reqwest::Error>(bytes)]).boxed();
+        let mut dec = SseDecoder::from_stream(s);
+
+        // First call yields the well-formed chunk.
+        let first = dec.next().await.expect("first chunk");
+        assert!(matches!(first, SseItem::Chunk(_)));
+
+        // Second call sees buffered bytes with no terminator and the inner
+        // stream exhausted — must error.
+        let err = dec
+            .next()
+            .await
+            .expect_err("truncated trailing frame must error");
+        assert_eq!(err.kind, spp::ErrorKind::Network);
+        assert!(
+            err.message.contains("truncated"),
+            "unexpected message: {}",
+            err.message
+        );
     }
 }

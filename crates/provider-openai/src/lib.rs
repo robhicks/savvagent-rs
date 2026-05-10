@@ -202,23 +202,22 @@ async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
     };
 
     let body = resp.text().await.unwrap_or_default();
-    let (message, provider_code) =
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-            let msg = v
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| body.clone());
-            let code = v
-                .get("error")
-                .and_then(|e| e.get("code"))
-                .and_then(|t| t.as_str())
-                .map(String::from);
-            (msg, code)
-        } else {
-            (body, None)
-        };
+    let (message, provider_code) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+        let msg = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| body.clone());
+        let code = v
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|t| t.as_str())
+            .map(String::from);
+        (msg, code)
+    } else {
+        (body, None)
+    };
 
     ProviderError {
         kind,
@@ -263,10 +262,8 @@ pub async fn run() -> std::process::ExitCode {
         .with_target(false)
         .init();
 
-    let listen =
-        env::var("SAVVAGENT_OPENAI_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
-    let base_url =
-        env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
+    let listen = env::var("SAVVAGENT_OPENAI_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
+    let base_url = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
 
     let provider = match OpenAiProvider::builder().base_url(base_url).build() {
         Ok(p) => Arc::new(p),
