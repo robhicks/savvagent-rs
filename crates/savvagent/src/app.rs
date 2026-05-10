@@ -394,7 +394,8 @@ impl App {
             },
             Command {
                 name: "/sandbox".into(),
-                description: "Show sandbox status (`/sandbox on` or `/sandbox off` to toggle)".into(),
+                description: "Show sandbox status (`/sandbox on` or `/sandbox off` to toggle)"
+                    .into(),
                 needs_arg: false,
             },
             Command {

@@ -217,12 +217,8 @@ impl Host {
                 Box::new(RmcpProviderClient::connect(url).await?)
             }
         };
-        let sandbox = config
-            .sandbox
-            .clone()
-            .unwrap_or_else(SandboxConfig::load);
-        let tools =
-            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
+        let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
+        let tools = ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         let policy = config
@@ -252,12 +248,8 @@ impl Host {
         config: HostConfig,
         provider: Box<dyn ProviderClient + Send + Sync>,
     ) -> Result<Self, HostError> {
-        let sandbox = config
-            .sandbox
-            .clone()
-            .unwrap_or_else(SandboxConfig::load);
-        let tools =
-            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
+        let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
+        let tools = ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         let policy = config
