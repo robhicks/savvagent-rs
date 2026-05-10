@@ -413,4 +413,27 @@ mod tests {
         let msg = err.to_string().to_lowercase();
         assert!(msg.contains("outside"), "{msg}");
     }
+
+    #[test]
+    fn with_root_search_drops_sensitive_paths() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), ".env", "SECRET=abc123\n");
+        write(dir.path(), ".env.local", "SECRET=xyz\n");
+        write(dir.path(), ".ssh/id_rsa", "ssh-rsa AAA\n");
+        write(dir.path(), "secrets/credentials.json", "{\"token\":\"xx\"}\n");
+        write(dir.path(), "kept.rs", "let x = \"abc123\";\n");
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: "abc123|ssh-rsa|token".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let files: Vec<_> = out.matches.iter().map(|m| m.file.as_str()).collect();
+        assert_eq!(files, vec!["kept.rs"], "sensitive paths must not leak: {out:?}");
+    }
 }
