@@ -31,12 +31,17 @@ path = "src/bin/savvagent-anthropic.rs"
 name = "savvagent-gemini"
 path = "src/bin/savvagent-gemini.rs"
 
+[[bin]]
+name = "savvagent-openai"
+path = "src/bin/savvagent-openai.rs"
+
 [dependencies]
 savvagent-host = { workspace = true }
 savvagent-protocol = { workspace = true }
 savvagent-mcp = { workspace = true }
 provider-anthropic = { workspace = true }
 provider-gemini = { workspace = true }
+provider-openai = { workspace = true }
 tool-fs = { workspace = true }
 tool-bash = { workspace = true }
 anyhow.workspace = true
