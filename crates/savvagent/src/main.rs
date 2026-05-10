@@ -35,8 +35,8 @@ use app::{App, CommandSelection, Entry, InputMode, collect_transcript_entries};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
 use savvagent_host::{
-    Host, HostConfig, PermissionDecision, ProviderEndpoint, ToolEndpoint, TranscriptError,
-    TurnEvent,
+    Host, HostConfig, PermissionDecision, ProviderEndpoint, SandboxConfig, ToolEndpoint,
+    TranscriptError, TurnEvent,
 };
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
@@ -361,6 +361,10 @@ async fn dispatch_slash_command(
             handle_resume_command(app, rest, host_slot).await;
             return;
         }
+        "/sandbox" => {
+            handle_sandbox_command(app, rest, host_slot).await;
+            return;
+        }
         _ => {}
     }
 
@@ -602,6 +606,101 @@ async fn perform_model_change(
     app.update_metrics();
     app.model = new_model;
     app.push_note(format!("Model is now {}.", app.model));
+}
+
+/// `/sandbox` (no args) shows current status.
+/// `/sandbox on` / `/sandbox off` toggles the enabled flag and persists to
+/// `~/.savvagent/sandbox.toml`.
+///
+/// Note: changing the setting takes effect the *next* time a host is built
+/// (i.e. after `/connect`), because the sandbox is applied at tool spawn time
+/// and tools are already running. The status display reflects the *current*
+/// host's sandbox config (what was used when tools were spawned).
+async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
+    match rest {
+        "on" | "off" => {
+            let enable = rest == "on";
+            // Load the existing on-disk config, flip enabled, save.
+            let mut cfg = SandboxConfig::load();
+            cfg.enabled = enable;
+            match cfg.save().await {
+                Ok(()) => {
+                    app.push_note(format!(
+                        "Sandbox {}: will take effect after the next /connect.",
+                        if enable { "enabled" } else { "disabled" }
+                    ));
+                }
+                Err(e) => {
+                    app.push_note(format!("Could not save sandbox config: {e}"));
+                }
+            }
+        }
+        "" => {
+            // Show status from the currently-connected host.
+            match current_host(host_slot).await {
+                None => {
+                    // No active host — show what's on disk instead.
+                    let cfg = SandboxConfig::load();
+                    app.push_note(format!(
+                        "Sandbox (on-disk, not yet active): enabled={}  allow_net={}  per-tool overrides: {}",
+                        cfg.enabled,
+                        cfg.allow_net,
+                        fmt_overrides(&cfg),
+                    ));
+                }
+                Some(host) => {
+                    let cfg = host.sandbox_config();
+                    app.push_note(format!(
+                        "Sandbox: enabled={}  allow_net={}  per-tool overrides: {}",
+                        cfg.enabled,
+                        cfg.allow_net,
+                        fmt_overrides(cfg),
+                    ));
+                    if cfg.enabled {
+                        #[cfg(target_os = "linux")]
+                        app.push_note("  wrapper: bwrap (Linux)");
+                        #[cfg(target_os = "macos")]
+                        app.push_note("  wrapper: sandbox-exec (macOS)");
+                        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                        app.push_note("  wrapper: none (Windows — deferred)");
+                    }
+                    if !cfg.extra_binds.is_empty() {
+                        app.push_note(format!(
+                            "  extra_binds: {}",
+                            cfg.extra_binds
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                }
+            }
+        }
+        other => {
+            app.push_note(format!(
+                "Unknown sandbox subcommand `{other}`. Usage: /sandbox  |  /sandbox on  |  /sandbox off"
+            ));
+        }
+    }
+}
+
+fn fmt_overrides(cfg: &SandboxConfig) -> String {
+    if cfg.tool_overrides.is_empty() {
+        return "(none)".into();
+    }
+    cfg.tool_overrides
+        .iter()
+        .map(|(k, v)| {
+            let net = match v.allow_net {
+                Some(true) => "net=yes",
+                Some(false) => "net=no",
+                None => "net=inherit",
+            };
+            format!("{k}({net})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Persist the key (if required), build the in-process handler, swap the host.

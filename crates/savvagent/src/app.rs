@@ -393,6 +393,11 @@ impl App {
                 needs_arg: false,
             },
             Command {
+                name: "/sandbox".into(),
+                description: "Show sandbox status (`/sandbox on` or `/sandbox off` to toggle)".into(),
+                needs_arg: false,
+            },
+            Command {
                 name: "/quit".into(),
                 description: "Quit".into(),
                 needs_arg: false,
