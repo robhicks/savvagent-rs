@@ -140,7 +140,8 @@ pub struct ListDirOutput {
 /// Arguments to `glob`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct GlobInput {
-    /// Glob pattern (e.g. `**/*.rs`). Standard `glob` crate syntax.
+    /// Glob pattern (e.g. `**/*.rs`). Standard `gitignore`-style glob syntax;
+    /// brace alternation like `**/*.{rs,toml}` is supported.
     pub pattern: String,
     /// Directory the pattern is rooted at. Default: server CWD (`.`).
     #[serde(default)]
@@ -148,6 +149,10 @@ pub struct GlobInput {
     /// Cap on the number of matches returned. Default: 1024.
     #[serde(default)]
     pub max_matches: Option<u32>,
+    /// Honor `.gitignore`, `.git/info/exclude`, and global gitignore. Default:
+    /// true. `.git/` is always excluded regardless of this flag.
+    #[serde(default)]
+    pub respect_gitignore: Option<bool>,
 }
 
 /// Result of `glob`.
@@ -407,7 +412,7 @@ impl FsTools {
     /// Expand a glob pattern relative to `root`.
     #[tool(
         name = "glob",
-        description = "Expand a glob pattern (e.g. **/*.rs) under a root directory."
+        description = "Expand a glob pattern (e.g. **/*.rs) under a root directory. Honors .gitignore / .git/info/exclude / global gitignore by default (disable with respect_gitignore=false); .git/ is always excluded. Returns regular files only — directories and symlinks are skipped. Uses gitignore-style pattern grammar (brace alternation supported)."
     )]
     pub async fn glob(
         &self,
@@ -439,22 +444,74 @@ impl FsTools {
         };
 
         let pattern = input.pattern.clone();
-        let strip_prefix = resolved_root.clone();
         let project_root = self.root.clone();
+        let respect = input.respect_gitignore.unwrap_or(true);
 
         let (matches, truncated) =
             tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), FsToolError> {
-                let joined_path = resolved_root.join(&pattern);
-                let joined = joined_path.to_string_lossy().into_owned();
+                // Build the user's pattern matcher separately from the walker.
+                // The `ignore` crate's `OverrideBuilder` treats `add()` patterns
+                // as *whitelists* with the highest precedence, which bypasses
+                // `.gitignore` for matching files (see `ignore::dir::matched`).
+                // We want the opposite: gitignore should hide files even if
+                // they match the user's glob. So we let `WalkBuilder` enumerate
+                // gitignore-respecting entries unrestricted, then post-filter
+                // each entry against a `globset` matcher.
+                let pat_glob = globset::GlobBuilder::new(&pattern)
+                    .literal_separator(false)
+                    .build()
+                    .map_err(|e| FsToolError::Glob(e.to_string()))?
+                    .compile_matcher();
+
+                let mut builder = ignore::WalkBuilder::new(&resolved_root);
+                builder
+                    .git_ignore(respect)
+                    .git_global(respect)
+                    .git_exclude(respect)
+                    // Honor `.gitignore` even when the search root isn't
+                    // inside a git repo — agents commonly invoke `glob`
+                    // outside a checkout, but still expect a project's
+                    // top-level `.gitignore` to apply.
+                    .require_git(false)
+                    // Allow dotfiles to be matched when the pattern asks
+                    // for them (e.g. `**/.config/*.toml`). `.git/` is
+                    // pruned below via `filter_entry` regardless of
+                    // `respect_gitignore`.
+                    .hidden(false)
+                    .follow_links(false)
+                    // Prune `.git/` before the walker descends into it.
+                    // `WalkBuilder` would otherwise only filter `.git/` via
+                    // the gitignore matcher, which lets it leak through
+                    // when `respect_gitignore=false`. Pruning at the entry
+                    // level also avoids the cost of enumerating its
+                    // contents.
+                    .filter_entry(|e| e.file_name() != std::ffi::OsStr::new(".git"));
+
                 let mut out = Vec::new();
                 let mut truncated = false;
-                let iter = glob::glob(&joined).map_err(|e| FsToolError::Glob(e.to_string()))?;
-                for entry in iter {
+                for entry in builder.build() {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "skipping walker entry");
+                            continue;
+                        }
+                    };
+                    if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                        continue;
+                    }
+                    let p = entry.into_path();
+                    // Match the user's pattern against the path relative to
+                    // the search root so a pattern like `**/*.rs` does what
+                    // an agent expects, regardless of where the root sits.
+                    let rel_path = p.strip_prefix(&resolved_root).unwrap_or(&p);
+                    if !pat_glob.is_match(rel_path) {
+                        continue;
+                    }
                     if out.len() >= limit {
                         truncated = true;
                         break;
                     }
-                    let p = entry.map_err(|e| FsToolError::Glob(e.to_string()))?;
                     // Containment filter: drop any match whose canonical path
                     // falls outside the project root (e.g. via a symlink).
                     if let Some(root) = project_root.as_deref() {
@@ -463,11 +520,7 @@ impl FsTools {
                             _ => continue,
                         }
                     }
-                    let rel = p
-                        .strip_prefix(&strip_prefix)
-                        .unwrap_or(&p)
-                        .to_string_lossy()
-                        .into_owned();
+                    let rel = rel_path.to_string_lossy().into_owned();
                     out.push(rel);
                 }
                 Ok((out, truncated))
@@ -1022,12 +1075,128 @@ mod tests {
                 pattern: "**/*.rs".into(),
                 root: Some(dir.path().to_string_lossy().into_owned()),
                 max_matches: None,
+                respect_gitignore: None,
             }))
             .await
             .unwrap();
         assert!(out.0.matches.iter().any(|m| m.ends_with("keep.rs")));
         assert!(out.0.matches.iter().any(|m| m.ends_with("also.rs")));
         assert!(!out.0.matches.iter().any(|m| m.ends_with("skip.txt")));
+    }
+
+    #[tokio::test]
+    async fn glob_excludes_gitignored_by_default() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(dir.path().join("kept.rs"), b"").unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/skip.rs"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*.rs".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: None,
+            }))
+            .await
+            .unwrap();
+        let files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
+        assert_eq!(files, vec!["kept.rs"], "{:?}", out.0);
+    }
+
+    #[tokio::test]
+    async fn glob_honors_nested_gitignore() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/.gitignore"), "private.rs\n").unwrap();
+        std::fs::write(dir.path().join("sub/private.rs"), b"").unwrap();
+        std::fs::write(dir.path().join("sub/public.rs"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*.rs".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: None,
+            }))
+            .await
+            .unwrap();
+        let mut files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
+        files.sort();
+        assert_eq!(files, vec!["sub/public.rs"], "{:?}", out.0);
+    }
+
+    #[tokio::test]
+    async fn glob_includes_gitignored_when_disabled() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(dir.path().join("kept.rs"), b"").unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/skip.rs"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*.rs".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: Some(false),
+            }))
+            .await
+            .unwrap();
+        let mut files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
+        files.sort();
+        assert_eq!(files, vec!["kept.rs", "target/skip.rs"], "{:?}", out.0);
+    }
+
+    #[tokio::test]
+    async fn glob_always_excludes_dot_git() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), b"ref: refs/heads/main").unwrap();
+        std::fs::write(dir.path().join("a.rs"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: Some(false), // even when off
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !out.0.matches.iter().any(|m| m.contains(".git/")),
+            ".git/ leaked into glob results: {:?}",
+            out.0
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_brace_pattern() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), b"").unwrap();
+        std::fs::write(dir.path().join("b.toml"), b"").unwrap();
+        std::fs::write(dir.path().join("c.txt"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "*.{rs,toml}".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: None,
+            }))
+            .await
+            .unwrap();
+        let mut files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
+        files.sort();
+        assert_eq!(files, vec!["a.rs", "b.toml"], "{:?}", out.0);
     }
 
     // ---- Layer 1 path containment (FsTools::with_root) -------------------
@@ -1176,11 +1345,37 @@ mod tests {
         assert_eq!(written, "ok");
     }
 
+    #[test]
+    fn is_within_filters_outside_paths() {
+        let root = std::path::PathBuf::from("/root/project");
+        assert!(is_within(&root, &root));
+        assert!(is_within(
+            &std::path::PathBuf::from("/root/project/sub/file.rs"),
+            &root,
+        ));
+        assert!(!is_within(
+            &std::path::PathBuf::from("/root/other/file.rs"),
+            &root,
+        ));
+        assert!(!is_within(
+            &std::path::PathBuf::from("/root/projectsibling/file.rs"),
+            &root,
+        ));
+        assert!(!is_within(&std::path::PathBuf::from("/etc/passwd"), &root));
+    }
+
     #[tokio::test]
     async fn with_root_glob_filters_outside_matches() {
         // Inside the root: keep.rs, deep/also.rs.
         // Outside the root: a sibling file the glob would otherwise match
         // through a symlink.
+        //
+        // NOTE: `follow_links(false)` on the `WalkBuilder` is the primary
+        // defense here — the walker never descends through `escape-link`,
+        // so the post-walk `is_within` canonicalize filter at the tail of
+        // `glob` is not exercised by this test. That filter is covered by
+        // the `is_within_filters_outside_paths` unit test above as
+        // belt-and-suspenders.
         let inside = tempdir().unwrap();
         let outside = tempdir().unwrap();
         tokio::fs::write(inside.path().join("keep.rs"), b"")
@@ -1207,6 +1402,7 @@ mod tests {
                 pattern: "**/*.rs".into(),
                 root: Some(".".into()),
                 max_matches: None,
+                respect_gitignore: None,
             }))
             .await
             .unwrap();
@@ -1237,6 +1433,7 @@ mod tests {
                 pattern: "../*.rs".into(),
                 root: Some(".".into()),
                 max_matches: None,
+                respect_gitignore: None,
             }))
             .await
             .err()
@@ -1537,6 +1734,7 @@ mod tests {
                     pattern: String::new(),
                     root: None,
                     max_matches: None,
+                    respect_gitignore: None,
                 }))
                 .await
                 .is_err()
