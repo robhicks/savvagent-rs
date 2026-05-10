@@ -32,6 +32,7 @@
 //! `/sandbox` command.
 
 use std::collections::HashMap;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -487,6 +488,7 @@ mod tests {
         tokio::process::Command::new(bin)
     }
 
+    #[cfg(target_os = "linux")]
     fn config_on() -> SandboxConfig {
         SandboxConfig {
             enabled: true,
