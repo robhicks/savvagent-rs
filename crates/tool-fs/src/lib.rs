@@ -412,7 +412,7 @@ impl FsTools {
     /// Expand a glob pattern relative to `root`.
     #[tool(
         name = "glob",
-        description = "Expand a glob pattern (e.g. **/*.rs) under a root directory."
+        description = "Expand a glob pattern (e.g. **/*.rs) under a root directory. Honors .gitignore / .git/info/exclude / global gitignore by default (disable with respect_gitignore=false); .git/ is always excluded. Returns regular files only — directories and symlinks are skipped. Uses gitignore-style pattern grammar (brace alternation supported)."
     )]
     pub async fn glob(
         &self,
