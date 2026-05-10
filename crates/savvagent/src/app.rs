@@ -874,7 +874,7 @@ pub fn collect_transcript_entries(dir: &std::path::Path) -> Vec<TranscriptEntry>
     }
 
     // Newest first.
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.0));
     entries.into_iter().map(|(_, e)| e).collect()
 }
 
