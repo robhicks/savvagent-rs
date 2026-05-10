@@ -256,3 +256,41 @@ mod replace_tests {
         assert_eq!(n, 0);
     }
 }
+
+#[cfg(test)]
+mod insert_tests {
+    use super::*;
+
+    #[test]
+    fn insert_at_zero_prepends() {
+        let (out, n) = apply_insert("a\nb\n", 0, "first").unwrap();
+        assert_eq!(out, "first\na\nb\n");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn insert_after_first_line() {
+        let (out, n) = apply_insert("a\nb\n", 1, "x").unwrap();
+        assert_eq!(out, "a\nx\nb\n");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn insert_after_last_line_appends() {
+        let (out, n) = apply_insert("a\nb\n", 2, "x").unwrap();
+        assert_eq!(out, "a\nb\nx\n");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn insert_beyond_eof_errors() {
+        let err = apply_insert("a\n", 5, "x").unwrap_err();
+        assert!(err.to_string().contains("after_line=5"), "{err}");
+    }
+
+    #[test]
+    fn insert_preserves_crlf() {
+        let (out, _) = apply_insert("a\r\nb\r\n", 1, "x").unwrap();
+        assert_eq!(out, "a\r\nx\r\nb\r\n");
+    }
+}
