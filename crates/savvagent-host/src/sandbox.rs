@@ -351,34 +351,9 @@ fn apply_macos(
 
     let allow_net = config.net_allowed_for(tool_bin);
     let extra_binds = config.extra_binds_for(tool_bin);
-    let project_root_str = project_root.to_string_lossy();
 
-    // Build the sandbox-exec(1) TinyScheme profile.
-    let mut profile = String::from("(version 1)\n");
-    profile.push_str("(allow default)\n");
-
-    // Deny all file-write except under project root (and extra binds).
-    profile.push_str("(deny file-write*)\n");
-    profile.push_str(&format!(
-        "(allow file-write* (subpath \"{}\"))\n",
-        project_root_str
-    ));
-    for bind in &extra_binds {
-        let bind_str = bind.to_string_lossy();
-        profile.push_str(&format!(
-            "(allow file-write* (subpath \"{}\"))\n",
-            bind_str
-        ));
-    }
-
-    // Deny network unless allowed.
-    if !allow_net {
-        profile.push_str("(deny network*)\n");
-    }
-
-    // Allow process fork and exec (needed for subprocess spawning inside tool).
-    profile.push_str("(allow process-fork)\n");
-    profile.push_str("(allow process-exec)\n");
+    // Build the sandbox-exec(1) TinyScheme profile via the testable helper.
+    let profile = build_macos_profile(project_root, allow_net, &extra_binds);
 
     // Collect original program, args, envs, and cwd before we mutate `cmd`.
     // The rewrite (`*cmd = Command::new(sandbox_exec)`) replaces the entire
@@ -421,11 +396,65 @@ fn apply_macos(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Quote a string for safe interpolation into a TinyScheme string literal
+/// (used in sandbox-exec(1) profiles). Escapes backslashes and double quotes.
+///
+/// Newlines are also escaped (as `\n`) — sandbox-exec rejects raw newlines
+/// inside string literals, and silently swallowing them would change the
+/// profile semantics.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn scheme_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Build the TinyScheme profile passed to `sandbox-exec -p`. Pure string
+/// composition — separated out so it can be unit-tested on any platform.
+///
+/// Path strings are escaped via [`scheme_quote`] so that paths containing
+/// `"`, `\`, or newlines cannot break out of the string literal and corrupt
+/// the profile.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn build_macos_profile(project_root: &Path, allow_net: bool, extra_binds: &[&Path]) -> String {
+    let project_root_str = scheme_quote(&project_root.to_string_lossy());
+
+    let mut profile = String::from("(version 1)\n");
+    profile.push_str("(allow default)\n");
+
+    // Deny all file-write except under project root (and extra binds).
+    profile.push_str("(deny file-write*)\n");
+    profile.push_str(&format!(
+        "(allow file-write* (subpath \"{}\"))\n",
+        project_root_str
+    ));
+    for bind in extra_binds {
+        let bind_str = scheme_quote(&bind.to_string_lossy());
+        profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", bind_str));
+    }
+
+    // Deny network unless allowed.
+    if !allow_net {
+        profile.push_str("(deny network*)\n");
+    }
+
+    // Allow process fork and exec (needed for subprocess spawning inside tool).
+    profile.push_str("(allow process-fork)\n");
+    profile.push_str("(allow process-exec)\n");
+
+    profile
+}
+
 /// Find `name` on `$PATH`. Returns `None` if not found.
-#[cfg_attr(
-    not(any(target_os = "linux", target_os = "macos")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 fn which_binary(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
@@ -587,8 +616,7 @@ mod tests {
                 .collect();
             // Must contain read-only root bind.
             assert!(
-                args.windows(3)
-                    .any(|w| w == ["--ro-bind", "/", "/"]),
+                args.windows(3).any(|w| w == ["--ro-bind", "/", "/"]),
                 "expected --ro-bind / / in {args:?}"
             );
             // Must contain --die-with-parent.
@@ -654,13 +682,16 @@ mod tests {
                 .map(|(k, v)| (k.to_owned(), v.map(|val| val.to_owned())))
                 .collect();
             assert!(
-                envs.iter().any(|(k, v)| k == std::ffi::OsStr::new("SAVVAGENT_TOOL_FS_ROOT")
-                    && v.as_deref() == Some(std::ffi::OsStr::new("/foo"))),
+                envs.iter()
+                    .any(|(k, v)| k == std::ffi::OsStr::new("SAVVAGENT_TOOL_FS_ROOT")
+                        && v.as_deref() == Some(std::ffi::OsStr::new("/foo"))),
                 "SAVVAGENT_TOOL_FS_ROOT=/foo should survive bwrap rewrite, got envs={envs:?}"
             );
             assert!(
-                envs.iter().any(|(k, v)| k == std::ffi::OsStr::new("SAVVAGENT_TOOL_BASH_ROOT")
-                    && v.as_deref() == Some(std::ffi::OsStr::new("/bar"))),
+                envs.iter().any(
+                    |(k, v)| k == std::ffi::OsStr::new("SAVVAGENT_TOOL_BASH_ROOT")
+                        && v.as_deref() == Some(std::ffi::OsStr::new("/bar"))
+                ),
                 "SAVVAGENT_TOOL_BASH_ROOT=/bar should survive bwrap rewrite, got envs={envs:?}"
             );
         }
@@ -698,12 +729,7 @@ mod tests {
             let mut cmd = tokio::process::Command::new("echo");
             cmd.arg("hello-from-bwrap");
             let cfg = config_on();
-            let wrapper = apply_sandbox(
-                &mut cmd,
-                Path::new("echo"),
-                Path::new("/tmp"),
-                &cfg,
-            );
+            let wrapper = apply_sandbox(&mut cmd, Path::new("echo"), Path::new("/tmp"), &cfg);
             assert_eq!(wrapper, SandboxWrapper::Bwrap);
             let output = cmd.output().await.expect("bwrap echo failed");
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -725,15 +751,11 @@ mod tests {
             // Instead we test that `bwrap --unshare-net` actually blocks network:
             // try to connect to 127.0.0.1:9 (discard port) — it should fail.
             let mut cmd = tokio::process::Command::new("sh");
-            cmd.arg("-c").arg("echo hello > /tmp/savvagent_sandbox_test_write_outside");
+            cmd.arg("-c")
+                .arg("echo hello > /tmp/savvagent_sandbox_test_write_outside");
             // project root is /tmp/project (doesn't exist but that's fine for the test)
             let cfg = config_on();
-            apply_sandbox(
-                &mut cmd,
-                Path::new("sh"),
-                Path::new("/tmp/project"),
-                &cfg,
-            );
+            apply_sandbox(&mut cmd, Path::new("sh"), Path::new("/tmp/project"), &cfg);
             let output = cmd.output().await.expect("bwrap sh failed");
             // Writing outside the project root should fail — bwrap's ro-bind
             // makes / read-only except for the explicit --bind of project_root.
@@ -743,6 +765,88 @@ mod tests {
                 output.status
             );
         }
+    }
+
+    // --- scheme_quote / build_macos_profile (pure functions, run on all OSes)
+
+    #[test]
+    fn scheme_quote_escapes_backslash_and_double_quote() {
+        assert_eq!(scheme_quote("plain"), "plain");
+        assert_eq!(scheme_quote(r#"with"quote"#), r#"with\"quote"#);
+        assert_eq!(scheme_quote(r"with\backslash"), r"with\\backslash");
+        // Both, in order: backslash first so we don't double-escape.
+        assert_eq!(scheme_quote(r#"a"b\c"#), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn scheme_quote_escapes_newlines() {
+        assert_eq!(scheme_quote("line1\nline2"), "line1\\nline2");
+        assert_eq!(scheme_quote("a\rb"), "a\\rb");
+    }
+
+    #[test]
+    fn macos_profile_quotes_path_with_double_quote() {
+        // A pathological project root that contains a literal `"`.
+        let weird = PathBuf::from(r#"/tmp/proj"with"quote"#);
+        let profile = build_macos_profile(&weird, false, &[]);
+        // The raw `"` must NOT appear unescaped between the `(subpath "…")`
+        // delimiters; it must be `\"`.
+        assert!(
+            profile.contains(r#"(allow file-write* (subpath "/tmp/proj\"with\"quote"))"#),
+            "profile did not properly escape quotes:\n{profile}"
+        );
+        // Sanity: deny file-write* and network* both present.
+        assert!(profile.contains("(deny file-write*)"));
+        assert!(profile.contains("(deny network*)"));
+    }
+
+    #[test]
+    fn macos_profile_includes_extra_binds() {
+        let project = PathBuf::from("/tmp/project");
+        let bind_a = PathBuf::from("/data/cache");
+        let bind_b = PathBuf::from("/var/tmp/scratch");
+        let profile = build_macos_profile(&project, false, &[&bind_a, &bind_b]);
+        assert!(
+            profile.contains(r#"(allow file-write* (subpath "/tmp/project"))"#),
+            "missing project-root allow rule:\n{profile}"
+        );
+        assert!(
+            profile.contains(r#"(allow file-write* (subpath "/data/cache"))"#),
+            "missing bind_a allow rule:\n{profile}"
+        );
+        assert!(
+            profile.contains(r#"(allow file-write* (subpath "/var/tmp/scratch"))"#),
+            "missing bind_b allow rule:\n{profile}"
+        );
+    }
+
+    #[test]
+    fn macos_profile_omits_network_when_disallowed() {
+        let project = PathBuf::from("/tmp/project");
+        let denied = build_macos_profile(&project, false, &[]);
+        assert!(
+            denied.contains("(deny network*)"),
+            "expected (deny network*) when allow_net=false:\n{denied}"
+        );
+
+        let allowed = build_macos_profile(&project, true, &[]);
+        assert!(
+            !allowed.contains("(deny network*)"),
+            "(deny network*) should be absent when allow_net=true:\n{allowed}"
+        );
+    }
+
+    #[test]
+    fn macos_profile_escapes_extra_bind_paths() {
+        // Both project root and extra binds are user-controlled (via
+        // SandboxConfig), so both must be escaped.
+        let project = PathBuf::from("/tmp/project");
+        let evil_bind = PathBuf::from(r#"/tmp/with"quote"#);
+        let profile = build_macos_profile(&project, true, &[&evil_bind]);
+        assert!(
+            profile.contains(r#"(allow file-write* (subpath "/tmp/with\"quote"))"#),
+            "extra bind not properly escaped:\n{profile}"
+        );
     }
 
     #[test]
