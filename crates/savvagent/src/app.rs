@@ -643,6 +643,12 @@ impl App {
                                     result_preview: Some("[history]".into()),
                                 });
                             }
+                            ContentBlock::Thinking { .. } => {
+                                // Signal a thinking block occurred without
+                                // dumping the raw chain-of-thought into the
+                                // visible log. Rendered dimmed via Note.
+                                self.entries.push(Entry::Note("[thinking]".into()));
+                            }
                             _ => {}
                         }
                     }
@@ -787,32 +793,40 @@ pub fn collect_transcript_entries(dir: &std::path::Path) -> Vec<TranscriptEntry>
             continue;
         };
 
-        let (saved_at, model_opt, messages) = match &root {
+        let (saved_at, messages) = match &root {
             serde_json::Value::Object(map) if map.contains_key("schema_version") => {
+                // `Host::load_transcript` requires the full `TranscriptFile`
+                // (with non-Option `messages`) to deserialize, so a row whose
+                // `messages` field is missing or unparseable would always
+                // produce a `Malformed` error on selection. Skip those —
+                // consistent with the docstring contract above.
+                let Some(msgs_val) = map.get("messages") else {
+                    continue;
+                };
+                let Ok(msgs) =
+                    serde_json::from_value::<Vec<savvagent_protocol::Message>>(msgs_val.clone())
+                else {
+                    continue;
+                };
                 let sa = map
                     .get("saved_at")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let model = map
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
-                let msgs: Vec<savvagent_protocol::Message> = map
-                    .get("messages")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                (sa, model, msgs)
+                (sa, msgs)
             }
             serde_json::Value::Array(_) => {
-                let msgs: Vec<savvagent_protocol::Message> =
-                    serde_json::from_value(root.clone()).unwrap_or_default();
+                let Ok(msgs) =
+                    serde_json::from_value::<Vec<savvagent_protocol::Message>>(root.clone())
+                else {
+                    continue;
+                };
                 // Fall back to stem-as-timestamp for legacy files.
                 let sa = path
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(0);
-                (sa, None, msgs)
+                (sa, msgs)
             }
             _ => continue,
         };
@@ -854,13 +868,6 @@ pub fn collect_transcript_entries(dir: &std::path::Path) -> Vec<TranscriptEntry>
                 })
             })
             .unwrap_or_else(|| "(empty)".into());
-
-        let label = if let Some(model) = model_opt {
-            format!("{timestamp} [{model}] {preview}")
-        } else {
-            format!("{timestamp} {preview}")
-        };
-        let _ = label; // we'll build it at render time from the struct fields
 
         entries.push((
             sort_key,
