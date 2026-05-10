@@ -1,6 +1,9 @@
 //! Structured edit ops over UTF-8 text files: `replace`, `insert`,
-//! `multi_edit`. All writes go through [`atomic_write`] so a failed batch
-//! can never leave the original file half-rewritten.
+//! `multi_edit`. Logical-failure atomicity: if any step in a batch fails,
+//! the file on disk is left untouched. The commit step itself goes through
+//! [`atomic_write`] (tmp + fsync + rename + parent fsync) so a crash between
+//! commit start and OS flush leaves either the old contents or the new —
+//! never a half-written file.
 
 use std::path::Path;
 
@@ -122,8 +125,25 @@ pub(crate) fn apply_replace(
                 ));
             }
             if n > 1 {
+                // Compute the 1-indexed line number of each match so the
+                // agent can disambiguate by widening `old` to include
+                // surrounding context.
+                let lines: Vec<usize> = {
+                    let mut out = Vec::new();
+                    let mut offset = 0;
+                    while let Some(pos) = text[offset..].find(old) {
+                        let absolute = offset + pos;
+                        let line = text[..absolute].bytes().filter(|b| *b == b'\n').count() + 1;
+                        out.push(line);
+                        // Advance past this match. `old.len().max(1)` guards
+                        // the empty-needle case, but `old.is_empty()` is
+                        // already rejected above.
+                        offset = absolute + old.len().max(1);
+                    }
+                    out
+                };
                 return Err(FsToolError::InvalidArgument(format!(
-                    "`old` is ambiguous: {n} matches; pass `count = exactly: N` or `all`"
+                    "`old` is ambiguous: {n} matches at lines {lines:?}; pass `count = exactly: N` or `all`"
                 )));
             }
             Ok((text.replacen(old, new, 1), 1))
@@ -294,10 +314,13 @@ mod replace_tests {
 
     #[test]
     fn replace_ambiguous_errors() {
-        let err = apply_replace("ab ab", "ab", "X", None).unwrap_err();
+        // Two matches on distinct lines so we can verify the line-number
+        // disambiguation hint promised by the spec.
+        let err = apply_replace("ab\nab", "ab", "X", None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ambiguous"), "{msg}");
-        assert!(msg.contains('2'), "{msg}");
+        assert!(msg.contains("at lines"), "{msg}");
+        assert!(msg.contains("1, 2"), "{msg}");
     }
 
     #[test]
@@ -428,5 +451,66 @@ mod atomic_tests {
             })
             .collect();
         assert!(leftovers.is_empty(), "leftover: {leftovers:?}");
+    }
+}
+
+#[cfg(test)]
+mod serde_tests {
+    //! Lock the wire shapes of `MultiEdit` and `ReplaceCount` — these are
+    //! exposed via JSON to MCP clients, and a tagged-enum representation
+    //! change would silently break agent calls.
+    use super::*;
+
+    #[test]
+    fn multi_edit_replace_roundtrip() {
+        let json = r#"{"op":"replace","old":"a","new":"b"}"#;
+        let parsed: MultiEdit = serde_json::from_str(json).unwrap();
+        match parsed {
+            MultiEdit::Replace { old, new, count } => {
+                assert_eq!(old, "a");
+                assert_eq!(new, "b");
+                assert!(count.is_none());
+            }
+            other => panic!("expected Replace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_edit_replace_with_count_all_roundtrip() {
+        let json = r#"{"op":"replace","old":"a","new":"b","count":"all"}"#;
+        let parsed: MultiEdit = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            parsed,
+            MultiEdit::Replace {
+                count: Some(ReplaceCount::All),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn multi_edit_replace_with_count_exactly_roundtrip() {
+        let json = r#"{"op":"replace","old":"a","new":"b","count":{"exactly":3}}"#;
+        let parsed: MultiEdit = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            parsed,
+            MultiEdit::Replace {
+                count: Some(ReplaceCount::Exactly(3)),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn multi_edit_insert_roundtrip() {
+        let json = r#"{"op":"insert","after_line":3,"text":"hi"}"#;
+        let parsed: MultiEdit = serde_json::from_str(json).unwrap();
+        match parsed {
+            MultiEdit::Insert { after_line, text } => {
+                assert_eq!(after_line, 3);
+                assert_eq!(text, "hi");
+            }
+            other => panic!("expected Insert, got {other:?}"),
+        }
     }
 }
