@@ -387,6 +387,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_echoes_to_stdout() {
         let tools = BashTools::new();
@@ -404,6 +405,7 @@ mod tests {
         assert!(!out.0.timed_out);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn nonzero_exit_is_reported() {
         let tools = BashTools::new();
@@ -433,6 +435,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_long_running_command() {
         let tools = BashTools::new();
@@ -449,6 +452,7 @@ mod tests {
         assert!(out.0.elapsed_ms < 1_000, "elapsed={}", out.0.elapsed_ms);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cwd_defaults_to_project_root_with_containment() {
         let dir = tempdir().unwrap();
@@ -511,6 +515,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn relative_cwd_resolves_under_root() {
         let inside = tempdir().unwrap();
@@ -533,6 +538,7 @@ mod tests {
         assert_eq!(out.0.stdout, "abc");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn timeout_clamps_to_max() {
         // We can't easily prove the clamp by black-box test, so just check
