@@ -394,4 +394,23 @@ mod tests {
         assert_eq!(out.matches.len(), 3);
         assert!(out.truncated);
     }
+
+    #[test]
+    fn with_root_search_rejects_parent_traversal() {
+        let dir = tempdir().unwrap();
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        let err = run(
+            Some(&canon),
+            SearchInput {
+                pattern: "fn".into(),
+                path: Some("../".into()),
+                ..Default::default()
+            },
+        )
+        .err()
+        .expect("expected OutsideRoot error");
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("outside"), "{msg}");
+    }
 }
