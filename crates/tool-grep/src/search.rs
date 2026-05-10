@@ -299,4 +299,32 @@ mod tests {
         assert_eq!(out.matches.len(), 1);
         assert_eq!(out.matches[0].column, 9, "byte column of `foo`: {out:?}");
     }
+
+    #[test]
+    fn search_case_insensitive() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "a.txt", "Hello World\n");
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: "HELLO".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.matches.is_empty(), "default case-sensitive: {out:?}");
+
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: "HELLO".into(),
+                case_insensitive: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.matches.len(), 1);
+    }
 }
