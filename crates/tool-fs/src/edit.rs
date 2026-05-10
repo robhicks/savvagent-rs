@@ -142,6 +142,16 @@ pub(crate) fn apply_replace(
 
 /// Apply `insert` semantics to `text`. Returns the new contents and the
 /// number of lines inserted (counted by `\n` in the prepared insertion).
+///
+/// Rule: the inserted block always ends with the file's detected line ending
+/// so it occupies its own row. If the fragment immediately to the *left* of
+/// the insertion site is unterminated (i.e. the file lacks a trailing newline
+/// and we're appending past it), we splice a line-ending onto that prior
+/// fragment first — otherwise `split_inclusive('\n')` would glue the two
+/// together (e.g. `"a\nb"` + insert `"x"` at line 2 would become `"a\nbx\n"`
+/// instead of `"a\nb\nx\n"`). Original line endings are preserved everywhere
+/// else; in particular, we never invent a terminator on the file's final line
+/// unless the insert itself is happening past it.
 pub(crate) fn apply_insert(
     text: &str,
     after_line: u32,
@@ -155,16 +165,32 @@ pub(crate) fn apply_insert(
     }
 
     let line_ending = if text.contains("\r\n") { "\r\n" } else { "\n" };
+
+    // Inserted block always ends with a line-ending; one logical line goes in,
+    // it gets its own row.
     let mut to_insert = insert.to_string();
     if !to_insert.ends_with('\n') {
         to_insert.push_str(line_ending);
     }
 
-    // Split preserving the original line endings.
-    let mut parts: Vec<&str> = text.split_inclusive('\n').collect();
+    // Split preserving the original line endings. The last fragment may lack a
+    // terminator (e.g. "a\nb" → ["a\n", "b"]).
+    let parts: Vec<&str> = text.split_inclusive('\n').collect();
     let inserted_at = after_line as usize;
-    parts.insert(inserted_at, &to_insert);
-    let out: String = parts.concat();
+
+    // If the slot immediately to the left of the insertion site is an
+    // unterminated fragment, splice a line-ending into it before assembling
+    // the result so the inserted line doesn't merge with the previous text.
+    let mut owned_parts: Vec<String> = parts.iter().map(|s| (*s).to_string()).collect();
+    if inserted_at > 0
+        && let Some(prev) = owned_parts.get_mut(inserted_at - 1)
+        && !prev.ends_with('\n')
+    {
+        prev.push_str(line_ending);
+    }
+
+    owned_parts.insert(inserted_at, to_insert.clone());
+    let out: String = owned_parts.concat();
     let lines_inserted = to_insert.lines().count() as u32;
     Ok((out, lines_inserted))
 }
@@ -304,6 +330,29 @@ mod insert_tests {
     fn insert_preserves_crlf() {
         let (out, _) = apply_insert("a\r\nb\r\n", 1, "x").unwrap();
         assert_eq!(out, "a\r\nx\r\nb\r\n");
+    }
+
+    #[test]
+    fn insert_into_file_without_trailing_newline() {
+        // Append (after the last unterminated line). Without the fix the
+        // previous unterminated "b" would merge with the inserted "x\n" and
+        // produce "a\nbx\n".
+        let (out, n) = apply_insert("a\nb", 2, "x").unwrap();
+        assert_eq!(
+            out, "a\nb\nx\n",
+            "append must add separator before insert: {out}"
+        );
+        assert_eq!(n, 1);
+
+        // Mid-file insert where the *next* fragment is the unterminated tail.
+        // We must NOT invent a trailing newline for the inserted block — the
+        // original file didn't have one for that line.
+        let (out, n) = apply_insert("a\nb", 1, "x").unwrap();
+        assert_eq!(
+            out, "a\nx\nb",
+            "mid-file insert preserves the unterminated tail: {out}"
+        );
+        assert_eq!(n, 1);
     }
 }
 
