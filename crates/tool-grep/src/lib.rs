@@ -225,3 +225,28 @@ fn build_tools_from_env() -> GrepTools {
     tracing::warn!("tool-grep running without containment (no usable root)");
     GrepTools::new()
 }
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+    use rmcp::handler::server::wrapper::Parameters;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn mcp_search_round_trip() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn main() {}\n").unwrap();
+
+        let tools = GrepTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .search(Parameters(SearchInput {
+                pattern: "fn ".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(out.0.matches.len(), 1);
+        assert_eq!(out.0.matches[0].file, "a.rs");
+    }
+}
