@@ -11,6 +11,7 @@ members = [
     "crates/provider-openai",
     "crates/tool-bash",
     "crates/tool-fs",
+    "crates/tool-grep",
 ]
 default-members = ["crates/savvagent"]
 
@@ -32,6 +33,7 @@ provider-local = { path = "crates/provider-local", version = "0.5.0" }
 provider-openai = { path = "crates/provider-openai", version = "0.5.0" }
 tool-bash = { path = "crates/tool-bash", version = "0.5.0" }
 tool-fs = { path = "crates/tool-fs", version = "0.5.0" }
+tool-grep = { path = "crates/tool-grep", version = "0.5.0" }
 
 # Async runtime + utilities
 tokio = { version = "1.52", features = ["full"] }
@@ -64,6 +66,11 @@ axum = { version = "0.8", default-features = false, features = ["http1", "http2"
 # Errors
 anyhow = "1"
 thiserror = "2"
+
+# Code search / walker (shared by tool-grep and the rewritten tool-fs glob)
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
 
 # Misc
 uuid = { version = "1", features = ["v4", "serde"] }
