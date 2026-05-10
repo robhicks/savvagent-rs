@@ -221,10 +221,12 @@ impl<'a, M: grep_matcher::Matcher> grep_searcher::Sink for CollectSink<'a, M> {
             return Ok(false);
         }
         let bytes = mat.bytes();
-        let line = match std::str::from_utf8(bytes) {
-            Ok(s) => s.trim_end_matches(['\r', '\n']).to_string(),
-            Err(_) => return Ok(true), // skip binary lines silently
-        };
+        // The matcher already accepted these bytes; surfacing the match with
+        // U+FFFD replacements for invalid UTF-8 is more informative than
+        // silently dropping the row.
+        let line = String::from_utf8_lossy(bytes)
+            .trim_end_matches(['\r', '\n'])
+            .to_string();
         let line_no = mat.line_number().unwrap_or(0) as u32;
 
         // Find the column of the first regex match within this SinkMatch by
