@@ -31,7 +31,8 @@ use rmcp::transport::streamable_http_server::{
 };
 use savvagent_mcp::{ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-    CompleteRequest, CompleteResponse, ErrorKind, ProviderError, StreamEvent,
+    CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ModelInfo, ProviderError,
+    StreamEvent,
 };
 
 /// Default OpenAI API base URL. Override via [`OpenAiProviderBuilder::base_url`]
@@ -124,6 +125,56 @@ pub enum BuildError {
 
 #[async_trait]
 impl ProviderHandler for OpenAiProvider {
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        let url = format!("{}/v1/models", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        if !resp.status().is_success() {
+            return Err(ProviderError {
+                kind: ErrorKind::Network,
+                message: format!("OpenAI /v1/models returned HTTP {}", resp.status()),
+                retry_after_ms: None,
+                provider_code: None,
+            });
+        }
+        #[derive(serde::Deserialize)]
+        struct ModelsList {
+            data: Vec<RawModel>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawModel {
+            id: String,
+        }
+        let raw: ModelsList = resp.json().await.map_err(|e| ProviderError {
+            kind: ErrorKind::Internal,
+            message: format!("failed to parse /v1/models: {e}"),
+            retry_after_ms: None,
+            provider_code: None,
+        })?;
+
+        let prefixes = ["gpt-", "o1-", "o3-", "o4-"];
+        let models = raw
+            .data
+            .into_iter()
+            .filter(|m| prefixes.iter().any(|p| m.id.starts_with(p)))
+            .map(|m| {
+                let is_default = m.id == DEFAULT_MODEL;
+                ModelInfo {
+                    id: m.id.clone(),
+                    display_name: Some(m.id),
+                    context_window: None,
+                    default: is_default,
+                }
+            })
+            .collect();
+        Ok(ListModelsResponse { models })
+    }
+
     async fn complete(
         &self,
         req: CompleteRequest,
@@ -314,3 +365,81 @@ pub fn provider_for_tests(base_url: impl Into<String>) -> OpenAiProvider {
 
 #[doc(hidden)]
 pub fn _events_phantom(_: StreamEvent) {}
+
+#[cfg(test)]
+mod list_models_tests {
+    use super::*;
+    use axum::{Json, Router, routing::get};
+    use savvagent_mcp::ProviderHandler as _;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn list_models_filters_to_chat_capable() {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(json!({
+                    "data": [
+                        {"id": "gpt-4o-mini", "object": "model"},
+                        {"id": "o1-mini", "object": "model"},
+                        {"id": "text-embedding-3-small", "object": "model"},
+                        {"id": "whisper-1", "object": "model"},
+                        {"id": "o3-mini", "object": "model"},
+                        {"id": "o4-mini", "object": "model"}
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = OpenAiProvider::builder()
+            .api_key("test")
+            .base_url(format!("http://{addr}"))
+            .build()
+            .unwrap();
+        let resp = provider.list_models().await.unwrap();
+        let ids: Vec<_> = resp.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"gpt-4o-mini"), "{ids:?}");
+        assert!(ids.contains(&"o1-mini"), "{ids:?}");
+        assert!(ids.contains(&"o3-mini"), "{ids:?}");
+        assert!(ids.contains(&"o4-mini"), "{ids:?}");
+        assert!(!ids.contains(&"text-embedding-3-small"), "{ids:?}");
+        assert!(!ids.contains(&"whisper-1"), "{ids:?}");
+
+        // gpt-4o-mini matches DEFAULT_MODEL so exactly one entry is flagged.
+        let defaults: Vec<_> = resp.models.iter().filter(|m| m.default).collect();
+        assert_eq!(defaults.len(), 1);
+        assert_eq!(defaults[0].id, DEFAULT_MODEL);
+    }
+
+    #[tokio::test]
+    async fn list_models_propagates_http_failure() {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "no auth",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = OpenAiProvider::builder()
+            .api_key("test")
+            .base_url(format!("http://{addr}"))
+            .build()
+            .unwrap();
+        let err = provider.list_models().await.expect_err("must fail on 401");
+        assert!(matches!(err.kind, ErrorKind::Network), "kind: {:?}", err);
+        assert!(err.message.contains("HTTP 401"), "msg: {}", err.message);
+    }
+}
