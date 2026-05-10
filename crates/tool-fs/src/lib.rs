@@ -488,11 +488,22 @@ impl FsTools {
                     if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                         continue;
                     }
+                    let p = entry.into_path();
+                    // Always exclude anything inside a `.git/` directory,
+                    // regardless of `respect_gitignore`. `WalkBuilder` only
+                    // filters `.git/` via the gitignore matcher, so it
+                    // leaks through when gitignore is disabled.
+                    if p.strip_prefix(&resolved_root)
+                        .unwrap_or(&p)
+                        .components()
+                        .any(|c| c.as_os_str() == ".git")
+                    {
+                        continue;
+                    }
                     if out.len() >= limit {
                         truncated = true;
                         break;
                     }
-                    let p = entry.into_path();
                     // Containment filter: drop any match whose canonical path
                     // falls outside the project root (e.g. via a symlink).
                     if let Some(root) = project_root.as_deref() {
@@ -1113,6 +1124,30 @@ mod tests {
         let mut files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
         files.sort();
         assert_eq!(files, vec!["kept.rs", "target/skip.rs"], "{:?}", out.0);
+    }
+
+    #[tokio::test]
+    async fn glob_always_excludes_dot_git() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), b"ref: refs/heads/main").unwrap();
+        std::fs::write(dir.path().join("a.rs"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: Some(false), // even when off
+            }))
+            .await
+            .unwrap();
+        assert!(
+            !out.0.matches.iter().any(|m| m.contains(".git/")),
+            ".git/ leaked into glob results: {:?}",
+            out.0
+        );
     }
 
     // ---- Layer 1 path containment (FsTools::with_root) -------------------
