@@ -24,6 +24,10 @@ name = "savvagent-tool-bash"
 path = "src/bin/savvagent-tool-bash.rs"
 
 [[bin]]
+name = "savvagent-tool-grep"
+path = "src/bin/savvagent-tool-grep.rs"
+
+[[bin]]
 name = "savvagent-anthropic"
 path = "src/bin/savvagent-anthropic.rs"
 
@@ -45,6 +49,7 @@ provider-local = { workspace = true }
 provider-openai = { workspace = true }
 tool-fs = { workspace = true }
 tool-bash = { workspace = true }
+tool-grep = { workspace = true }
 anyhow.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
