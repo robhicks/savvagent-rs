@@ -1236,6 +1236,152 @@ mod tests {
         );
     }
 
+    use crate::edit::{InsertInput, MultiEdit, MultiEditInput, ReplaceInput};
+
+    #[tokio::test]
+    async fn replace_tool_unique_match() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        tokio::fs::write(&p, b"foo bar baz").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .replace(Parameters(ReplaceInput {
+                path: "a.txt".into(),
+                old: "bar".into(),
+                new: "BAR".into(),
+                count: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out.0.replacements, 1);
+        assert_eq!(tokio::fs::read_to_string(&p).await.unwrap(), "foo BAR baz");
+    }
+
+    #[tokio::test]
+    async fn replace_tool_rejects_env_path() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join(".env");
+        tokio::fs::write(&p, b"SECRET=abc").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let err = tools
+            .replace(Parameters(ReplaceInput {
+                path: ".env".into(),
+                old: "abc".into(),
+                new: "xyz".into(),
+                count: None,
+            }))
+            .await
+            .err()
+            .expect("deny-floor must reject .env");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+        assert_eq!(tokio::fs::read_to_string(&p).await.unwrap(), "SECRET=abc");
+    }
+
+    #[tokio::test]
+    async fn insert_tool_prepends() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        tokio::fs::write(&p, b"second\n").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .insert(Parameters(InsertInput {
+                path: "a.txt".into(),
+                after_line: 0,
+                text: "first".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out.0.lines_inserted, 1);
+        assert_eq!(
+            tokio::fs::read_to_string(&p).await.unwrap(),
+            "first\nsecond\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_edit_tool_atomic_on_failure() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        tokio::fs::write(&p, b"foo bar baz").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let err = tools
+            .multi_edit(Parameters(MultiEditInput {
+                path: "a.txt".into(),
+                edits: vec![
+                    MultiEdit::Replace {
+                        old: "foo".into(),
+                        new: "FOO".into(),
+                        count: None,
+                    },
+                    MultiEdit::Replace {
+                        old: "missing".into(),
+                        new: "X".into(),
+                        count: None,
+                    },
+                ],
+            }))
+            .await
+            .err()
+            .expect("second edit must fail");
+        assert!(err.message.contains("not found"), "{}", err.message);
+        assert_eq!(
+            tokio::fs::read_to_string(&p).await.unwrap(),
+            "foo bar baz",
+            "atomicity broken — original file modified"
+        );
+
+        // No leftover tmp files in parent.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".savvagent-tmp.")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "leftover tmp file: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn multi_edit_tool_round_trip() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        tokio::fs::write(&p, b"line1\nline2\nline3\n").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .multi_edit(Parameters(MultiEditInput {
+                path: "a.txt".into(),
+                edits: vec![
+                    MultiEdit::Replace {
+                        old: "line2".into(),
+                        new: "LINE_TWO".into(),
+                        count: None,
+                    },
+                    MultiEdit::Insert {
+                        after_line: 1,
+                        text: "inserted".into(),
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out.0.edits_applied, 2);
+        assert_eq!(
+            tokio::fs::read_to_string(&p).await.unwrap(),
+            "line1\ninserted\nLINE_TWO\nline3\n"
+        );
+    }
+
     #[tokio::test]
     async fn rejects_empty_path() {
         let tools = FsTools::new();
