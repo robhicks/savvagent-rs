@@ -444,12 +444,25 @@ impl FsTools {
         };
 
         let pattern = input.pattern.clone();
-        let strip_prefix = resolved_root.clone();
         let project_root = self.root.clone();
         let respect = input.respect_gitignore.unwrap_or(true);
 
         let (matches, truncated) =
             tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), FsToolError> {
+                // Build the user's pattern matcher separately from the walker.
+                // The `ignore` crate's `OverrideBuilder` treats `add()` patterns
+                // as *whitelists* with the highest precedence, which bypasses
+                // `.gitignore` for matching files (see `ignore::dir::matched`).
+                // We want the opposite: gitignore should hide files even if
+                // they match the user's glob. So we let `WalkBuilder` enumerate
+                // gitignore-respecting entries unrestricted, then post-filter
+                // each entry against a `globset` matcher.
+                let pat_glob = globset::GlobBuilder::new(&pattern)
+                    .literal_separator(false)
+                    .build()
+                    .map_err(|e| FsToolError::Glob(e.to_string()))?
+                    .compile_matcher();
+
                 let mut builder = ignore::WalkBuilder::new(&resolved_root);
                 builder
                     .git_ignore(respect)
@@ -462,18 +475,17 @@ impl FsTools {
                     .require_git(false)
                     // Allow dotfiles to be matched when the pattern asks
                     // for them (e.g. `**/.config/*.toml`). `.git/` is
-                    // still excluded by `WalkBuilder`'s built-in filter.
+                    // pruned below via `filter_entry` regardless of
+                    // `respect_gitignore`.
                     .hidden(false)
-                    .follow_links(false);
-
-                let mut overrides = ignore::overrides::OverrideBuilder::new(&resolved_root);
-                overrides
-                    .add(&pattern)
-                    .map_err(|e| FsToolError::Glob(e.to_string()))?;
-                let overrides = overrides
-                    .build()
-                    .map_err(|e| FsToolError::Glob(e.to_string()))?;
-                builder.overrides(overrides);
+                    .follow_links(false)
+                    // Prune `.git/` before the walker descends into it.
+                    // `WalkBuilder` would otherwise only filter `.git/` via
+                    // the gitignore matcher, which lets it leak through
+                    // when `respect_gitignore=false`. Pruning at the entry
+                    // level also avoids the cost of enumerating its
+                    // contents.
+                    .filter_entry(|e| e.file_name() != std::ffi::OsStr::new(".git"));
 
                 let mut out = Vec::new();
                 let mut truncated = false;
@@ -489,15 +501,11 @@ impl FsTools {
                         continue;
                     }
                     let p = entry.into_path();
-                    // Always exclude anything inside a `.git/` directory,
-                    // regardless of `respect_gitignore`. `WalkBuilder` only
-                    // filters `.git/` via the gitignore matcher, so it
-                    // leaks through when gitignore is disabled.
-                    if p.strip_prefix(&resolved_root)
-                        .unwrap_or(&p)
-                        .components()
-                        .any(|c| c.as_os_str() == ".git")
-                    {
+                    // Match the user's pattern against the path relative to
+                    // the search root so a pattern like `**/*.rs` does what
+                    // an agent expects, regardless of where the root sits.
+                    let rel_path = p.strip_prefix(&resolved_root).unwrap_or(&p);
+                    if !pat_glob.is_match(rel_path) {
                         continue;
                     }
                     if out.len() >= limit {
@@ -512,11 +520,7 @@ impl FsTools {
                             _ => continue,
                         }
                     }
-                    let rel = p
-                        .strip_prefix(&strip_prefix)
-                        .unwrap_or(&p)
-                        .to_string_lossy()
-                        .into_owned();
+                    let rel = rel_path.to_string_lossy().into_owned();
                     out.push(rel);
                 }
                 Ok((out, truncated))
@@ -1100,6 +1104,30 @@ mod tests {
             .unwrap();
         let files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
         assert_eq!(files, vec!["kept.rs"], "{:?}", out.0);
+    }
+
+    #[tokio::test]
+    async fn glob_honors_nested_gitignore() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/.gitignore"), "private.rs\n").unwrap();
+        std::fs::write(dir.path().join("sub/private.rs"), b"").unwrap();
+        std::fs::write(dir.path().join("sub/public.rs"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*.rs".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: None,
+            }))
+            .await
+            .unwrap();
+        let mut files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
+        files.sort();
+        assert_eq!(files, vec!["sub/public.rs"], "{:?}", out.0);
     }
 
     #[tokio::test]

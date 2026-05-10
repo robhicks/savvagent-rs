@@ -3901,6 +3901,7 @@ name = "tool-fs"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "globset",
  "ignore",
  "rmcp",
  "schemars",
