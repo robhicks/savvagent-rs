@@ -176,8 +176,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                     .borders(Borders::ALL)
                     .title(title)
                     .title_bottom(
-                        Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ")
-                            .right_aligned(),
+                        Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ").right_aligned(),
                     ),
             )
             .highlight_symbol("> ");
@@ -243,8 +242,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             let popup = centered_rect(60, 40, area);
             frame.render_widget(Clear, popup);
 
-            let args_pretty = serde_json::to_string_pretty(&req.args)
-                .unwrap_or_else(|_| req.args.to_string());
+            let args_pretty =
+                serde_json::to_string_pretty(&req.args).unwrap_or_else(|_| req.args.to_string());
             let mut lines: Vec<Line<'static>> = Vec::new();
             lines.push(Line::from(Span::styled(
                 format!("Tool: {}", req.name),
@@ -269,10 +268,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                     .borders(Borders::ALL)
                     .title(" Permission requested ")
                     .title_bottom(
-                        Line::from(
-                            " [y] allow  [n] deny  [a] always  [N] never  [Esc] deny ",
-                        )
-                        .right_aligned(),
+                        Line::from(" [y] allow  [n] deny  [a] always  [N] never  [Esc] deny ")
+                            .right_aligned(),
                     ),
             );
             frame.render_widget(body, popup);

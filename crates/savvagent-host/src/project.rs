@@ -176,9 +176,15 @@ mod tests {
         assert_eq!(parsed.body.as_deref(), Some("body text"));
         assert_eq!(parsed.permissions.allow.len(), 1);
         assert_eq!(parsed.permissions.allow[0].tool, "run");
-        assert_eq!(parsed.permissions.allow[0].command.as_deref(), Some("cargo"));
+        assert_eq!(
+            parsed.permissions.allow[0].command.as_deref(),
+            Some("cargo")
+        );
         assert_eq!(parsed.permissions.deny.len(), 1);
-        assert_eq!(parsed.permissions.deny[0].path.as_deref(), Some("secret.txt"));
+        assert_eq!(
+            parsed.permissions.deny[0].path.as_deref(),
+            Some("secret.txt")
+        );
     }
 
     #[test]

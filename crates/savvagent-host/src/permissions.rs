@@ -362,9 +362,7 @@ impl PermissionPolicy {
 
         let serialized = {
             let mut guard = self.toml_rules.write().expect("toml_rules poisoned");
-            guard.retain(|r| {
-                !(r.tool_name == new_rule.tool_name && r.pattern == new_rule.pattern)
-            });
+            guard.retain(|r| !(r.tool_name == new_rule.tool_name && r.pattern == new_rule.pattern));
             guard.push(new_rule);
             toml::to_string_pretty(&permissions_from_rules(&guard))
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
@@ -382,10 +380,7 @@ impl PermissionPolicy {
     /// Snapshot of the toml-backed rules. Useful for tests and `/tools`
     /// listings that want to surface the current policy.
     pub fn toml_rules_snapshot(&self) -> Vec<Rule> {
-        self.toml_rules
-            .read()
-            .expect("toml_rules poisoned")
-            .clone()
+        self.toml_rules.read().expect("toml_rules poisoned").clone()
     }
 
     /// Snapshot of the project's front-matter rules.
@@ -434,9 +429,7 @@ fn match_first(rules: &[Rule], tool_name: &str, args: &Value) -> Option<Permissi
 }
 
 fn path_arg(args: &Value) -> Option<String> {
-    args.get("path")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
+    args.get("path").and_then(|v| v.as_str()).map(str::to_owned)
 }
 
 fn command_summary(args: &Value) -> Option<String> {
