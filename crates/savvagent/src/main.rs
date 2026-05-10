@@ -440,6 +440,66 @@ fn validate_model_id<'a>(
     }
 }
 
+/// Outcome of asking the provider whether `requested` is a known model id.
+///
+/// [`Proceed`](ModelChangeOutcome::Proceed) means the TUI should switch to the
+/// new model; `warning` is an optional note to surface to the user first (e.g.
+/// "could not verify, proceeding optimistically"). [`Reject`](ModelChangeOutcome::Reject)
+/// means the id is definitively unknown — the TUI must show the note and stop.
+#[derive(Debug, PartialEq, Eq)]
+enum ModelChangeOutcome {
+    /// Switch to the new model. When `warning` is `Some`, push it as a note
+    /// first so the user understands the validation outcome.
+    Proceed { warning: Option<String> },
+    /// Refuse the change. `note` describes why, including the known model list
+    /// when one is available.
+    Reject { note: String },
+}
+
+/// Decide what to do with a `/model <id>` request given the result of asking
+/// the host for `list_models`.
+///
+/// Pure (no IO, no [`App`] mutation) so it can be unit-tested without standing
+/// up a [`Host`] or worker channel.
+fn resolve_model_change(
+    requested: &str,
+    list_result: Result<&savvagent_host::ListModelsResponse, &savvagent_protocol::ProviderError>,
+) -> ModelChangeOutcome {
+    match list_result {
+        Ok(resp) if resp.models.is_empty() => {
+            // The provider advertised the tool but returned no models. Rather
+            // than reject every id against an empty "Known: " list, treat
+            // this as "nothing to validate against" and proceed.
+            ModelChangeOutcome::Proceed {
+                warning: Some(format!(
+                    "Provider advertises no models. Proceeding to `{requested}` optimistically."
+                )),
+            }
+        }
+        Ok(resp) => match validate_model_id(requested, &resp.models) {
+            Ok(()) => ModelChangeOutcome::Proceed { warning: None },
+            Err(known) => ModelChangeOutcome::Reject {
+                note: format!("Unknown model `{requested}`. Known: {}", known.join(", ")),
+            },
+        },
+        Err(e) if matches!(e.kind, savvagent_protocol::ErrorKind::NotImplemented) => {
+            // The provider doesn't advertise list_models at all. Silent
+            // fall-through to the optimistic path is the contract.
+            ModelChangeOutcome::Proceed { warning: None }
+        }
+        Err(e) => {
+            // Network/auth/decode failure. Surface it to the user so they can
+            // tell a typo'd id apart from a misconfigured key.
+            ModelChangeOutcome::Proceed {
+                warning: Some(format!(
+                    "Could not verify model `{requested}`: {}. Proceeding optimistically.",
+                    e.message
+                )),
+            }
+        }
+    }
+}
+
 /// `/model` (no args) shows the current model. `/model <id>` validates the
 /// requested id against `host.list_models()` (when advertised) and then
 /// reconnects the active provider with the new id. Providers that don't
@@ -486,21 +546,25 @@ async fn handle_model_command(
     };
 
     // Validate the requested id against the provider's advertised list when
-    // available. Unknown id → reject with the known set. `list_models`
-    // unsupported (default trait impl) → fall through to the optimistic path.
+    // available. `resolve_model_change` encapsulates the branching so it can
+    // be unit-tested without a live `Host`.
     if let Some(host) = current_host(host_slot).await {
-        match host.list_models().await {
-            Ok(resp) => {
-                if let Err(known) = validate_model_id(&new_model, &resp.models) {
-                    app.push_note(format!(
-                        "Unknown model `{new_model}`. Known: {}",
-                        known.join(", ")
-                    ));
-                    return;
-                }
+        let list_result = host.list_models().await;
+        let outcome = resolve_model_change(&new_model, list_result.as_ref());
+        match outcome {
+            ModelChangeOutcome::Reject { note } => {
+                app.push_note(note);
+                return;
             }
-            Err(e) => {
-                tracing::debug!(?e, "list_models unsupported, proceeding optimistically");
+            ModelChangeOutcome::Proceed { warning } => {
+                if let Some(w) = warning {
+                    if let Err(ref e) = list_result {
+                        tracing::warn!(?e, "list_models failed; proceeding optimistically");
+                    }
+                    app.push_note(w);
+                } else if let Err(ref e) = list_result {
+                    tracing::debug!(?e, "list_models unsupported; proceeding optimistically");
+                }
             }
         }
     }
@@ -1167,14 +1231,31 @@ async fn resolve_pending_permission(
 
 #[cfg(test)]
 mod model_validation_tests {
-    use super::validate_model_id;
-    use savvagent_host::ModelInfo;
+    use super::{ModelChangeOutcome, resolve_model_change, validate_model_id};
+    use savvagent_host::{ListModelsResponse, ModelInfo};
+    use savvagent_protocol::{ErrorKind, ProviderError};
 
     fn info(id: &str) -> ModelInfo {
         ModelInfo {
             id: id.to_string(),
             display_name: None,
             context_window: None,
+        }
+    }
+
+    fn resp(ids: &[&str]) -> ListModelsResponse {
+        ListModelsResponse {
+            models: ids.iter().map(|id| info(id)).collect(),
+            default_model_id: None,
+        }
+    }
+
+    fn err(kind: ErrorKind, msg: &str) -> ProviderError {
+        ProviderError {
+            kind,
+            message: msg.to_string(),
+            retry_after_ms: None,
+            provider_code: None,
         }
     }
 
@@ -1196,5 +1277,59 @@ mod model_validation_tests {
         let models: Vec<ModelInfo> = vec![];
         let err = validate_model_id("anything", &models).unwrap_err();
         assert!(err.is_empty());
+    }
+
+    #[test]
+    fn resolve_proceeds_silently_for_known_id() {
+        let r = resp(&["a", "b"]);
+        let outcome = resolve_model_change("a", Ok(&r));
+        assert_eq!(outcome, ModelChangeOutcome::Proceed { warning: None });
+    }
+
+    #[test]
+    fn resolve_rejects_unknown_id_with_known_set() {
+        let r = resp(&["a", "b"]);
+        let outcome = resolve_model_change("c", Ok(&r));
+        match outcome {
+            ModelChangeOutcome::Reject { note } => {
+                assert!(note.contains("Unknown model `c`"), "note: {note}");
+                assert!(note.contains("a, b"), "note: {note}");
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_empty_list_proceeds_with_warning() {
+        let r = resp(&[]);
+        let outcome = resolve_model_change("anything", Ok(&r));
+        match outcome {
+            ModelChangeOutcome::Proceed { warning: Some(w) } => {
+                assert!(w.contains("Provider advertises no models"), "w: {w}");
+                assert!(w.contains("`anything`"), "w: {w}");
+            }
+            other => panic!("expected Proceed with warning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_not_implemented_proceeds_silently() {
+        let e = err(ErrorKind::NotImplemented, "list_models not implemented");
+        let outcome = resolve_model_change("anything", Err(&e));
+        assert_eq!(outcome, ModelChangeOutcome::Proceed { warning: None });
+    }
+
+    #[test]
+    fn resolve_network_error_proceeds_with_warning() {
+        let e = err(ErrorKind::Network, "HTTP 401: invalid_api_key");
+        let outcome = resolve_model_change("gpt-x", Err(&e));
+        match outcome {
+            ModelChangeOutcome::Proceed { warning: Some(w) } => {
+                assert!(w.contains("Could not verify"), "w: {w}");
+                assert!(w.contains("`gpt-x`"), "w: {w}");
+                assert!(w.contains("invalid_api_key"), "w: {w}");
+            }
+            other => panic!("expected Proceed with warning, got {other:?}"),
+        }
     }
 }
