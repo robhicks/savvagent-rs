@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui_code_editor::editor::Editor;
 use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Theme};
-use savvagent_host::{ToolCallStatus, TurnEvent};
+use savvagent_host::{ToolCallStatus, TranscriptFile, TurnEvent};
 use serde_json::Value;
 use tui_textarea::TextArea;
 
@@ -30,6 +30,8 @@ pub enum InputMode {
     EnteringApiKey,
     /// Tool-permission modal up; the turn loop is paused on a `oneshot`.
     PermissionPrompt,
+    /// Transcript picker open — selecting a file for `/resume`.
+    SelectingTranscript,
 }
 
 /// Snapshot of a pending [`TurnEvent::PermissionRequested`] used to render
@@ -44,6 +46,19 @@ pub struct PendingPermission {
     pub summary: String,
     /// Full argument JSON, rendered (truncated) below the summary.
     pub args: Value,
+}
+
+/// One row in the transcript picker list.
+#[derive(Debug, Clone)]
+pub struct TranscriptEntry {
+    /// Full path to the `.json` file.
+    pub path: PathBuf,
+    /// Human-readable timestamp label (e.g. `2026-05-10 14:32:01`).
+    pub timestamp: String,
+    /// First user message text, truncated for preview.
+    pub preview: String,
+    /// Total number of messages in the transcript.
+    pub message_count: usize,
 }
 
 /// One row in the conversation log.
@@ -144,6 +159,16 @@ pub struct App {
     /// when `TurnEvent::PermissionRequested` arrives, cleared when the user
     /// answers the modal.
     pub pending_permission: Option<PendingPermission>,
+
+    // --- /resume transcript picker ---
+    /// Transcript files available for resumption, sorted newest-first.
+    pub transcript_entries: Vec<TranscriptEntry>,
+    /// Highlighted row in the transcript picker.
+    pub transcript_index: usize,
+
+    /// When the current session was resumed from a saved transcript, this
+    /// holds a human-readable timestamp string shown in the header.
+    pub resumed_at: Option<String>,
 }
 
 impl App {
@@ -199,6 +224,9 @@ impl App {
             show_splash: true,
             splash_shown_at: Instant::now(),
             pending_permission: None,
+            transcript_entries: Vec::new(),
+            transcript_index: 0,
+            resumed_at: None,
         };
         app.refresh_commands();
         app
@@ -357,6 +385,11 @@ impl App {
             Command {
                 name: "/model".into(),
                 description: "Show the current model (or `/model <id>` to switch)".into(),
+                needs_arg: false,
+            },
+            Command {
+                name: "/resume".into(),
+                description: "Resume a saved transcript (opens picker, or /resume <path>)".into(),
                 needs_arg: false,
             },
             Command {
@@ -538,6 +571,92 @@ impl App {
         }
     }
 
+    /// Populate `transcript_entries` from `dir` and enter the picker mode.
+    ///
+    /// Entries are sorted newest-first by the Unix timestamp embedded in the
+    /// filename (`<unix>.json`). Files that cannot be parsed as JSON are
+    /// silently skipped so a single corrupt file doesn't break the whole
+    /// picker.
+    pub fn open_transcript_picker(&mut self, dir: &std::path::Path) {
+        self.transcript_entries = collect_transcript_entries(dir);
+        self.transcript_index = 0;
+        self.input_mode = InputMode::SelectingTranscript;
+    }
+
+    /// Close the transcript picker without selecting anything.
+    pub fn close_transcript_picker(&mut self) {
+        self.transcript_entries.clear();
+        self.transcript_index = 0;
+        self.input_mode = InputMode::Editing;
+    }
+
+    /// Return the path of the currently-highlighted transcript entry, if any.
+    pub fn selected_transcript_path(&self) -> Option<&std::path::Path> {
+        self.transcript_entries
+            .get(self.transcript_index)
+            .map(|e| e.path.as_path())
+    }
+
+    /// Replay a loaded transcript into the visible conversation log as
+    /// "history" entries. Tool-use blocks are rendered with `[history]` status
+    /// so they look distinct from live calls. Called after `load_transcript`
+    /// succeeds so the user can see prior context.
+    pub fn replay_transcript(&mut self, record: &TranscriptFile) {
+        use savvagent_protocol::{ContentBlock, Role};
+
+        self.entries.clear();
+        self.live_text.clear();
+
+        for msg in &record.messages {
+            match msg.role {
+                Role::User => {
+                    // Collect text blocks; skip tool_result blocks (they're
+                    // the host's synthetic responses — not user prose).
+                    let text: String = msg
+                        .content
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::Text { text } = b {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        self.entries.push(Entry::User(text));
+                    }
+                }
+                Role::Assistant => {
+                    for block in &msg.content {
+                        match block {
+                            ContentBlock::Text { text } if !text.is_empty() => {
+                                self.entries.push(Entry::Assistant(text.clone()));
+                            }
+                            ContentBlock::ToolUse { name, input, .. } => {
+                                self.entries.push(Entry::Tool {
+                                    name: name.clone(),
+                                    arguments: summarize_args(input),
+                                    status: Some(ToolCallStatus::Ok),
+                                    result_preview: Some("[history]".into()),
+                                });
+                            }
+                            ContentBlock::Thinking { .. } => {
+                                // Signal a thinking block occurred without
+                                // dumping the raw chain-of-thought into the
+                                // visible log. Rendered dimmed via Note.
+                                self.entries.push(Entry::Note("[thinking]".into()));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        self.update_metrics();
+    }
+
     /// Dispatch a `/...` command. Returns `true` if it was a slash command.
     pub fn handle_command(&mut self, command: &str) -> bool {
         let parts: Vec<&str> = command.split_whitespace().collect();
@@ -640,6 +759,153 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max).collect();
     out.push('…');
     out
+}
+
+/// Scan `dir` for `*.json` transcript files and return picker rows
+/// sorted newest-first.
+///
+/// Uses two strategies for ordering:
+/// 1. The `saved_at` timestamp inside the file (versioned format).
+/// 2. The numeric stem of the filename (`<unix>.json`) for legacy files.
+///
+/// Files that cannot be read or parsed as JSON are silently skipped.
+pub fn collect_transcript_entries(dir: &std::path::Path) -> Vec<TranscriptEntry> {
+    use savvagent_protocol::ContentBlock;
+
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut entries: Vec<(u64, TranscriptEntry)> = Vec::new();
+
+    for item in read_dir.flatten() {
+        let path = item.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+
+        // Try to parse for metadata. On any failure, skip.
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(root) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+
+        let (saved_at, messages) = match &root {
+            serde_json::Value::Object(map) if map.contains_key("schema_version") => {
+                // `Host::load_transcript` requires the full `TranscriptFile`
+                // (with non-Option `messages`) to deserialize, so a row whose
+                // `messages` field is missing or unparseable would always
+                // produce a `Malformed` error on selection. Skip those —
+                // consistent with the docstring contract above.
+                let Some(msgs_val) = map.get("messages") else {
+                    continue;
+                };
+                let Ok(msgs) =
+                    serde_json::from_value::<Vec<savvagent_protocol::Message>>(msgs_val.clone())
+                else {
+                    continue;
+                };
+                let sa = map.get("saved_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                (sa, msgs)
+            }
+            serde_json::Value::Array(_) => {
+                let Ok(msgs) =
+                    serde_json::from_value::<Vec<savvagent_protocol::Message>>(root.clone())
+                else {
+                    continue;
+                };
+                // Fall back to stem-as-timestamp for legacy files.
+                let sa = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                (sa, msgs)
+            }
+            _ => continue,
+        };
+
+        // Sort key: prefer saved_at, fall back to stem.
+        let sort_key = if saved_at > 0 {
+            saved_at
+        } else {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+
+        let timestamp = if saved_at > 0 {
+            format_unix_ts(saved_at)
+        } else {
+            // Legacy: stem is already the unix ts.
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+            stem.parse::<u64>()
+                .map(format_unix_ts)
+                .unwrap_or_else(|_| stem.to_owned())
+        };
+
+        // First user message text as preview.
+        let preview = messages
+            .iter()
+            .find(|m| m.role == savvagent_protocol::Role::User)
+            .and_then(|m| {
+                m.content.iter().find_map(|b| {
+                    if let ContentBlock::Text { text } = b {
+                        Some(truncate(text, 60))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_else(|| "(empty)".into());
+
+        entries.push((
+            sort_key,
+            TranscriptEntry {
+                path,
+                timestamp,
+                preview,
+                message_count: messages.len(),
+            },
+        ));
+    }
+
+    // Newest first.
+    entries.sort_by_key(|e| std::cmp::Reverse(e.0));
+    entries.into_iter().map(|(_, e)| e).collect()
+}
+
+/// Format a Unix timestamp as a local-time-like string.
+/// Uses naive UTC formatting since we don't pull in a chrono dep.
+fn format_unix_ts(secs: u64) -> String {
+    // Simple: express as YYYY-MM-DD HH:MM:SS UTC.
+    let s = secs;
+    let sec = s % 60;
+    let min = (s / 60) % 60;
+    let hour = (s / 3600) % 24;
+    let days = s / 86400;
+    // Days since Unix epoch → Gregorian calendar (Proleptic).
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}")
+}
+
+/// Minimal Gregorian calendar conversion for Unix-epoch day count.
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
+    // Algorithm from https://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 #[cfg(test)]

@@ -31,11 +31,12 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use app::{App, CommandSelection, Entry, InputMode};
+use app::{App, CommandSelection, Entry, InputMode, collect_transcript_entries};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
 use savvagent_host::{
-    Host, HostConfig, PermissionDecision, ProviderEndpoint, ToolEndpoint, TurnEvent,
+    Host, HostConfig, PermissionDecision, ProviderEndpoint, ToolEndpoint, TranscriptError,
+    TurnEvent,
 };
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
@@ -356,6 +357,10 @@ async fn dispatch_slash_command(
             handle_model_command(app, rest, host_slot, project_root, tool_bins).await;
             return;
         }
+        "/resume" => {
+            handle_resume_command(app, rest, host_slot).await;
+            return;
+        }
         _ => {}
     }
 
@@ -459,6 +464,98 @@ async fn handle_model_command(
         app,
     )
     .await;
+}
+
+/// `/resume` with no args opens the transcript picker. With a path arg,
+/// loads the transcript immediately. Requires an active host connection;
+/// if none exists, surfaces a clear error.
+///
+/// Refuses to run while a turn is in flight: `Host::run_turn_inner`
+/// snapshots `state.messages` at turn start and commits its local clone
+/// back at turn end, so a mid-turn `load_transcript` would be silently
+/// overwritten when the in-flight turn finishes.
+async fn handle_resume_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
+    if app.is_loading {
+        app.push_note("Cannot /resume during an in-flight turn — wait for it to finish.");
+        return;
+    }
+    if rest.is_empty() {
+        // Open the picker — actual load happens when the user presses Enter
+        // in `SelectingTranscript` mode (handled in `run_app`).
+        app.open_transcript_picker(&app.transcript_dir.clone());
+        return;
+    }
+
+    // Inline path argument: /resume <path>.
+    let path = {
+        let p = PathBuf::from(rest);
+        if p.is_absolute() {
+            p
+        } else {
+            // Treat bare names like "1715340000" or "1715340000.json" as
+            // relative to the transcript directory.
+            let candidate = app.transcript_dir.join(rest);
+            if candidate.exists() {
+                candidate
+            } else {
+                // Try adding .json extension.
+                let with_ext = app.transcript_dir.join(format!("{rest}.json"));
+                if with_ext.exists() { with_ext } else { p }
+            }
+        }
+    };
+    do_resume_from_path(app, host_slot, &path).await;
+}
+
+/// Load a transcript from `path` into the active host and replay it into
+/// the conversation log.
+async fn do_resume_from_path(app: &mut App, host_slot: &HostSlot, path: &Path) {
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note("Not connected — run /connect first, then /resume to load a transcript.");
+        return;
+    };
+
+    match host.load_transcript(path).await {
+        Ok(record) => {
+            // Warn if the transcript was from a different model.
+            if record.model != host.config().model && record.saved_at > 0 {
+                app.push_note(format!(
+                    "Warning: transcript was saved with model '{}'; current model is '{}'.",
+                    record.model,
+                    host.config().model
+                ));
+            }
+            let ts = if record.saved_at > 0 {
+                collect_transcript_entries(path.parent().unwrap_or(path))
+                    .into_iter()
+                    .find(|e| e.path == path)
+                    .map(|e| e.timestamp)
+                    .unwrap_or_else(|| record.saved_at.to_string())
+            } else {
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("?")
+                    .to_owned()
+            };
+            app.replay_transcript(&record);
+            app.resumed_at = Some(ts.clone());
+            app.push_note(format!(
+                "Resumed transcript from {ts} ({} messages). New turns continue from here.",
+                record.messages.len()
+            ));
+        }
+        Err(TranscriptError::SchemaMismatch { found, expected }) => {
+            app.push_note(format!(
+                "Cannot resume: transcript schema v{found}, this build expects v{expected}."
+            ));
+        }
+        Err(TranscriptError::Malformed(msg)) => {
+            app.push_note(format!("Cannot resume: malformed transcript JSON: {msg}"));
+        }
+        Err(TranscriptError::Io(e)) => {
+            app.push_note(format!("Cannot resume: {e}"));
+        }
+    }
 }
 
 /// Rebuild the host with `new_model` against the same provider + key, swap
@@ -858,6 +955,31 @@ async fn run_app(
                     resolve_pending_permission(app, &host_slot, decision, persist).await;
                 }
             }
+            InputMode::SelectingTranscript => match key.code {
+                KeyCode::Esc => app.close_transcript_picker(),
+                KeyCode::Up if app.transcript_index > 0 => {
+                    app.transcript_index -= 1;
+                }
+                KeyCode::Down => {
+                    let count = app.transcript_entries.len();
+                    if app.transcript_index + 1 < count {
+                        app.transcript_index += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(path) = app.selected_transcript_path().map(|p| p.to_path_buf()) {
+                        app.close_transcript_picker();
+                        if app.is_loading {
+                            app.push_note(
+                                "Cannot /resume during an in-flight turn — wait for it to finish.",
+                            );
+                        } else {
+                            do_resume_from_path(app, &host_slot, &path).await;
+                        }
+                    }
+                }
+                _ => {}
+            },
         }
     }
 }

@@ -9,6 +9,7 @@ use savvagent_protocol::{
     BlockDelta, CompleteRequest, ContentBlock, Message, ProviderError, Role, StopReason,
     StreamEvent, ToolDef,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -18,6 +19,56 @@ use crate::permissions::{PermissionDecision, PermissionPolicy, Verdict};
 use crate::project;
 use crate::provider::RmcpProviderClient;
 use crate::tools::ToolRegistry;
+
+/// Current transcript file schema version.
+///
+/// Increment when the on-disk shape changes incompatibly. The loader rejects
+/// files whose `schema_version` doesn't match this constant with
+/// [`TranscriptError::SchemaMismatch`], which lets callers surface a clear
+/// error rather than silently misinterpreting old data.
+///
+/// **Pre-resume files** (written before this version field was introduced)
+/// lack the `schema_version` field entirely. They are accepted as v1
+/// transcripts — the only field they carry is the raw `Vec<Message>` array,
+/// which is identical in shape to `TranscriptFile::messages` in v1.
+pub const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
+
+/// On-disk transcript format.
+///
+/// The file is pretty-printed JSON. Older files written by
+/// `Host::save_transcript` before session-resume was added lack the wrapper
+/// object; they are a bare `[...]` array of [`Message`]s. The loader handles
+/// both shapes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptFile {
+    /// Schema version; used to detect incompatible on-disk formats.
+    pub schema_version: u32,
+    /// Recorded model identifier. May differ from the active connection.
+    pub model: String,
+    /// Unix timestamp (seconds) of when the transcript was saved.
+    pub saved_at: u64,
+    /// Conversation messages in chronological order.
+    pub messages: Vec<Message>,
+}
+
+/// Errors produced by transcript load / save operations.
+#[derive(Debug, Error)]
+pub enum TranscriptError {
+    /// The file could not be read.
+    #[error("io error reading transcript: {0}")]
+    Io(#[from] std::io::Error),
+    /// JSON was malformed or didn't match the expected shape.
+    #[error("malformed transcript JSON: {0}")]
+    Malformed(String),
+    /// The on-disk schema version differs from the version this binary expects.
+    #[error("transcript schema v{found}, expected v{expected}")]
+    SchemaMismatch {
+        /// Version found in the file.
+        found: u32,
+        /// Version this build expects.
+        expected: u32,
+    },
+}
 
 /// Top-level error surfaced from [`Host`] operations.
 #[derive(Debug, Error)]
@@ -453,16 +504,97 @@ impl Host {
     }
 
     /// Persist the current message history as pretty-printed JSON to `path`.
-    /// Creates parent directories as needed. Schema is the SPP `Vec<Message>`
-    /// produced by [`Self::messages`] — re-loadable as-is.
+    ///
+    /// Creates parent directories as needed. The file is written in the
+    /// [`TranscriptFile`] versioned format so [`Self::load_transcript`] can
+    /// round-trip it unambiguously.
     pub async fn save_transcript(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         let messages = self.messages().await;
-        let json = serde_json::to_vec_pretty(&messages)
+        let saved_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let record = TranscriptFile {
+            schema_version: TRANSCRIPT_SCHEMA_VERSION,
+            model: self.config.model.clone(),
+            saved_at,
+            messages,
+        };
+        let json = serde_json::to_vec_pretty(&record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         tokio::fs::write(path, json).await
+    }
+
+    /// Re-hydrate the message history from a previously-saved transcript file.
+    ///
+    /// Accepts two on-disk shapes:
+    ///
+    /// - **Versioned** (`TranscriptFile` object with a `schema_version` field):
+    ///   the schema version must equal [`TRANSCRIPT_SCHEMA_VERSION`]; a mismatch
+    ///   returns [`TranscriptError::SchemaMismatch`].
+    /// - **Legacy bare array** (`[...]`): files written before session-resume
+    ///   was introduced. They are interpreted as v1 transcripts; the messages
+    ///   are loaded as-is.
+    ///
+    /// Existing conversation history is **replaced** by the loaded messages.
+    /// The caller is expected to have verified that a provider is connected
+    /// before calling this; the host does not re-connect automatically.
+    ///
+    /// Returns the loaded [`TranscriptFile`] so callers can surface metadata
+    /// (model, saved_at) in the UI.
+    ///
+    /// # Invariant: must not be called during an in-flight turn
+    ///
+    /// [`Self::run_turn_inner`] snapshots `state.messages` into a local `Vec`
+    /// at turn start and commits that local clone back to `state.messages`
+    /// when the turn completes. Calling `load_transcript` while a turn is
+    /// running therefore appears to succeed, but the in-flight turn will
+    /// silently overwrite the resumed history at the moment it finishes.
+    /// The TUI enforces this by gating `/resume` on its `is_loading` flag.
+    pub async fn load_transcript(&self, path: &Path) -> Result<TranscriptFile, TranscriptError> {
+        let bytes = tokio::fs::read(path).await?;
+        let root: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| TranscriptError::Malformed(e.to_string()))?;
+
+        let transcript = match &root {
+            // Versioned format: top-level object with schema_version.
+            serde_json::Value::Object(map) if map.contains_key("schema_version") => {
+                let record: TranscriptFile = serde_json::from_value(root)
+                    .map_err(|e| TranscriptError::Malformed(e.to_string()))?;
+                if record.schema_version != TRANSCRIPT_SCHEMA_VERSION {
+                    return Err(TranscriptError::SchemaMismatch {
+                        found: record.schema_version,
+                        expected: TRANSCRIPT_SCHEMA_VERSION,
+                    });
+                }
+                record
+            }
+            // Legacy bare array: treat as v1, synthesize metadata.
+            serde_json::Value::Array(_) => {
+                let messages: Vec<Message> = serde_json::from_value(root)
+                    .map_err(|e| TranscriptError::Malformed(e.to_string()))?;
+                TranscriptFile {
+                    schema_version: TRANSCRIPT_SCHEMA_VERSION,
+                    model: self.config.model.clone(),
+                    saved_at: 0,
+                    messages,
+                }
+            }
+            _ => {
+                return Err(TranscriptError::Malformed(
+                    "expected a JSON object or array at the root".into(),
+                ));
+            }
+        };
+
+        {
+            let mut state = self.state.lock().await;
+            state.messages = transcript.messages.clone();
+        }
+        Ok(transcript)
     }
 
     /// Drop the per-turn message history without touching connections.
@@ -839,5 +971,163 @@ mod policy_tests {
             "{}",
             outcome.tool_calls[0].result
         );
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use async_trait::async_trait;
+    use savvagent_mcp::ProviderClient;
+    use savvagent_protocol::{
+        CompleteRequest, CompleteResponse, ContentBlock, Message, ProviderError, Role, StopReason,
+        Usage,
+    };
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::config::{HostConfig, ProviderEndpoint};
+    use crate::permissions::PermissionPolicy;
+
+    /// Minimal provider that immediately returns end_turn with no content.
+    struct NoopProvider;
+
+    #[async_trait]
+    impl ProviderClient for NoopProvider {
+        async fn complete(
+            &self,
+            req: CompleteRequest,
+            _events: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            Ok(CompleteResponse {
+                id: "noop".into(),
+                model: req.model,
+                content: vec![ContentBlock::Text { text: "ok".into() }],
+                stop_reason: StopReason::EndTurn,
+                stop_sequence: None,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    fn tmp_config(dir: &std::path::Path) -> HostConfig {
+        HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(dir.to_path_buf())
+        .with_policy(PermissionPolicy::transient(dir.to_path_buf()))
+    }
+
+    /// Round-trip: save then load recovers the same message history.
+    #[tokio::test]
+    async fn round_trip_recovers_messages() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("t.json");
+
+        // Build a host with some history.
+        let host1 = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        host1.run_turn("hello").await.unwrap();
+        host1.save_transcript(&path).await.unwrap();
+        let saved = host1.messages().await;
+
+        // Load into a fresh host.
+        let host2 = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        let record = host2.load_transcript(&path).await.unwrap();
+        let loaded = host2.messages().await;
+
+        assert_eq!(saved, loaded, "message history must survive round-trip");
+        assert_eq!(record.schema_version, TRANSCRIPT_SCHEMA_VERSION);
+        assert_eq!(record.model, "test-model");
+    }
+
+    /// Schema version mismatch yields a typed error, not a panic.
+    #[tokio::test]
+    async fn schema_mismatch_returns_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("future.json");
+
+        let future_file = serde_json::json!({
+            "schema_version": TRANSCRIPT_SCHEMA_VERSION + 1,
+            "model": "some-model",
+            "saved_at": 0,
+            "messages": []
+        });
+        tokio::fs::write(&path, serde_json::to_vec(&future_file).unwrap())
+            .await
+            .unwrap();
+
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        let err = host.load_transcript(&path).await.unwrap_err();
+        assert!(
+            matches!(err, TranscriptError::SchemaMismatch { .. }),
+            "expected SchemaMismatch, got {err:?}"
+        );
+    }
+
+    /// Malformed JSON returns an error without panicking.
+    #[tokio::test]
+    async fn malformed_json_returns_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        tokio::fs::write(&path, b"{ not valid json !!!")
+            .await
+            .unwrap();
+
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        let err = host.load_transcript(&path).await.unwrap_err();
+        assert!(
+            matches!(err, TranscriptError::Malformed(_)),
+            "expected Malformed, got {err:?}"
+        );
+    }
+
+    /// Legacy bare-array transcripts (pre-resume) are accepted transparently.
+    #[tokio::test]
+    async fn legacy_bare_array_loads_ok() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy.json");
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "legacy message".into(),
+            }],
+        }];
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&messages).unwrap())
+            .await
+            .unwrap();
+
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        let record = host.load_transcript(&path).await.unwrap();
+        assert_eq!(record.messages, messages);
+        assert_eq!(record.schema_version, TRANSCRIPT_SCHEMA_VERSION);
     }
 }
