@@ -140,7 +140,8 @@ pub struct ListDirOutput {
 /// Arguments to `glob`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct GlobInput {
-    /// Glob pattern (e.g. `**/*.rs`). Standard `glob` crate syntax.
+    /// Glob pattern (e.g. `**/*.rs`). Standard `gitignore`-style glob syntax;
+    /// brace alternation like `**/*.{rs,toml}` is supported.
     pub pattern: String,
     /// Directory the pattern is rooted at. Default: server CWD (`.`).
     #[serde(default)]
@@ -148,6 +149,10 @@ pub struct GlobInput {
     /// Cap on the number of matches returned. Default: 1024.
     #[serde(default)]
     pub max_matches: Option<u32>,
+    /// Honor `.gitignore`, `.git/info/exclude`, and global gitignore. Default:
+    /// true. `.git/` is always excluded regardless of this flag.
+    #[serde(default)]
+    pub respect_gitignore: Option<bool>,
 }
 
 /// Result of `glob`.
@@ -441,20 +446,53 @@ impl FsTools {
         let pattern = input.pattern.clone();
         let strip_prefix = resolved_root.clone();
         let project_root = self.root.clone();
+        let respect = input.respect_gitignore.unwrap_or(true);
 
-        let (matches, truncated) =
-            tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), FsToolError> {
-                let joined_path = resolved_root.join(&pattern);
-                let joined = joined_path.to_string_lossy().into_owned();
+        let (matches, truncated) = tokio::task::spawn_blocking(
+            move || -> Result<(Vec<String>, bool), FsToolError> {
+                let mut builder = ignore::WalkBuilder::new(&resolved_root);
+                builder
+                    .git_ignore(respect)
+                    .git_global(respect)
+                    .git_exclude(respect)
+                    // Honor `.gitignore` even when the search root isn't
+                    // inside a git repo — agents commonly invoke `glob`
+                    // outside a checkout, but still expect a project's
+                    // top-level `.gitignore` to apply.
+                    .require_git(false)
+                    // Allow dotfiles to be matched when the pattern asks
+                    // for them (e.g. `**/.config/*.toml`). `.git/` is
+                    // still excluded by `WalkBuilder`'s built-in filter.
+                    .hidden(false)
+                    .follow_links(false);
+
+                let mut overrides = ignore::overrides::OverrideBuilder::new(&resolved_root);
+                overrides
+                    .add(&pattern)
+                    .map_err(|e| FsToolError::Glob(e.to_string()))?;
+                let overrides = overrides
+                    .build()
+                    .map_err(|e| FsToolError::Glob(e.to_string()))?;
+                builder.overrides(overrides);
+
                 let mut out = Vec::new();
                 let mut truncated = false;
-                let iter = glob::glob(&joined).map_err(|e| FsToolError::Glob(e.to_string()))?;
-                for entry in iter {
+                for entry in builder.build() {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "skipping walker entry");
+                            continue;
+                        }
+                    };
+                    if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                        continue;
+                    }
                     if out.len() >= limit {
                         truncated = true;
                         break;
                     }
-                    let p = entry.map_err(|e| FsToolError::Glob(e.to_string()))?;
+                    let p = entry.into_path();
                     // Containment filter: drop any match whose canonical path
                     // falls outside the project root (e.g. via a symlink).
                     if let Some(root) = project_root.as_deref() {
@@ -471,9 +509,10 @@ impl FsTools {
                     out.push(rel);
                 }
                 Ok((out, truncated))
-            })
-            .await
-            .map_err(|e| FsToolError::InvalidArgument(format!("glob task panicked: {e}")))??;
+            },
+        )
+        .await
+        .map_err(|e| FsToolError::InvalidArgument(format!("glob task panicked: {e}")))??;
 
         Ok(Json(GlobOutput {
             pattern: input.pattern,
@@ -1022,12 +1061,35 @@ mod tests {
                 pattern: "**/*.rs".into(),
                 root: Some(dir.path().to_string_lossy().into_owned()),
                 max_matches: None,
+                respect_gitignore: None,
             }))
             .await
             .unwrap();
         assert!(out.0.matches.iter().any(|m| m.ends_with("keep.rs")));
         assert!(out.0.matches.iter().any(|m| m.ends_with("also.rs")));
         assert!(!out.0.matches.iter().any(|m| m.ends_with("skip.txt")));
+    }
+
+    #[tokio::test]
+    async fn glob_excludes_gitignored_by_default() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(dir.path().join("kept.rs"), b"").unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/skip.rs"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*.rs".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: None,
+            }))
+            .await
+            .unwrap();
+        let files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
+        assert_eq!(files, vec!["kept.rs"], "{:?}", out.0);
     }
 
     // ---- Layer 1 path containment (FsTools::with_root) -------------------
@@ -1207,6 +1269,7 @@ mod tests {
                 pattern: "**/*.rs".into(),
                 root: Some(".".into()),
                 max_matches: None,
+                respect_gitignore: None,
             }))
             .await
             .unwrap();
@@ -1237,6 +1300,7 @@ mod tests {
                 pattern: "../*.rs".into(),
                 root: Some(".".into()),
                 max_matches: None,
+                respect_gitignore: None,
             }))
             .await
             .err()
@@ -1537,6 +1601,7 @@ mod tests {
                     pattern: String::new(),
                     root: None,
                     max_matches: None,
+                    respect_gitignore: None,
                 }))
                 .await
                 .is_err()
