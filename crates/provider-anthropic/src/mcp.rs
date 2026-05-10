@@ -66,7 +66,7 @@ impl AnthropicMcpServer {
     /// SPP `complete` tool. See `crates/savvagent-protocol/SPEC.md`.
     #[tool(
         name = "complete",
-        description = "Run a completion against Anthropic Messages API (SPP v0.1.0)."
+        description = "Run a completion against Anthropic Messages API."
     )]
     pub async fn complete(
         &self,
@@ -131,7 +131,7 @@ impl AnthropicMcpServer {
     /// SPP `list_models` tool. Returns the curated Claude 4.x list.
     #[tool(
         name = "list_models",
-        description = "List models this provider can serve (SPP v0.1.0)."
+        description = "List models this provider can serve."
     )]
     pub async fn list_models_tool(&self) -> Result<CallToolResult, ErrorData> {
         match self.provider.list_models().await {
@@ -221,5 +221,35 @@ impl StreamEmitter for PeerEmitter {
                 rmcp::ServiceError::TransportClosed => EmitError::Disconnected,
                 other => EmitError::Transport(other.to_string()),
             })
+    }
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+    use crate::AnthropicProvider;
+    use savvagent_protocol::ListModelsResponse;
+
+    /// `list_models_tool` is a thin wrapper around the provider's
+    /// `list_models` impl. Exercising the wrapper directly catches
+    /// regressions in the serialization path that wouldn't show up in the
+    /// `ProviderHandler` test.
+    #[tokio::test]
+    async fn list_models_tool_returns_structured_curated_set() {
+        let provider = AnthropicProvider::builder()
+            .api_key("test")
+            .build()
+            .unwrap();
+        let server = AnthropicMcpServer::new(provider);
+        let result = server.list_models_tool().await.unwrap();
+        assert_ne!(result.is_error, Some(true), "tool returned error result");
+        let body = result
+            .structured_content
+            .expect("list_models_tool must populate structured_content");
+        let resp: ListModelsResponse =
+            serde_json::from_value(body).expect("structured payload decodes as ListModelsResponse");
+        let ids: Vec<&str> = resp.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"claude-haiku-4-5"), "{ids:?}");
+        assert_eq!(resp.default_model_id, Some("claude-haiku-4-5".into()));
     }
 }

@@ -394,7 +394,6 @@ pub fn _events_phantom(_: StreamEvent) {}
 mod list_models_tests {
     use super::*;
     use axum::{Json, Router, routing::get};
-    use savvagent_mcp::ProviderHandler as _;
     use serde_json::json;
 
     #[tokio::test]
