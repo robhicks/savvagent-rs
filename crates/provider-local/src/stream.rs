@@ -56,8 +56,12 @@ struct Accumulator {
     model: Option<String>,
     usage: Usage,
     stop_reason: Option<spp::StopReason>,
-    /// Whether a text block is currently open (index 0 is always the text block).
-    text_open: bool,
+    /// Index of the currently-open text block, if any. The text block is not
+    /// always at `0` — a `tool_call` chunk arriving before any text chunk
+    /// advances `next_index`, so we must remember which index the text block
+    /// actually opened on and reuse it for every subsequent delta and the
+    /// final stop event.
+    text_index: Option<u32>,
     text_buf: String,
     /// Completed content blocks to put in the final response.
     final_blocks: Vec<ContentBlock>,
@@ -84,19 +88,26 @@ impl Accumulator {
         // Text delta.
         if let Some(text) = msg.and_then(message_text) {
             if !text.is_empty() {
-                if !self.text_open {
-                    // Open the text block on first delta.
-                    events.push(StreamEvent::ContentBlockStart {
-                        index: self.next_index,
-                        block: ContentBlock::Text {
-                            text: String::new(),
-                        },
-                    });
-                    self.text_open = true;
-                }
+                let idx = match self.text_index {
+                    Some(i) => i,
+                    None => {
+                        // Open the text block on first delta at the current
+                        // next_index (which may be > 0 if tool_calls have
+                        // already advanced it).
+                        let i = self.next_index;
+                        events.push(StreamEvent::ContentBlockStart {
+                            index: i,
+                            block: ContentBlock::Text {
+                                text: String::new(),
+                            },
+                        });
+                        self.text_index = Some(i);
+                        i
+                    }
+                };
                 self.text_buf.push_str(&text);
                 events.push(StreamEvent::ContentBlockDelta {
-                    index: 0,
+                    index: idx,
                     delta: BlockDelta::TextDelta { text },
                 });
             }
@@ -106,13 +117,11 @@ impl Accumulator {
         if let Some(m) = msg {
             for (idx, tc) in m.tool_calls.iter().enumerate() {
                 // Close text block first if open.
-                if self.text_open {
-                    let text_idx = 0u32;
+                if let Some(text_idx) = self.text_index.take() {
                     events.push(StreamEvent::ContentBlockStop { index: text_idx });
                     self.final_blocks.push(ContentBlock::Text {
                         text: std::mem::take(&mut self.text_buf),
                     });
-                    self.text_open = false;
                     self.next_index += 1;
                 }
 
@@ -150,13 +159,12 @@ impl Accumulator {
     fn flush(&mut self) -> Vec<StreamEvent> {
         let mut events = Vec::new();
 
-        // Close text block if open.
-        if self.text_open {
-            events.push(StreamEvent::ContentBlockStop { index: 0 });
+        // Close text block if open, using the index it actually opened on.
+        if let Some(text_idx) = self.text_index.take() {
+            events.push(StreamEvent::ContentBlockStop { index: text_idx });
             self.final_blocks.push(ContentBlock::Text {
                 text: std::mem::take(&mut self.text_buf),
             });
-            self.text_open = false;
         }
 
         let stop_reason = self.stop_reason.get_or_insert(spp::StopReason::EndTurn);
@@ -369,6 +377,98 @@ mod tests {
     fn empty_stream_returns_error() {
         let acc = Accumulator::default();
         assert!(acc.finish().is_err());
+    }
+
+    #[test]
+    fn accumulator_emits_text_after_tool_call_uses_correct_index() {
+        // Regression: Ollama can stream a tool_call chunk before any text
+        // chunk on tool-using turns that subsequently emit narration. The
+        // text block must open at the next available index (1, after the
+        // tool_use at 0) and every related event — Start, Delta(s), Stop —
+        // must reference that same index.
+        let mut acc = Accumulator::default();
+
+        // 1) tool_call first (no text on this chunk).
+        let _ = acc.consume_chunk(make_chunk(json!({
+            "model": "llama3.1",
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "tc-1",
+                    "function": { "name": "ls", "arguments": { "path": "/tmp" } }
+                }]
+            },
+            "done": false
+        })));
+
+        // 2) text chunk arrives on a later message.
+        let evs2 = acc.consume_chunk(make_chunk(json!({
+            "model": "llama3.1",
+            "message": { "role": "assistant", "content": "ok " },
+            "done": false
+        })));
+
+        // 3) more text on a follow-up chunk to exercise multiple deltas at
+        //    the same index.
+        let evs3 = acc.consume_chunk(make_chunk(json!({
+            "model": "llama3.1",
+            "message": { "role": "assistant", "content": "done" },
+            "done": false
+        })));
+
+        // 4) terminal chunk closes the stream.
+        let _ = acc.consume_chunk(make_chunk(json!({
+            "model": "llama3.1",
+            "message": { "role": "assistant", "content": "" },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 4,
+            "eval_count": 6
+        })));
+
+        let final_evs = acc.flush();
+
+        // Locate the ContentBlockStart for the text block — must be at
+        // index 1 (tool_use occupied 0).
+        let text_start_index = evs2
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ContentBlockStart {
+                    index,
+                    block: ContentBlock::Text { .. },
+                } => Some(*index),
+                _ => None,
+            })
+            .expect("text block start should appear on the text chunk");
+        assert_eq!(
+            text_start_index, 1,
+            "text block must open at index 1 after a tool_call at index 0"
+        );
+
+        // Every text delta in evs2/evs3 must carry the same index.
+        for ev in evs2.iter().chain(evs3.iter()) {
+            if let StreamEvent::ContentBlockDelta { index, .. } = ev {
+                assert_eq!(
+                    *index, text_start_index,
+                    "text delta must reference the text block index, not 0"
+                );
+            }
+        }
+
+        // The final ContentBlockStop produced by flush() must close the same
+        // index.
+        let stop_index = final_evs
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ContentBlockStop { index } => Some(*index),
+                _ => None,
+            })
+            .expect("flush should emit a ContentBlockStop for the open text block");
+        assert_eq!(
+            stop_index, text_start_index,
+            "ContentBlockStop on flush must close the text block, not index 0"
+        );
     }
 
     // Integration test: mock Ollama server via axum.
