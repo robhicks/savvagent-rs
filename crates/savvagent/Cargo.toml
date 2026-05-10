@@ -41,6 +41,7 @@ savvagent-protocol = { workspace = true }
 savvagent-mcp = { workspace = true }
 provider-anthropic = { workspace = true }
 provider-gemini = { workspace = true }
+provider-local = { workspace = true }
 provider-openai = { workspace = true }
 tool-fs = { workspace = true }
 tool-bash = { workspace = true }

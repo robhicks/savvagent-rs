@@ -169,8 +169,14 @@ async fn bootstrap_host(
     }
 
     for spec in PROVIDERS {
-        let Ok(Some(key)) = creds::load(spec.id) else {
-            continue;
+        let key = if spec.api_key_required {
+            let Ok(Some(k)) = creds::load(spec.id) else {
+                continue;
+            };
+            k
+        } else {
+            // Keyless provider — attempt auto-connect without a stored key.
+            String::new()
         };
         match build_in_process_host(spec, &key, project_root, tool_bins).await {
             Ok(host) => {
@@ -422,16 +428,20 @@ async fn handle_model_command(
         app.push_note(format!("Unknown active provider: {spec_id}"));
         return;
     };
-    let key = match creds::load(spec.id) {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            app.push_note("No saved key for the active provider — `/connect` first.");
-            return;
+    let key = if spec.api_key_required {
+        match creds::load(spec.id) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                app.push_note("No saved key for the active provider — `/connect` first.");
+                return;
+            }
+            Err(e) => {
+                app.push_note(format!("Keyring error: {e}"));
+                return;
+            }
         }
-        Err(e) => {
-            app.push_note(format!("Keyring error: {e}"));
-            return;
-        }
+    } else {
+        String::new()
     };
 
     perform_model_change(
@@ -492,7 +502,7 @@ async fn perform_model_change(
     app.push_note(format!("Model is now {}.", app.model));
 }
 
-/// Persist the key, build the in-process handler, swap the host.
+/// Persist the key (if required), build the in-process handler, swap the host.
 async fn perform_connect(
     spec: &'static ProviderSpec,
     api_key: String,
@@ -501,9 +511,11 @@ async fn perform_connect(
     tool_bins: &ToolBins,
     app: &mut App,
 ) {
-    if let Err(e) = creds::save(spec.id, &api_key) {
-        app.push_note(format!("Could not store key in OS keyring: {e}"));
-        return;
+    if spec.api_key_required {
+        if let Err(e) = creds::save(spec.id, &api_key) {
+            app.push_note(format!("Could not store key in OS keyring: {e}"));
+            return;
+        }
     }
 
     app.push_note(format!("Connecting to {}…", spec.display_name));
@@ -733,27 +745,42 @@ async fn run_app(
                 KeyCode::Enter => {
                     let idx = app.provider_index;
                     if let Some(spec) = PROVIDERS.get(idx) {
-                        match creds::load(spec.id) {
-                            Ok(Some(key)) => {
-                                app.input_mode = InputMode::Editing;
-                                app.push_note(format!(
-                                    "Using stored key for {}.",
-                                    spec.display_name
-                                ));
-                                perform_connect(
-                                    spec,
-                                    key,
-                                    &host_slot,
-                                    &project_root,
-                                    &tool_bins,
-                                    app,
-                                )
-                                .await;
-                            }
-                            Ok(None) => app.enter_api_key_for(idx),
-                            Err(e) => {
-                                app.push_note(format!("Keyring error: {e}"));
-                                app.enter_api_key_for(idx);
+                        if !spec.api_key_required {
+                            // Keyless provider — connect immediately without a
+                            // stored or prompted API key.
+                            app.input_mode = InputMode::Editing;
+                            perform_connect(
+                                spec,
+                                String::new(),
+                                &host_slot,
+                                &project_root,
+                                &tool_bins,
+                                app,
+                            )
+                            .await;
+                        } else {
+                            match creds::load(spec.id) {
+                                Ok(Some(key)) => {
+                                    app.input_mode = InputMode::Editing;
+                                    app.push_note(format!(
+                                        "Using stored key for {}.",
+                                        spec.display_name
+                                    ));
+                                    perform_connect(
+                                        spec,
+                                        key,
+                                        &host_slot,
+                                        &project_root,
+                                        &tool_bins,
+                                        app,
+                                    )
+                                    .await;
+                                }
+                                Ok(None) => app.enter_api_key_for(idx),
+                                Err(e) => {
+                                    app.push_note(format!("Keyring error: {e}"));
+                                    app.enter_api_key_for(idx);
+                                }
                             }
                         }
                     } else {

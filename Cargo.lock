@@ -2991,6 +2991,7 @@ dependencies = [
  "keyring",
  "provider-anthropic",
  "provider-gemini",
+ "provider-local",
  "provider-openai",
  "ratatui",
  "ratatui-code-editor",
