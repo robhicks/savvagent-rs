@@ -122,26 +122,19 @@ pub(crate) fn run(
             continue;
         }
 
-        let path_for_sink = path.to_path_buf();
-        let rel_for_sink = rel.clone();
-        let mut sink_err: Option<GrepToolError> = None;
         let res = searcher.search_path(
             &matcher,
-            &path_for_sink,
+            path,
             CollectSink {
-                rel: &rel_for_sink,
+                rel: &rel,
                 out: &mut matches,
                 limit,
                 matcher: &matcher,
-                err: &mut sink_err,
             },
         );
-        if let Some(e) = sink_err.take() {
-            return Err(e);
-        }
         if let Err(e) = res {
             // Skip files we can't read (binary, permission denied) — log only.
-            tracing::trace!(?path, "skipping unreadable file: {e}");
+            tracing::debug!(?path, "skipping unreadable file: {e}");
         }
         if matches.len() >= limit {
             truncated = true;
@@ -214,8 +207,6 @@ struct CollectSink<'a, M: grep_matcher::Matcher> {
     out: &'a mut Vec<SearchMatch>,
     limit: usize,
     matcher: &'a M,
-    #[allow(dead_code)]
-    err: &'a mut Option<GrepToolError>,
 }
 
 impl<'a, M: grep_matcher::Matcher> grep_searcher::Sink for CollectSink<'a, M> {
