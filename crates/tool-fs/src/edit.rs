@@ -101,8 +101,6 @@ pub enum MultiEdit {
 pub struct MultiEditOutput {
     /// Echo of the input path.
     pub path: String,
-    /// Number of edits applied (== `edits.len()` on success).
-    pub edits_applied: u32,
 }
 
 /// Apply `replace` semantics to `text`. Returns the new contents and the
