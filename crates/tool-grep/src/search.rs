@@ -371,4 +371,27 @@ mod tests {
         let files: Vec<_> = out.matches.iter().map(|m| m.file.as_str()).collect();
         assert_eq!(files, vec!["kept.rs"], "ignored/skip.rs should be filtered");
     }
+
+    #[test]
+    fn search_max_results_truncates() {
+        let dir = tempdir().unwrap();
+        let mut body = String::new();
+        for _ in 0..10 {
+            body.push_str("hit\n");
+        }
+        write(dir.path(), "a.txt", &body);
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: "hit".into(),
+                max_results: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.matches.len(), 3);
+        assert!(out.truncated);
+    }
 }
