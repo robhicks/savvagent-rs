@@ -469,7 +469,16 @@ async fn handle_model_command(
 /// `/resume` with no args opens the transcript picker. With a path arg,
 /// loads the transcript immediately. Requires an active host connection;
 /// if none exists, surfaces a clear error.
+///
+/// Refuses to run while a turn is in flight: `Host::run_turn_inner`
+/// snapshots `state.messages` at turn start and commits its local clone
+/// back at turn end, so a mid-turn `load_transcript` would be silently
+/// overwritten when the in-flight turn finishes.
 async fn handle_resume_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
+    if app.is_loading {
+        app.push_note("Cannot /resume during an in-flight turn — wait for it to finish.");
+        return;
+    }
     if rest.is_empty() {
         // Open the picker — actual load happens when the user presses Enter
         // in `SelectingTranscript` mode (handled in `run_app`).
@@ -966,7 +975,13 @@ async fn run_app(
                 KeyCode::Enter => {
                     if let Some(path) = app.selected_transcript_path().map(|p| p.to_path_buf()) {
                         app.close_transcript_picker();
-                        do_resume_from_path(app, &host_slot, &path).await;
+                        if app.is_loading {
+                            app.push_note(
+                                "Cannot /resume during an in-flight turn — wait for it to finish.",
+                            );
+                        } else {
+                            do_resume_from_path(app, &host_slot, &path).await;
+                        }
                     }
                 }
                 _ => {}

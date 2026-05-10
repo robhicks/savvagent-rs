@@ -545,6 +545,15 @@ impl Host {
     ///
     /// Returns the loaded [`TranscriptFile`] so callers can surface metadata
     /// (model, saved_at) in the UI.
+    ///
+    /// # Invariant: must not be called during an in-flight turn
+    ///
+    /// [`Self::run_turn_inner`] snapshots `state.messages` into a local `Vec`
+    /// at turn start and commits that local clone back to `state.messages`
+    /// when the turn completes. Calling `load_transcript` while a turn is
+    /// running therefore appears to succeed, but the in-flight turn will
+    /// silently overwrite the resumed history at the moment it finishes.
+    /// The TUI enforces this by gating `/resume` on its `is_loading` flag.
     pub async fn load_transcript(
         &self,
         path: &Path,
