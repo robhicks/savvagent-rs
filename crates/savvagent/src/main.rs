@@ -711,12 +711,10 @@ async fn run_app(
                             .await;
                     }
                 }
-                KeyCode::Backspace => {
-                    if !app.palette_pop_char() {
-                        // Empty filter — backspace past the implicit `/` closes
-                        // the palette and returns to a clean prompt.
-                        app.close_command_palette();
-                    }
+                KeyCode::Backspace if !app.palette_pop_char() => {
+                    // Empty filter — backspace past the implicit `/` closes
+                    // the palette and returns to a clean prompt.
+                    app.close_command_palette();
                 }
                 KeyCode::Char(c)
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
