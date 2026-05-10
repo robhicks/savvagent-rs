@@ -242,12 +242,36 @@ pub(crate) fn atomic_write(target: &Path, contents: &[u8]) -> Result<(), FsToolE
     })();
 
     if let Err(e) = res {
-        let _ = std::fs::remove_file(&tmp);
+        // Distinguish "tmp never got created" (ENOENT — benign) from real
+        // cleanup failures that would leave a stale tmp file in the user's
+        // project directory.
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(cleanup_err) if cleanup_err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(cleanup_err) => {
+                tracing::warn!(
+                    tmp = %tmp.display(),
+                    error = %cleanup_err,
+                    "failed to remove temp file after atomic_write error",
+                );
+            }
+        }
         return Err(FsToolError::Io {
             op: "atomic_write".into(),
             source: e,
         });
     }
+
+    // Durability: on POSIX, a rename is only crash-safe once the parent
+    // directory entry is also synced. Best-effort — some platforms / FSes
+    // (notably Windows) reject directory fsync; log and continue in that case.
+    if let Some(parent) = target.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+        && let Err(e) = dir.sync_all()
+    {
+        tracing::debug!(parent = %parent.display(), "parent-dir fsync skipped: {e}");
+    }
+
     Ok(())
 }
 
