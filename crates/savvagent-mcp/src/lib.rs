@@ -220,11 +220,11 @@ mod tests {
     #[tokio::test]
     async fn default_list_models_impl_signals_not_advertised() {
         let handler = EchoHandler;
-        let err = handler.list_models().await.expect_err("default impl errors");
-        assert!(matches!(
-            err.kind,
-            savvagent_protocol::ErrorKind::Internal
-        ));
+        let err = handler
+            .list_models()
+            .await
+            .expect_err("default impl errors");
+        assert!(matches!(err.kind, savvagent_protocol::ErrorKind::Internal));
         assert!(
             err.message.contains("list_models"),
             "message: {}",
@@ -256,7 +256,10 @@ mod tests {
             }
         }
         let client = InProcessProviderClient::new(std::sync::Arc::new(TaggedHandler));
-        let resp = client.list_models().await.expect("delegation should succeed");
+        let resp = client
+            .list_models()
+            .await
+            .expect("delegation should succeed");
         assert_eq!(resp.models.len(), 1);
         assert_eq!(resp.models[0].id, "delegated");
         assert!(resp.models[0].default);

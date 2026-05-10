@@ -403,12 +403,7 @@ mod list_models_tests {
     async fn list_models_propagates_http_failure() {
         let app = Router::new().route(
             "/api/tags",
-            get(|| async {
-                (
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "boom",
-                )
-            }),
+            get(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

@@ -1001,9 +1001,7 @@ mod policy_tests {
 #[cfg(test)]
 mod list_models_tests {
     use async_trait::async_trait;
-    use savvagent_mcp::{
-        InProcessProviderClient, ProviderClient, ProviderHandler, StreamEmitter,
-    };
+    use savvagent_mcp::{InProcessProviderClient, ProviderClient, ProviderHandler, StreamEmitter};
     use savvagent_protocol::{
         CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ModelInfo, ProviderError,
     };
@@ -1077,7 +1075,10 @@ mod list_models_tests {
             InProcessProviderClient::new(std::sync::Arc::new(CuratedHandler)),
         );
         let host = Host::with_components(config(), provider).await.unwrap();
-        let resp = host.list_models().await.expect("list_models should succeed");
+        let resp = host
+            .list_models()
+            .await
+            .expect("list_models should succeed");
         let ids: Vec<_> = resp.models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["alpha", "beta"]);
         assert!(resp.models[0].default);
@@ -1097,7 +1098,6 @@ mod list_models_tests {
         assert!(matches!(err.kind, ErrorKind::Internal));
         assert!(err.message.contains("list_models"), "msg: {}", err.message);
     }
-
 }
 
 #[cfg(test)]

@@ -420,12 +420,7 @@ mod list_models_tests {
     async fn list_models_propagates_http_failure() {
         let app = Router::new().route(
             "/v1/models",
-            get(|| async {
-                (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    "no auth",
-                )
-            }),
+            get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "no auth") }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
