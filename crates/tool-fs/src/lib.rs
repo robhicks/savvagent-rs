@@ -448,8 +448,8 @@ impl FsTools {
         let project_root = self.root.clone();
         let respect = input.respect_gitignore.unwrap_or(true);
 
-        let (matches, truncated) = tokio::task::spawn_blocking(
-            move || -> Result<(Vec<String>, bool), FsToolError> {
+        let (matches, truncated) =
+            tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), FsToolError> {
                 let mut builder = ignore::WalkBuilder::new(&resolved_root);
                 builder
                     .git_ignore(respect)
@@ -520,10 +520,9 @@ impl FsTools {
                     out.push(rel);
                 }
                 Ok((out, truncated))
-            },
-        )
-        .await
-        .map_err(|e| FsToolError::InvalidArgument(format!("glob task panicked: {e}")))??;
+            })
+            .await
+            .map_err(|e| FsToolError::InvalidArgument(format!("glob task panicked: {e}")))??;
 
         Ok(Json(GlobOutput {
             pattern: input.pattern,
