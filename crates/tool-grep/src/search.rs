@@ -327,4 +327,24 @@ mod tests {
         .unwrap();
         assert_eq!(out.matches.len(), 1);
     }
+
+    #[test]
+    fn search_glob_filter() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "a.rs", "fn main() {}\n");
+        write(dir.path(), "b.toml", "fn = 1\n");
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: "fn".into(),
+                glob: Some("**/*.toml".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.matches.len(), 1, "{out:?}");
+        assert_eq!(out.matches[0].file, "b.toml");
+    }
 }
