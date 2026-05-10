@@ -23,6 +23,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod edit;
+pub use edit::{
+    InsertInput, InsertOutput, MultiEdit, MultiEditInput, MultiEditOutput, ReplaceCount,
+    ReplaceInput, ReplaceOutput,
+};
+
 use std::path::{Path, PathBuf};
 
 use rmcp::{
