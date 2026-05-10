@@ -500,11 +500,7 @@ async fn handle_resume_command(app: &mut App, rest: &str, host_slot: &HostSlot) 
             } else {
                 // Try adding .json extension.
                 let with_ext = app.transcript_dir.join(format!("{rest}.json"));
-                if with_ext.exists() {
-                    with_ext
-                } else {
-                    p
-                }
+                if with_ext.exists() { with_ext } else { p }
             }
         }
     };
@@ -515,9 +511,7 @@ async fn handle_resume_command(app: &mut App, rest: &str, host_slot: &HostSlot) 
 /// the conversation log.
 async fn do_resume_from_path(app: &mut App, host_slot: &HostSlot, path: &Path) {
     let Some(host) = current_host(host_slot).await else {
-        app.push_note(
-            "Not connected — run /connect first, then /resume to load a transcript.",
-        );
+        app.push_note("Not connected — run /connect first, then /resume to load a transcript.");
         return;
     };
 

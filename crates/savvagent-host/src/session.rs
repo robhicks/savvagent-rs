@@ -554,10 +554,7 @@ impl Host {
     /// running therefore appears to succeed, but the in-flight turn will
     /// silently overwrite the resumed history at the moment it finishes.
     /// The TUI enforces this by gating `/resume` on its `is_loading` flag.
-    pub async fn load_transcript(
-        &self,
-        path: &Path,
-    ) -> Result<TranscriptFile, TranscriptError> {
+    pub async fn load_transcript(&self, path: &Path) -> Result<TranscriptFile, TranscriptError> {
         let bytes = tokio::fs::read(path).await?;
         let root: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| TranscriptError::Malformed(e.to_string()))?;
@@ -1005,9 +1002,7 @@ mod transcript_tests {
             Ok(CompleteResponse {
                 id: "noop".into(),
                 model: req.model,
-                content: vec![ContentBlock::Text {
-                    text: "ok".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "ok".into() }],
                 stop_reason: StopReason::EndTurn,
                 stop_sequence: None,
                 usage: Usage::default(),
@@ -1092,7 +1087,9 @@ mod transcript_tests {
     async fn malformed_json_returns_error() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bad.json");
-        tokio::fs::write(&path, b"{ not valid json !!!").await.unwrap();
+        tokio::fs::write(&path, b"{ not valid json !!!")
+            .await
+            .unwrap();
 
         let host = Host::with_components(
             tmp_config(dir.path()),

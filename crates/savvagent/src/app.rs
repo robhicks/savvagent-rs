@@ -161,7 +161,6 @@ pub struct App {
     pub pending_permission: Option<PendingPermission>,
 
     // --- /resume transcript picker ---
-
     /// Transcript files available for resumption, sorted newest-first.
     pub transcript_entries: Vec<TranscriptEntry>,
     /// Highlighted row in the transcript picker.
@@ -808,10 +807,7 @@ pub fn collect_transcript_entries(dir: &std::path::Path) -> Vec<TranscriptEntry>
                 else {
                     continue;
                 };
-                let sa = map
-                    .get("saved_at")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let sa = map.get("saved_at").and_then(|v| v.as_u64()).unwrap_or(0);
                 (sa, msgs)
             }
             serde_json::Value::Array(_) => {
@@ -845,10 +841,7 @@ pub fn collect_transcript_entries(dir: &std::path::Path) -> Vec<TranscriptEntry>
             format_unix_ts(saved_at)
         } else {
             // Legacy: stem is already the unix ts.
-            let stem = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?");
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
             stem.parse::<u64>()
                 .map(format_unix_ts)
                 .unwrap_or_else(|_| stem.to_owned())

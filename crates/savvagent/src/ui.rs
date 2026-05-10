@@ -334,9 +334,7 @@ fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Resume transcript ")
-            .title_bottom(
-                Line::from(" [↑/↓] move  [Enter] resume  [Esc] cancel ").right_aligned(),
-            ),
+            .title_bottom(Line::from(" [↑/↓] move  [Enter] resume  [Esc] cancel ").right_aligned()),
     );
     frame.render_widget(list, popup);
 }
@@ -352,10 +350,7 @@ fn render_transcript_item(entry: &TranscriptEntry, selected: bool) -> ListItem<'
     let meta_style = Style::default().fg(Color::DarkGray);
     let line = Line::from(vec![
         Span::styled(format!("{:<22}", entry.timestamp), style),
-        Span::styled(
-            format!(" {:>3} msgs  ", entry.message_count),
-            meta_style,
-        ),
+        Span::styled(format!(" {:>3} msgs  ", entry.message_count), meta_style),
         Span::styled(entry.preview.clone(), Style::default().fg(Color::White)),
     ]);
     ListItem::new(line)
