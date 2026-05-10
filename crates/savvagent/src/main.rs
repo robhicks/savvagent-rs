@@ -427,9 +427,24 @@ async fn show_tools(app: &mut App, host_slot: &HostSlot) {
     }
 }
 
-/// `/model` (no args) shows the current model. `/model <id>` reconnects
-/// the active provider with the new id (optimistic — provider rejects at
-/// first turn if invalid).
+/// Validate `requested` against the provider's advertised `models`. Returns
+/// `Ok(())` when the id is in the list, `Err(known_ids)` otherwise.
+fn validate_model_id<'a>(
+    requested: &str,
+    models: &'a [savvagent_host::ModelInfo],
+) -> Result<(), Vec<&'a str>> {
+    if models.iter().any(|m| m.id == requested) {
+        Ok(())
+    } else {
+        Err(models.iter().map(|m| m.id.as_str()).collect())
+    }
+}
+
+/// `/model` (no args) shows the current model. `/model <id>` validates the
+/// requested id against `host.list_models()` (when advertised) and then
+/// reconnects the active provider with the new id. Providers that don't
+/// advertise `list_models` fall through to the optimistic path — the
+/// provider rejects an invalid id at first turn instead.
 async fn handle_model_command(
     app: &mut App,
     rest: &str,
@@ -469,6 +484,26 @@ async fn handle_model_command(
     } else {
         String::new()
     };
+
+    // Validate the requested id against the provider's advertised list when
+    // available. Unknown id → reject with the known set. `list_models`
+    // unsupported (default trait impl) → fall through to the optimistic path.
+    if let Some(host) = current_host(host_slot).await {
+        match host.list_models().await {
+            Ok(resp) => {
+                if let Err(known) = validate_model_id(&new_model, &resp.models) {
+                    app.push_note(format!(
+                        "Unknown model `{new_model}`. Known: {}",
+                        known.join(", ")
+                    ));
+                    return;
+                }
+            }
+            Err(e) => {
+                tracing::debug!(?e, "list_models unsupported, proceeding optimistically");
+            }
+        }
+    }
 
     perform_model_change(
         spec,
@@ -1128,4 +1163,39 @@ async fn resolve_pending_permission(
         (PermissionDecision::Deny, true) => "always denied (this session)",
     };
     app.push_note(format!("{}: {label}", req.name));
+}
+
+#[cfg(test)]
+mod model_validation_tests {
+    use super::validate_model_id;
+    use savvagent_host::ModelInfo;
+
+    fn info(id: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            display_name: None,
+            context_window: None,
+            default: false,
+        }
+    }
+
+    #[test]
+    fn validate_model_id_known() {
+        let models = vec![info("a"), info("b")];
+        assert!(validate_model_id("a", &models).is_ok());
+    }
+
+    #[test]
+    fn validate_model_id_unknown_returns_known_set() {
+        let models = vec![info("a"), info("b")];
+        let err = validate_model_id("c", &models).unwrap_err();
+        assert_eq!(err, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn validate_model_id_empty_list_always_rejects() {
+        let models: Vec<ModelInfo> = vec![];
+        let err = validate_model_id("anything", &models).unwrap_err();
+        assert!(err.is_empty());
+    }
 }
