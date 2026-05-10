@@ -212,3 +212,47 @@ pub(crate) fn atomic_write(target: &Path, contents: &[u8]) -> Result<(), FsToolE
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+
+    #[test]
+    fn replace_unique_match() {
+        let (out, n) = apply_replace("foo bar baz", "bar", "BAR", None).unwrap();
+        assert_eq!(out, "foo BAR baz");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn replace_zero_matches_errors() {
+        let err = apply_replace("foo", "missing", "x", None).unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn replace_ambiguous_errors() {
+        let err = apply_replace("ab ab", "ab", "X", None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous"), "{msg}");
+        assert!(msg.contains('2'), "{msg}");
+    }
+
+    #[test]
+    fn replace_count_exactly_n() {
+        let (out, n) =
+            apply_replace("ab ab ab", "ab", "X", Some(ReplaceCount::Exactly(3))).unwrap();
+        assert_eq!(out, "X X X");
+        assert_eq!(n, 3);
+
+        let err = apply_replace("ab ab", "ab", "X", Some(ReplaceCount::Exactly(3))).unwrap_err();
+        assert!(err.to_string().contains("expected 3"), "{err}");
+    }
+
+    #[test]
+    fn replace_count_all_zero_ok() {
+        let (out, n) = apply_replace("foo", "missing", "x", Some(ReplaceCount::All)).unwrap();
+        assert_eq!(out, "foo");
+        assert_eq!(n, 0);
+    }
+}
