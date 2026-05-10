@@ -11,7 +11,9 @@
 #![warn(missing_docs)]
 
 use async_trait::async_trait;
-use savvagent_protocol::{CompleteRequest, CompleteResponse, ProviderError, StreamEvent};
+use savvagent_protocol::{
+    CompleteRequest, CompleteResponse, ListModelsResponse, ProviderError, StreamEvent,
+};
 use tokio::sync::mpsc;
 
 /// Re-export of the MCP progress-notification discriminator.
@@ -34,6 +36,21 @@ pub trait ProviderClient: Send + Sync {
         req: CompleteRequest,
         events: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompleteResponse, ProviderError>;
+
+    /// List the models the underlying provider advertises.
+    ///
+    /// The default impl returns a [`ProviderError`] with kind
+    /// [`ErrorKind::Internal`](savvagent_protocol::ErrorKind::Internal) so
+    /// hosts can detect "not advertised" and fall through to optimistic
+    /// model selection.
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        Err(ProviderError {
+            kind: savvagent_protocol::ErrorKind::Internal,
+            message: "provider does not advertise list_models".into(),
+            retry_after_ms: None,
+            provider_code: None,
+        })
+    }
 }
 
 /// Server-side view of a provider implementation.
@@ -52,6 +69,21 @@ pub trait ProviderHandler: Send + Sync {
         req: CompleteRequest,
         emit: Option<&dyn StreamEmitter>,
     ) -> Result<CompleteResponse, ProviderError>;
+
+    /// List the models this provider can serve.
+    ///
+    /// The default impl returns a [`ProviderError`] with kind
+    /// [`ErrorKind::Internal`](savvagent_protocol::ErrorKind::Internal) and a
+    /// message hosts treat as "list_models not advertised". Providers that
+    /// can enumerate models should override this method.
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        Err(ProviderError {
+            kind: savvagent_protocol::ErrorKind::Internal,
+            message: "list_models not implemented by this provider".into(),
+            retry_after_ms: None,
+            provider_code: None,
+        })
+    }
 }
 
 /// Sink the server-side handler uses to publish stream events. The concrete
@@ -124,6 +156,10 @@ impl ProviderClient for InProcessProviderClient {
             emitter.as_ref().map(|e| e as &dyn StreamEmitter);
         self.handler.complete(req, emit_ref).await
     }
+
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        self.handler.list_models().await
+    }
 }
 
 #[cfg(test)]
@@ -179,5 +215,50 @@ mod tests {
         assert_eq!(resp.stop_reason, StopReason::EndTurn);
         let evt = rx.recv().await.unwrap();
         assert!(matches!(evt, StreamEvent::MessageStop));
+    }
+
+    #[tokio::test]
+    async fn default_list_models_impl_signals_not_advertised() {
+        let handler = EchoHandler;
+        let err = handler.list_models().await.expect_err("default impl errors");
+        assert!(matches!(
+            err.kind,
+            savvagent_protocol::ErrorKind::Internal
+        ));
+        assert!(
+            err.message.contains("list_models"),
+            "message: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn in_process_client_delegates_list_models_to_handler() {
+        struct TaggedHandler;
+        #[async_trait]
+        impl ProviderHandler for TaggedHandler {
+            async fn complete(
+                &self,
+                _req: CompleteRequest,
+                _emit: Option<&dyn StreamEmitter>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                unreachable!("complete is not exercised here")
+            }
+            async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+                Ok(ListModelsResponse {
+                    models: vec![savvagent_protocol::ModelInfo {
+                        id: "delegated".into(),
+                        display_name: None,
+                        context_window: None,
+                        default: true,
+                    }],
+                })
+            }
+        }
+        let client = InProcessProviderClient::new(std::sync::Arc::new(TaggedHandler));
+        let resp = client.list_models().await.expect("delegation should succeed");
+        assert_eq!(resp.models.len(), 1);
+        assert_eq!(resp.models[0].id, "delegated");
+        assert!(resp.models[0].default);
     }
 }
