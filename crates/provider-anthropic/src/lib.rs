@@ -33,7 +33,8 @@ use rmcp::transport::streamable_http_server::{
 };
 use savvagent_mcp::{ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-    CompleteRequest, CompleteResponse, ErrorKind, ProviderError, StreamEvent,
+    CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ModelInfo, ProviderError,
+    StreamEvent,
 };
 
 /// Default Anthropic API base URL. Override via [`AnthropicProviderBuilder::base_url`]
@@ -122,6 +123,31 @@ pub enum BuildError {
 
 #[async_trait]
 impl ProviderHandler for AnthropicProvider {
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        Ok(ListModelsResponse {
+            models: vec![
+                ModelInfo {
+                    id: "claude-opus-4-5".into(),
+                    display_name: Some("Claude Opus 4.5".into()),
+                    context_window: Some(200_000),
+                    default: false,
+                },
+                ModelInfo {
+                    id: "claude-sonnet-4-5".into(),
+                    display_name: Some("Claude Sonnet 4.5".into()),
+                    context_window: Some(200_000),
+                    default: false,
+                },
+                ModelInfo {
+                    id: "claude-haiku-4-5".into(),
+                    display_name: Some("Claude Haiku 4.5".into()),
+                    context_window: Some(200_000),
+                    default: true,
+                },
+            ],
+        })
+    }
+
     async fn complete(
         &self,
         req: CompleteRequest,
@@ -322,3 +348,33 @@ pub fn provider_for_tests(base_url: impl Into<String>) -> AnthropicProvider {
 
 #[doc(hidden)]
 pub fn _events_phantom(_: StreamEvent) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn list_models_returns_curated_set() {
+        use savvagent_mcp::ProviderHandler as _;
+        let provider = AnthropicProvider::builder()
+            .api_key("test")
+            .build()
+            .unwrap();
+        let resp = provider.list_models().await.unwrap();
+        let ids: Vec<_> = resp.models.iter().map(|m| m.id.as_str()).collect();
+        // Default must match the `default_model` advertised by the provider
+        // catalog in `crates/savvagent/src/providers.rs`.
+        assert!(ids.contains(&"claude-haiku-4-5"), "{ids:?}");
+        assert!(
+            ids.iter().any(|id| id.starts_with("claude-opus-")),
+            "{ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.starts_with("claude-sonnet-")),
+            "{ids:?}"
+        );
+        let defaults: Vec<_> = resp.models.iter().filter(|m| m.default).collect();
+        assert_eq!(defaults.len(), 1, "exactly one model is the default");
+        assert_eq!(defaults[0].id, "claude-haiku-4-5");
+    }
+}
