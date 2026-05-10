@@ -32,6 +32,7 @@
 //! `/sandbox` command.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -251,14 +252,24 @@ fn apply_linux(
         }
     };
 
-    // Collect the original program + args before we mutate `cmd`.
+    // Collect the original program, args, envs, and cwd before we mutate `cmd`.
+    // The rewrite (`*cmd = Command::new(bwrap)`) replaces the entire Command,
+    // dropping any env/current_dir set by the caller. We must restore them
+    // after the rewrite so callers (e.g. `tools::ToolRegistry::connect` which
+    // sets `SAVVAGENT_TOOL_FS_ROOT`) keep their configuration.
     let orig_program = cmd.as_std().get_program().to_owned();
-    let orig_args: Vec<std::ffi::OsString> = cmd.as_std().get_args().map(|a| a.to_owned()).collect();
+    let orig_args: Vec<OsString> = cmd.as_std().get_args().map(|a| a.to_owned()).collect();
+    let saved_envs: Vec<(OsString, OsString)> = cmd
+        .as_std()
+        .get_envs()
+        .filter_map(|(k, v)| v.map(|val| (k.to_owned(), val.to_owned())))
+        .collect();
+    let saved_current_dir = cmd.as_std().get_current_dir().map(|p| p.to_owned());
 
     let allow_net = config.net_allowed_for(tool_bin);
     let extra_binds = config.extra_binds_for(tool_bin);
 
-    let mut wrapper_args: Vec<std::ffi::OsString> = Vec::new();
+    let mut wrapper_args: Vec<OsString> = Vec::new();
 
     // Read-only bind of the entire filesystem as the base.
     wrapper_args.push("--ro-bind".into());
@@ -297,9 +308,16 @@ fn apply_linux(
     wrapper_args.push(orig_program);
     wrapper_args.extend(orig_args);
 
-    // Rewrite `cmd` to invoke bwrap instead.
+    // Rewrite `cmd` to invoke bwrap instead. This replaces the whole Command,
+    // so the saved envs and cwd must be re-applied immediately afterwards.
     *cmd = tokio::process::Command::new(bwrap);
     cmd.args(wrapper_args);
+    for (k, v) in saved_envs {
+        cmd.env(k, v);
+    }
+    if let Some(cwd) = saved_current_dir {
+        cmd.current_dir(cwd);
+    }
 
     tracing::info!(
         "sandbox: wrapping `{}` with bwrap (net={})",
@@ -362,11 +380,21 @@ fn apply_macos(
     profile.push_str("(allow process-fork)\n");
     profile.push_str("(allow process-exec)\n");
 
-    // Collect original program + args.
+    // Collect original program, args, envs, and cwd before we mutate `cmd`.
+    // The rewrite (`*cmd = Command::new(sandbox_exec)`) replaces the entire
+    // Command, dropping any env/current_dir set by the caller. Restore them
+    // after the rewrite so callers (e.g. `tools::ToolRegistry::connect` which
+    // sets `SAVVAGENT_TOOL_FS_ROOT`) keep their configuration.
     let orig_program = cmd.as_std().get_program().to_owned();
-    let orig_args: Vec<std::ffi::OsString> = cmd.as_std().get_args().map(|a| a.to_owned()).collect();
+    let orig_args: Vec<OsString> = cmd.as_std().get_args().map(|a| a.to_owned()).collect();
+    let saved_envs: Vec<(OsString, OsString)> = cmd
+        .as_std()
+        .get_envs()
+        .filter_map(|(k, v)| v.map(|val| (k.to_owned(), val.to_owned())))
+        .collect();
+    let saved_current_dir = cmd.as_std().get_current_dir().map(|p| p.to_owned());
 
-    let mut wrapper_args: Vec<std::ffi::OsString> = Vec::new();
+    let mut wrapper_args: Vec<OsString> = Vec::new();
     wrapper_args.push("-p".into());
     wrapper_args.push(profile.into());
     wrapper_args.push(orig_program);
@@ -374,6 +402,12 @@ fn apply_macos(
 
     *cmd = tokio::process::Command::new(sandbox_exec);
     cmd.args(wrapper_args);
+    for (k, v) in saved_envs {
+        cmd.env(k, v);
+    }
+    if let Some(cwd) = saved_current_dir {
+        cmd.current_dir(cwd);
+    }
 
     tracing::info!(
         "sandbox: wrapping `{}` with sandbox-exec (net={})",
@@ -591,6 +625,43 @@ mod tests {
             assert!(
                 !args.contains(&"--unshare-net".to_string()),
                 "--unshare-net should be absent when allow_net=true: {args:?}"
+            );
+        }
+
+        /// Regression: caller-supplied env vars (e.g. `SAVVAGENT_TOOL_FS_ROOT`)
+        /// must survive the bwrap Command rewrite. Without `apply_linux`
+        /// preserving envs, sandboxed tools would silently lose their root
+        /// configuration and fall back to defaults.
+        #[test]
+        fn bwrap_preserves_caller_env_vars() {
+            if !has_bwrap() {
+                return;
+            }
+            let mut cmd = make_cmd("/usr/local/bin/savvagent-tool-fs");
+            cmd.env("SAVVAGENT_TOOL_FS_ROOT", "/foo");
+            cmd.env("SAVVAGENT_TOOL_BASH_ROOT", "/bar");
+            let cfg = config_on();
+            let wrapper = apply_sandbox(
+                &mut cmd,
+                Path::new("/usr/local/bin/savvagent-tool-fs"),
+                Path::new("/tmp/project"),
+                &cfg,
+            );
+            assert_eq!(wrapper, SandboxWrapper::Bwrap);
+            let envs: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = cmd
+                .as_std()
+                .get_envs()
+                .map(|(k, v)| (k.to_owned(), v.map(|val| val.to_owned())))
+                .collect();
+            assert!(
+                envs.iter().any(|(k, v)| k == std::ffi::OsStr::new("SAVVAGENT_TOOL_FS_ROOT")
+                    && v.as_deref() == Some(std::ffi::OsStr::new("/foo"))),
+                "SAVVAGENT_TOOL_FS_ROOT=/foo should survive bwrap rewrite, got envs={envs:?}"
+            );
+            assert!(
+                envs.iter().any(|(k, v)| k == std::ffi::OsStr::new("SAVVAGENT_TOOL_BASH_ROOT")
+                    && v.as_deref() == Some(std::ffi::OsStr::new("/bar"))),
+                "SAVVAGENT_TOOL_BASH_ROOT=/bar should survive bwrap rewrite, got envs={envs:?}"
             );
         }
 
