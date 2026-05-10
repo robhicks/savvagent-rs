@@ -1092,6 +1092,29 @@ mod tests {
         assert_eq!(files, vec!["kept.rs"], "{:?}", out.0);
     }
 
+    #[tokio::test]
+    async fn glob_includes_gitignored_when_disabled() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(dir.path().join("kept.rs"), b"").unwrap();
+        std::fs::create_dir(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/skip.rs"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "**/*.rs".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: Some(false),
+            }))
+            .await
+            .unwrap();
+        let mut files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
+        files.sort();
+        assert_eq!(files, vec!["kept.rs", "target/skip.rs"], "{:?}", out.0);
+    }
+
     // ---- Layer 1 path containment (FsTools::with_root) -------------------
 
     #[tokio::test]
