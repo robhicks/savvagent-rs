@@ -9,7 +9,7 @@ use ratatui::{
 };
 use savvagent_host::ToolCallStatus;
 
-use crate::app::{App, Entry, InputMode};
+use crate::app::{App, Entry, InputMode, TranscriptEntry};
 use crate::providers::PROVIDERS;
 use crate::splash;
 
@@ -32,11 +32,17 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         ])
         .split(area);
 
+    let resumed_label = app
+        .resumed_at
+        .as_deref()
+        .map(|ts| format!(" · resumed: {ts}"))
+        .unwrap_or_default();
     let header_text = if app.connected {
         format!(
-            "Savvagent — {} · {}",
+            "Savvagent — {} · {}{}",
             app.active_provider_id.unwrap_or("?"),
-            app.model
+            app.model,
+            resumed_label,
         )
     } else {
         "Savvagent — disconnected · type /connect".to_string()
@@ -296,6 +302,63 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         ta.set_block(Block::default());
         frame.render_widget(&ta, inner);
     }
+
+    if matches!(app.input_mode, InputMode::SelectingTranscript) {
+        render_transcript_picker(app, frame, area);
+    }
+}
+
+fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect) {
+    let popup = centered_rect(70, 50, area);
+    frame.render_widget(Clear, popup);
+
+    if app.transcript_entries.is_empty() {
+        let body = Paragraph::new("No transcripts found in ~/.savvagent/transcripts/").block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Resume transcript ")
+                .title_bottom(Line::from(" [Esc] cancel ").right_aligned()),
+        );
+        frame.render_widget(body, popup);
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .transcript_entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| render_transcript_item(entry, i == app.transcript_index))
+        .collect();
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Resume transcript ")
+            .title_bottom(
+                Line::from(" [↑/↓] move  [Enter] resume  [Esc] cancel ").right_aligned(),
+            ),
+    );
+    frame.render_widget(list, popup);
+}
+
+fn render_transcript_item(entry: &TranscriptEntry, selected: bool) -> ListItem<'static> {
+    let style = if selected {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let meta_style = Style::default().fg(Color::DarkGray);
+    let line = Line::from(vec![
+        Span::styled(format!("{:<22}", entry.timestamp), style),
+        Span::styled(
+            format!(" {:>3} msgs  ", entry.message_count),
+            meta_style,
+        ),
+        Span::styled(entry.preview.clone(), Style::default().fg(Color::White)),
+    ]);
+    ListItem::new(line)
 }
 
 fn render_log(app: &App, frame: &mut Frame, area: Rect) {
