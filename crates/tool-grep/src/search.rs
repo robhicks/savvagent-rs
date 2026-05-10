@@ -454,4 +454,39 @@ mod tests {
             "sensitive paths must not leak: {out:?}"
         );
     }
+
+    #[test]
+    fn search_multiline() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "a.rs", "fn foo()\n{\n  body\n}\n");
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        // Single-line search does NOT match the pattern crossing a newline.
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: r"fn foo\(\)\n\{".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            out.matches.is_empty(),
+            "single-line should not match across \\n: {out:?}"
+        );
+
+        // Multiline search matches. `(?s)` enables DOTALL; grep-regex turns on
+        // multi-line bytes mode for the searcher but does not flip DOTALL by
+        // default, so the pattern still needs the inline flag to span lines.
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: r"(?s)fn foo\(\)\n\{".into(),
+                multiline: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!out.matches.is_empty(), "multiline should match: {out:?}");
+    }
 }
