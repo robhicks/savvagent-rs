@@ -388,6 +388,10 @@ fn apply_macos(
 // ---------------------------------------------------------------------------
 
 /// Find `name` on `$PATH`. Returns `None` if not found.
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(dead_code)
+)]
 fn which_binary(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
@@ -399,6 +403,7 @@ fn which_binary(name: &str) -> Option<PathBuf> {
 
 /// Try `canonicalize`; fall back to the original path if that fails (e.g.
 /// the path doesn't exist yet at sandbox-apply time).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn canonical_or_original(p: &Path) -> Option<PathBuf> {
     if p.as_os_str().is_empty() {
         return None;
