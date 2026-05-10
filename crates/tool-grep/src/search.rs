@@ -81,6 +81,10 @@ pub(crate) fn run(
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
+        // Apply .gitignore rules even when the search root is not inside a
+        // git repo. Agents often search subdirectories whose top-level
+        // .gitignore should still be honored.
+        .require_git(false)
         .hidden(true)
         .follow_links(false);
     if let Some(glob) = &input.glob {
@@ -346,5 +350,25 @@ mod tests {
         .unwrap();
         assert_eq!(out.matches.len(), 1, "{out:?}");
         assert_eq!(out.matches[0].file, "b.toml");
+    }
+
+    #[test]
+    fn search_respects_gitignore() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), ".gitignore", "ignored/\n");
+        write(dir.path(), "kept.rs", "fn keep() {}\n");
+        write(dir.path(), "ignored/skip.rs", "fn skip() {}\n");
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: "fn ".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let files: Vec<_> = out.matches.iter().map(|m| m.file.as_str()).collect();
+        assert_eq!(files, vec!["kept.rs"], "ignored/skip.rs should be filtered");
     }
 }
