@@ -125,6 +125,7 @@ pub(crate) fn run(
                 rel: &rel_for_sink,
                 out: &mut matches,
                 limit,
+                matcher: &matcher,
                 err: &mut sink_err,
             },
         );
@@ -194,15 +195,16 @@ fn is_sensitive_path(path: &Path) -> bool {
     false
 }
 
-struct CollectSink<'a> {
+struct CollectSink<'a, M: grep_matcher::Matcher> {
     rel: &'a Path,
     out: &'a mut Vec<SearchMatch>,
     limit: usize,
+    matcher: &'a M,
     #[allow(dead_code)]
     err: &'a mut Option<GrepToolError>,
 }
 
-impl<'a> grep_searcher::Sink for CollectSink<'a> {
+impl<'a, M: grep_matcher::Matcher> grep_searcher::Sink for CollectSink<'a, M> {
     type Error = std::io::Error;
 
     fn matched(
@@ -218,15 +220,18 @@ impl<'a> grep_searcher::Sink for CollectSink<'a> {
             Ok(s) => s.trim_end_matches(['\r', '\n']).to_string(),
             Err(_) => return Ok(true), // skip binary lines silently
         };
-        // grep_searcher delivers the *match* range relative to the SinkMatch's bytes;
-        // we want a line:column anchored at the match start. The `mat.line_number()`
-        // tracks the 1-indexed start line of the SinkMatch.
         let line_no = mat.line_number().unwrap_or(0) as u32;
-        // Column: byte offset of first match in this line. For non-multiline searches
-        // the SinkMatch is exactly one line and the match starts at byte 0 of `bytes`
-        // unless the matcher reports otherwise. We approximate via the match locations
-        // accessor; simplest correct version: leave column=1 for now and refine.
-        let column = 1u32;
+
+        // Find the column of the first regex match within this SinkMatch by
+        // re-running the matcher against the line bytes. This is cheap — the
+        // line is already in cache. grep_searcher doesn't expose the match
+        // start offset on the SinkMatch itself.
+        let column = grep_matcher::Matcher::find(self.matcher, bytes)
+            .ok()
+            .flatten()
+            .map(|m| (m.start() as u32) + 1)
+            .unwrap_or(1);
+
         self.out.push(SearchMatch {
             file: self.rel.to_string_lossy().into_owned(),
             line: line_no,
@@ -274,5 +279,24 @@ mod tests {
         assert_eq!(out.matches[0].column, 1);
         assert_eq!(out.matches[0].text, "fn alpha() {}");
         assert!(!out.truncated);
+    }
+
+    #[test]
+    fn search_reports_correct_column() {
+        let dir = tempdir().unwrap();
+        write(dir.path(), "x.rs", "    let foo = bar();\n");
+        let canon = std::fs::canonicalize(dir.path()).unwrap();
+
+        let out = run(
+            Some(&canon),
+            SearchInput {
+                pattern: "foo".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out.matches.len(), 1);
+        assert_eq!(out.matches[0].column, 9, "byte column of `foo`: {out:?}");
     }
 }

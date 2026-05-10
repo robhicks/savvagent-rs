@@ -3923,6 +3923,7 @@ name = "tool-grep"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "ignore",

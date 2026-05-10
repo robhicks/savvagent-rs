@@ -21,6 +21,7 @@ thiserror.workspace = true
 tokio = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+grep-matcher = { workspace = true }
 grep-regex = { workspace = true }
 grep-searcher = { workspace = true }
 ignore = { workspace = true }
