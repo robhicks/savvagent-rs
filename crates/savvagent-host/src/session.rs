@@ -18,6 +18,7 @@ use crate::config::{HostConfig, ProviderEndpoint};
 use crate::permissions::{PermissionDecision, PermissionPolicy, Verdict};
 use crate::project;
 use crate::provider::RmcpProviderClient;
+use crate::sandbox::SandboxConfig;
 use crate::tools::ToolRegistry;
 
 /// Current transcript file schema version.
@@ -192,6 +193,9 @@ pub struct Host {
     /// `~/.savvagent/permissions.toml` + built-in defaults. See the
     /// `permissions` module docs.
     policy: PermissionPolicy,
+    /// Active Layer-3 sandbox configuration. Resolved from
+    /// `HostConfig::sandbox` at startup (or loaded from disk when unset).
+    sandbox: SandboxConfig,
     /// Outstanding permission requests. Inserted when the loop emits
     /// `PermissionRequested`; the matching `oneshot` is consumed by
     /// [`Host::resolve_permission`].
@@ -213,7 +217,12 @@ impl Host {
                 Box::new(RmcpProviderClient::connect(url).await?)
             }
         };
-        let tools = ToolRegistry::connect(&config.tools, &config.project_root).await?;
+        let sandbox = config
+            .sandbox
+            .clone()
+            .unwrap_or_else(SandboxConfig::load);
+        let tools =
+            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         let policy = config
@@ -229,6 +238,7 @@ impl Host {
             }),
             system_prompt,
             policy,
+            sandbox,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
         })
@@ -242,7 +252,12 @@ impl Host {
         config: HostConfig,
         provider: Box<dyn ProviderClient + Send + Sync>,
     ) -> Result<Self, HostError> {
-        let tools = ToolRegistry::connect(&config.tools, &config.project_root).await?;
+        let sandbox = config
+            .sandbox
+            .clone()
+            .unwrap_or_else(SandboxConfig::load);
+        let tools =
+            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         let policy = config
@@ -258,6 +273,7 @@ impl Host {
             }),
             system_prompt,
             policy,
+            sandbox,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
         })
@@ -605,6 +621,11 @@ impl Host {
     /// Borrow the active config.
     pub fn config(&self) -> &HostConfig {
         &self.config
+    }
+
+    /// Borrow the active sandbox configuration.
+    pub fn sandbox_config(&self) -> &SandboxConfig {
+        &self.sandbox
     }
 
     /// Resolve a previously-emitted [`TurnEvent::PermissionRequested`].
