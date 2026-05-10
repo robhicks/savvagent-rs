@@ -111,13 +111,16 @@ pub(crate) fn run(
             continue;
         }
         let path = entry.path();
-        if is_sensitive_path(path) {
-            continue;
-        }
         let rel = match path.strip_prefix(&resolved_root) {
             Ok(r) => r.to_path_buf(),
             Err(_) => path.to_path_buf(),
         };
+        // Evaluate the deny list against the *relative* path so a workspace
+        // whose absolute path contains "credential" or sits under ~/.ssh/
+        // doesn't have every file filtered.
+        if is_sensitive_path(&rel) {
+            continue;
+        }
 
         let path_for_sink = path.to_path_buf();
         let rel_for_sink = rel.clone();
@@ -192,22 +195,18 @@ fn resolve_search_root(
     Ok(canon)
 }
 
+/// Filter for paths whose contents we refuse to surface, evaluated against
+/// the path *relative to the project root*. Defense in depth on top of
+/// `WalkBuilder::hidden(true)`: the `.env`/`.ssh` arms are effectively
+/// dead while hidden-file skipping is on, but stay correct if that ever
+/// flips. `credential` is checked as a case-insensitive substring of any
+/// component, not the whole path, so a workspace named e.g.
+/// `credentials-checker/` doesn't filter all of its own files.
 fn is_sensitive_path(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    let lower = s.to_lowercase();
-    if lower.contains("credential") {
-        return true;
-    }
-    for comp in path.components() {
-        let c = comp.as_os_str().to_string_lossy().to_lowercase();
-        if c == ".env" || c.starts_with(".env.") {
-            return true;
-        }
-        if c == ".ssh" {
-            return true;
-        }
-    }
-    false
+    path.components().any(|c| {
+        let c = c.as_os_str().to_string_lossy().to_lowercase();
+        c.contains("credential") || c == ".env" || c.starts_with(".env.") || c == ".ssh"
+    })
 }
 
 struct CollectSink<'a, M: grep_matcher::Matcher> {
