@@ -1150,6 +1150,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn glob_brace_pattern() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), b"").unwrap();
+        std::fs::write(dir.path().join("b.toml"), b"").unwrap();
+        std::fs::write(dir.path().join("c.txt"), b"").unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .glob(Parameters(GlobInput {
+                pattern: "*.{rs,toml}".into(),
+                root: Some(".".into()),
+                max_matches: None,
+                respect_gitignore: None,
+            }))
+            .await
+            .unwrap();
+        let mut files: Vec<_> = out.0.matches.iter().map(|s| s.as_str()).collect();
+        files.sort();
+        assert_eq!(files, vec!["a.rs", "b.toml"], "{:?}", out.0);
+    }
+
     // ---- Layer 1 path containment (FsTools::with_root) -------------------
 
     #[tokio::test]
