@@ -290,6 +290,17 @@ impl Host {
         self.run_turn_inner(user_input.into(), Some(events)).await
     }
 
+    /// Ask the active provider for its model list.
+    ///
+    /// Returns the provider's default error when `list_models` is not
+    /// advertised; callers should treat that case as "fall through to
+    /// optimistic `/model` selection".
+    pub async fn list_models(
+        &self,
+    ) -> Result<savvagent_protocol::ListModelsResponse, savvagent_protocol::ProviderError> {
+        self.provider.list_models().await
+    }
+
     async fn run_turn_inner(
         &self,
         user_input: String,
@@ -985,6 +996,108 @@ mod policy_tests {
             outcome.tool_calls[0].result
         );
     }
+}
+
+#[cfg(test)]
+mod list_models_tests {
+    use async_trait::async_trait;
+    use savvagent_mcp::{
+        InProcessProviderClient, ProviderClient, ProviderHandler, StreamEmitter,
+    };
+    use savvagent_protocol::{
+        CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ModelInfo, ProviderError,
+    };
+
+    use super::*;
+    use crate::config::{HostConfig, ProviderEndpoint};
+
+    /// Handler that advertises a tiny curated list. Used to exercise the
+    /// `Host::list_models` facade end-to-end via the in-process bridge.
+    struct CuratedHandler;
+
+    #[async_trait]
+    impl ProviderHandler for CuratedHandler {
+        async fn complete(
+            &self,
+            _req: CompleteRequest,
+            _emit: Option<&dyn StreamEmitter>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            unreachable!("complete is not exercised in list_models tests")
+        }
+        async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+            Ok(ListModelsResponse {
+                models: vec![
+                    ModelInfo {
+                        id: "alpha".into(),
+                        display_name: Some("Alpha".into()),
+                        context_window: Some(8192),
+                        default: true,
+                    },
+                    ModelInfo {
+                        id: "beta".into(),
+                        display_name: None,
+                        context_window: None,
+                        default: false,
+                    },
+                ],
+            })
+        }
+    }
+
+    /// Handler that inherits the default `list_models` trait impl, signaling
+    /// "not advertised" to host callers.
+    struct SilentHandler;
+
+    #[async_trait]
+    impl ProviderHandler for SilentHandler {
+        async fn complete(
+            &self,
+            _req: CompleteRequest,
+            _emit: Option<&dyn StreamEmitter>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            unreachable!("complete is not exercised in list_models tests")
+        }
+    }
+
+    fn config() -> HostConfig {
+        let project_root = std::env::temp_dir().join("savvagent-list-models-test");
+        HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "alpha".to_string(),
+        )
+        .with_project_root(project_root.clone())
+        .with_policy(PermissionPolicy::transient(project_root))
+    }
+
+    #[tokio::test]
+    async fn host_list_models_returns_provider_list() {
+        let provider: Box<dyn ProviderClient + Send + Sync> = Box::new(
+            InProcessProviderClient::new(std::sync::Arc::new(CuratedHandler)),
+        );
+        let host = Host::with_components(config(), provider).await.unwrap();
+        let resp = host.list_models().await.expect("list_models should succeed");
+        let ids: Vec<_> = resp.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha", "beta"]);
+        assert!(resp.models[0].default);
+        assert!(!resp.models[1].default);
+    }
+
+    #[tokio::test]
+    async fn host_list_models_surfaces_not_advertised_error() {
+        let provider: Box<dyn ProviderClient + Send + Sync> = Box::new(
+            InProcessProviderClient::new(std::sync::Arc::new(SilentHandler)),
+        );
+        let host = Host::with_components(config(), provider).await.unwrap();
+        let err = host
+            .list_models()
+            .await
+            .expect_err("default impl must error");
+        assert!(matches!(err.kind, ErrorKind::Internal));
+        assert!(err.message.contains("list_models"), "msg: {}", err.message);
+    }
+
 }
 
 #[cfg(test)]

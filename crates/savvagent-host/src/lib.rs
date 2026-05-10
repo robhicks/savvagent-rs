@@ -32,7 +32,7 @@ pub use permissions::{
     Rule, SerializableRule, Verdict,
 };
 pub use sandbox::{SandboxConfig, SandboxWrapper, ToolSandboxOverride};
-pub use savvagent_protocol::ToolDef;
+pub use savvagent_protocol::{ListModelsResponse, ModelInfo, ToolDef};
 pub use session::{
     Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError,
     TranscriptFile, TurnEvent, TurnOutcome,
