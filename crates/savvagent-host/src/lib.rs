@@ -31,7 +31,10 @@ pub use permissions::{
     Rule, SerializableRule, Verdict,
 };
 pub use savvagent_protocol::ToolDef;
-pub use session::{Host, HostError, ToolCall, ToolCallStatus, TurnEvent, TurnOutcome};
+pub use session::{
+    Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError,
+    TranscriptFile, TurnEvent, TurnOutcome,
+};
 
 #[doc(hidden)]
 pub use provider::RmcpProviderClient;
