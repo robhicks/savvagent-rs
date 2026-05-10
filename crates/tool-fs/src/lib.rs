@@ -225,6 +225,13 @@ fn io_err(op: &str, source: std::io::Error) -> FsToolError {
     }
 }
 
+/// Map a blocking-task `JoinError` to `ErrorData::internal_error`. Used by
+/// the edit handlers that delegate their actual filesystem write to
+/// [`tokio::task::spawn_blocking`].
+fn join_err(e: tokio::task::JoinError) -> ErrorData {
+    ErrorData::internal_error(format!("write task failed: {e}"), None)
+}
+
 // ---------------------------------------------------------------------------
 // Server
 // ---------------------------------------------------------------------------
@@ -466,7 +473,123 @@ impl FsTools {
         }))
     }
 
+    /// Replace `old` with `new` in a file. Default contract: `old` must be
+    /// unique. Pass `count: { exactly: N }` or `count: "all"` to relax.
+    #[tool(
+        name = "replace",
+        description = "Replace `old` with `new` in a file. By default `old` must be unique; pass count to relax."
+    )]
+    pub async fn replace(
+        &self,
+        Parameters(input): Parameters<edit::ReplaceInput>,
+    ) -> Result<Json<edit::ReplaceOutput>, ErrorData> {
+        if input.path.is_empty() {
+            return Err(FsToolError::InvalidArgument("path is empty".into()).into());
+        }
+        let path = self.resolve_for_write(&input.path)?;
+        self.check_deny_floor(&input.path, &path)?;
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| io_err("read", e))?;
+        let text = String::from_utf8(bytes).map_err(|e| FsToolError::NotUtf8(e.to_string()))?;
+        let (new_text, n) = edit::apply_replace(&text, &input.old, &input.new, input.count)?;
+        let path_for_write = path.clone();
+        tokio::task::spawn_blocking(move || edit::atomic_write(&path_for_write, new_text.as_bytes()))
+            .await
+            .map_err(join_err)??;
+        Ok(Json(edit::ReplaceOutput {
+            path: input.path,
+            replacements: n,
+        }))
+    }
+
+    /// Insert a block of text after a 1-indexed line. `after_line=0` prepends.
+    #[tool(
+        name = "insert",
+        description = "Insert text after the Nth line of a file (1-indexed; 0 prepends)."
+    )]
+    pub async fn insert(
+        &self,
+        Parameters(input): Parameters<edit::InsertInput>,
+    ) -> Result<Json<edit::InsertOutput>, ErrorData> {
+        if input.path.is_empty() {
+            return Err(FsToolError::InvalidArgument("path is empty".into()).into());
+        }
+        let path = self.resolve_for_write(&input.path)?;
+        self.check_deny_floor(&input.path, &path)?;
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| io_err("read", e))?;
+        let text = String::from_utf8(bytes).map_err(|e| FsToolError::NotUtf8(e.to_string()))?;
+        let (new_text, n) = edit::apply_insert(&text, input.after_line, &input.text)?;
+        let path_for_write = path.clone();
+        tokio::task::spawn_blocking(move || edit::atomic_write(&path_for_write, new_text.as_bytes()))
+            .await
+            .map_err(join_err)??;
+        Ok(Json(edit::InsertOutput {
+            path: input.path,
+            lines_inserted: n,
+        }))
+    }
+
+    /// Apply a sequence of edits atomically. Either every edit lands or none do.
+    #[tool(
+        name = "multi_edit",
+        description = "Apply a batch of replace/insert edits atomically. On any failure, the original file is unchanged."
+    )]
+    pub async fn multi_edit(
+        &self,
+        Parameters(input): Parameters<edit::MultiEditInput>,
+    ) -> Result<Json<edit::MultiEditOutput>, ErrorData> {
+        if input.path.is_empty() {
+            return Err(FsToolError::InvalidArgument("path is empty".into()).into());
+        }
+        let path = self.resolve_for_write(&input.path)?;
+        self.check_deny_floor(&input.path, &path)?;
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| io_err("read", e))?;
+        let text = String::from_utf8(bytes).map_err(|e| FsToolError::NotUtf8(e.to_string()))?;
+        let mut current = text;
+        for entry in &input.edits {
+            current = match entry {
+                edit::MultiEdit::Replace { old, new, count } => {
+                    edit::apply_replace(&current, old, new, *count)?.0
+                }
+                edit::MultiEdit::Insert { after_line, text } => {
+                    edit::apply_insert(&current, *after_line, text)?.0
+                }
+            };
+        }
+        let path_for_write = path.clone();
+        tokio::task::spawn_blocking(move || edit::atomic_write(&path_for_write, current.as_bytes()))
+            .await
+            .map_err(join_err)??;
+        Ok(Json(edit::MultiEditOutput {
+            path: input.path,
+            edits_applied: input.edits.len() as u32,
+        }))
+    }
+
     // -- path resolution helpers --------------------------------------------
+
+    /// Evaluate the sensitive-path deny floor against the path *relative to
+    /// the project root*. With containment off, the raw input is used — that
+    /// preserves the no-sandbox semantics of [`FsTools::new`] while still
+    /// catching obvious shapes like `.env` or `secrets/credentials.json`.
+    fn check_deny_floor(&self, raw: &str, resolved: &Path) -> Result<(), FsToolError> {
+        let relative = match self.root.as_deref() {
+            Some(root) => resolved.strip_prefix(root).unwrap_or(resolved),
+            None => Path::new(raw),
+        };
+        if edit::is_denied(relative) {
+            return Err(FsToolError::OutsideRoot {
+                path: raw.to_string(),
+            });
+        }
+        Ok(())
+    }
+
 
     /// Resolve an input path that **must already exist** (read/list).
     ///

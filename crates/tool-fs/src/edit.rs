@@ -169,6 +169,18 @@ pub(crate) fn apply_insert(
     Ok((out, lines_inserted))
 }
 
+/// Returns true when `relative_path` matches the .env / .ssh / **credential
+/// deny floor. Always evaluated against the path *relative to the project
+/// root* — never the absolute path — so a workspace whose absolute path
+/// happens to contain `credential` or sits under `~/.ssh/` doesn't have every
+/// file mass-rejected.
+pub(crate) fn is_denied(relative_path: &Path) -> bool {
+    relative_path.components().any(|c| {
+        let c = c.as_os_str().to_string_lossy().to_lowercase();
+        c.contains("credential") || c == ".env" || c.starts_with(".env.") || c == ".ssh"
+    })
+}
+
 /// Atomic write: tmp-file in same dir → fsync → rename.
 ///
 /// Blocking call; wrap in [`tokio::task::spawn_blocking`] when invoked from
