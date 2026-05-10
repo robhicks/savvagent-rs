@@ -44,6 +44,13 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_model: "gemini-1.5-flash",
         build: build_gemini,
     },
+    ProviderSpec {
+        id: "openai",
+        display_name: "OpenAI",
+        api_key_env: "OPENAI_API_KEY",
+        default_model: "gpt-4o-mini",
+        build: build_openai,
+    },
 ];
 
 fn build_anthropic(api_key: &str) -> Result<Arc<dyn ProviderHandler>> {
@@ -55,6 +62,13 @@ fn build_anthropic(api_key: &str) -> Result<Arc<dyn ProviderHandler>> {
 
 fn build_gemini(api_key: &str) -> Result<Arc<dyn ProviderHandler>> {
     let p = provider_gemini::GeminiProvider::builder()
+        .api_key(api_key)
+        .build()?;
+    Ok(Arc::new(p))
+}
+
+fn build_openai(api_key: &str) -> Result<Arc<dyn ProviderHandler>> {
+    let p = provider_openai::OpenAiProvider::builder()
         .api_key(api_key)
         .build()?;
     Ok(Arc::new(p))

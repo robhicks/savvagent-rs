@@ -2330,6 +2330,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "provider-openai"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "dotenvy",
+ "futures",
+ "reqwest",
+ "rmcp",
+ "savvagent-mcp",
+ "savvagent-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2950,6 +2972,7 @@ dependencies = [
  "keyring",
  "provider-anthropic",
  "provider-gemini",
+ "provider-openai",
  "ratatui",
  "ratatui-code-editor",
  "ratatui-explorer",

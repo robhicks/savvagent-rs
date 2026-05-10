@@ -62,7 +62,10 @@ struct ToolBins {
 impl ToolBins {
     /// Append every populated entry as a stdio [`ToolEndpoint`] on `config`.
     fn apply(&self, mut config: HostConfig) -> HostConfig {
-        for path in [self.fs.as_deref(), self.bash.as_deref()].into_iter().flatten() {
+        for path in [self.fs.as_deref(), self.bash.as_deref()]
+            .into_iter()
+            .flatten()
+        {
             config = config.with_tool(ToolEndpoint::Stdio {
                 command: path.to_path_buf(),
                 args: vec![],
@@ -431,7 +434,16 @@ async fn handle_model_command(
         }
     };
 
-    perform_model_change(spec, &key, new_model, host_slot, project_root, tool_bins, app).await;
+    perform_model_change(
+        spec,
+        &key,
+        new_model,
+        host_slot,
+        project_root,
+        tool_bins,
+        app,
+    )
+    .await;
 }
 
 /// Rebuild the host with `new_model` against the same provider + key, swap
@@ -674,11 +686,7 @@ async fn run_app(
                         }
                         KeyCode::Char('/')
                             if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                && app
-                                    .input_textarea
-                                    .lines()
-                                    .iter()
-                                    .all(|l| l.is_empty()) =>
+                                && app.input_textarea.lines().iter().all(|l| l.is_empty()) =>
                         {
                             app.open_command_palette();
                         }
@@ -699,22 +707,14 @@ async fn run_app(
                 }
                 KeyCode::Enter => {
                     if let Some(CommandSelection::Execute(cmd)) = app.select_command() {
-                        dispatch_slash_command(
-                            app,
-                            &cmd,
-                            &host_slot,
-                            &project_root,
-                            &tool_bins,
-                        )
-                        .await;
+                        dispatch_slash_command(app, &cmd, &host_slot, &project_root, &tool_bins)
+                            .await;
                     }
                 }
-                KeyCode::Backspace => {
-                    if !app.palette_pop_char() {
-                        // Empty filter — backspace past the implicit `/` closes
-                        // the palette and returns to a clean prompt.
-                        app.close_command_palette();
-                    }
+                KeyCode::Backspace if !app.palette_pop_char() => {
+                    // Empty filter — backspace past the implicit `/` closes
+                    // the palette and returns to a clean prompt.
+                    app.close_command_palette();
                 }
                 KeyCode::Char(c)
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -767,15 +767,8 @@ async fn run_app(
                 KeyCode::Enter => {
                     if let Some((spec, key)) = app.take_pending_api_key() {
                         app.input_mode = InputMode::Editing;
-                        perform_connect(
-                            spec,
-                            key,
-                            &host_slot,
-                            &project_root,
-                            &tool_bins,
-                            app,
-                        )
-                        .await;
+                        perform_connect(spec, key, &host_slot, &project_root, &tool_bins, app)
+                            .await;
                     } else {
                         app.push_note("API key cannot be empty.");
                     }

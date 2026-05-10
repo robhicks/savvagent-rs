@@ -206,9 +206,7 @@ impl From<FsToolError> for ErrorData {
             }
             FsToolError::FileTooLarge { .. }
             | FsToolError::NotUtf8(_)
-            | FsToolError::OutsideRoot { .. } => {
-                ErrorData::invalid_request(err.to_string(), None)
-            }
+            | FsToolError::OutsideRoot { .. } => ErrorData::invalid_request(err.to_string(), None),
             FsToolError::Io { .. } => ErrorData::internal_error(err.to_string(), None),
         }
     }
