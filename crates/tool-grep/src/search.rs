@@ -106,7 +106,14 @@ pub(crate) fn run(
         .line_number(true)
         .build();
 
-    'outer: for entry in walker.build().filter_map(|e| e.ok()) {
+    for entry in walker.build() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!(error = %e, "skipping walker entry");
+                continue;
+            }
+        };
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
@@ -138,7 +145,7 @@ pub(crate) fn run(
         }
         if matches.len() >= limit {
             truncated = true;
-            break 'outer;
+            break;
         }
     }
 
