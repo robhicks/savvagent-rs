@@ -20,8 +20,8 @@ use rmcp::{
 };
 use savvagent_mcp::ProviderClient;
 use savvagent_protocol::{
-    COMPLETE_TOOL_NAME, CompleteRequest, CompleteResponse, ErrorKind, ProviderError,
-    STREAM_EVENT_KIND, StreamEvent,
+    COMPLETE_TOOL_NAME, CompleteRequest, CompleteResponse, ErrorKind, LIST_MODELS_TOOL_NAME,
+    ListModelsResponse, ProviderError, STREAM_EVENT_KIND, StreamEvent,
 };
 use tokio::sync::mpsc;
 
@@ -150,6 +150,26 @@ impl ProviderClient for RmcpProviderClient {
             .into_typed()
             .map_err(|e| internal(format!("decode CompleteResponse: {e}")))?;
         Ok(resp)
+    }
+
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        let params = CallToolRequestParams::new(LIST_MODELS_TOOL_NAME.to_string());
+        let result = self
+            .service
+            .call_tool(params)
+            .await
+            .map_err(|e| transport_error(e.to_string()))?;
+
+        if matches!(result.is_error, Some(true)) {
+            // Server returned a structured `ProviderError`. Surface it so the
+            // host can distinguish "not advertised" (kind=Internal) from
+            // genuine failures.
+            return Err(parse_provider_error(result));
+        }
+        let v = result
+            .structured_content
+            .ok_or_else(|| internal("list_models returned no structured content".into()))?;
+        serde_json::from_value(v).map_err(|e| internal(format!("decode ListModelsResponse: {e}")))
     }
 }
 

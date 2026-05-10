@@ -32,7 +32,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use savvagent_mcp::{ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-    CompleteRequest, CompleteResponse, ErrorKind, ProviderError, StreamEvent,
+    CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ModelInfo, ProviderError,
+    StreamEvent,
 };
 
 /// Default Ollama base URL. Override via [`OllamaProviderBuilder::base_url`]
@@ -159,6 +160,54 @@ pub enum BuildError {
 
 #[async_trait]
 impl ProviderHandler for OllamaProvider {
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        let url = format!("{}/api/tags", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_status_error("Ollama /api/tags", status, body));
+        }
+        #[derive(serde::Deserialize)]
+        struct Tags {
+            models: Vec<Tag>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Tag {
+            name: String,
+        }
+        let tags: Tags = resp.json().await.map_err(|e| ProviderError {
+            kind: ErrorKind::Internal,
+            message: format!("failed to parse /api/tags: {e}"),
+            retry_after_ms: None,
+            provider_code: None,
+        })?;
+        let models: Vec<ModelInfo> = tags
+            .models
+            .into_iter()
+            .map(|t| ModelInfo {
+                id: t.name.clone(),
+                display_name: Some(t.name),
+                context_window: None,
+            })
+            .collect();
+        // Advertise DEFAULT_MODEL as the default only when it appears in tags;
+        // a user that hasn't pulled `llama3.2` shouldn't see it as default.
+        let default_model_id = models
+            .iter()
+            .any(|m| m.id == DEFAULT_MODEL)
+            .then(|| DEFAULT_MODEL.to_string());
+        Ok(ListModelsResponse {
+            models,
+            default_model_id,
+        })
+    }
+
     async fn complete(
         &self,
         req: CompleteRequest,
@@ -209,6 +258,27 @@ fn map_reqwest_error(e: reqwest::Error) -> ProviderError {
     ProviderError {
         kind,
         message: e.to_string(),
+        retry_after_ms: None,
+        provider_code: None,
+    }
+}
+
+/// Build a `Network`-kind [`ProviderError`] that surfaces the response body
+/// alongside the HTTP status, truncated at 512 bytes.
+fn http_status_error(label: &str, status: reqwest::StatusCode, body: String) -> ProviderError {
+    let truncated = if body.len() > 512 {
+        format!("{}…", &body[..512])
+    } else {
+        body
+    };
+    let message = if truncated.is_empty() {
+        format!("{label} returned HTTP {status}")
+    } else {
+        format!("{label} returned HTTP {status}: {truncated}")
+    };
+    ProviderError {
+        kind: ErrorKind::Network,
+        message,
         retry_after_ms: None,
         provider_code: None,
     }
@@ -313,5 +383,92 @@ mod ready_tests {
         let provider = provider_for_tests(format!("http://{addr}"));
         let err = provider.ready().await.expect_err("ready must fail on 5xx");
         assert!(matches!(err.kind, ErrorKind::Network), "kind: {:?}", err);
+    }
+}
+
+#[cfg(test)]
+mod list_models_tests {
+    use super::*;
+    use axum::{Json, Router, routing::get};
+    use savvagent_mcp::ProviderHandler as _;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn list_models_parses_api_tags() {
+        let app = Router::new().route(
+            "/api/tags",
+            get(|| async {
+                Json(json!({
+                    "models": [
+                        {"name": "llama3.2", "model": "llama3.2", "size": 0},
+                        {"name": "qwen2.5-coder:7b", "model": "qwen2.5-coder:7b", "size": 0}
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = provider_for_tests(format!("http://{addr}"));
+        let resp = provider.list_models().await.unwrap();
+        let ids: Vec<_> = resp.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["llama3.2", "qwen2.5-coder:7b"]);
+        // `llama3.2` matches DEFAULT_MODEL so it's advertised as the default.
+        assert_eq!(resp.default_model_id, Some(DEFAULT_MODEL.to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_models_default_model_id_none_when_not_pulled() {
+        let app = Router::new().route(
+            "/api/tags",
+            get(|| async {
+                Json(json!({
+                    "models": [
+                        {"name": "qwen2.5-coder:7b", "model": "qwen2.5-coder:7b", "size": 0}
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = provider_for_tests(format!("http://{addr}"));
+        let resp = provider.list_models().await.unwrap();
+        assert!(!resp.models.iter().any(|m| m.id == DEFAULT_MODEL));
+        assert_eq!(resp.default_model_id, None);
+    }
+
+    #[tokio::test]
+    async fn list_models_propagates_http_failure() {
+        let app = Router::new().route(
+            "/api/tags",
+            get(|| async {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    r#"{"error":"ollama_overloaded"}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = provider_for_tests(format!("http://{addr}"));
+        let err = provider.list_models().await.expect_err("must fail on 5xx");
+        assert!(matches!(err.kind, ErrorKind::Network), "kind: {:?}", err);
+        assert!(err.message.contains("HTTP 500"), "msg: {}", err.message);
+        assert!(
+            err.message.contains("ollama_overloaded"),
+            "msg: {}",
+            err.message
+        );
     }
 }

@@ -20,7 +20,8 @@ use rmcp::{
 };
 use savvagent_mcp::{EmitError, ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-    self as spp, COMPLETE_TOOL_NAME, CompleteRequest, STREAM_EVENT_KIND, StreamEvent,
+    self as spp, COMPLETE_TOOL_NAME, CompleteRequest, LIST_MODELS_TOOL_NAME, STREAM_EVENT_KIND,
+    StreamEvent,
 };
 
 use crate::OpenAiProvider;
@@ -64,7 +65,7 @@ impl OpenAiMcpServer {
     /// SPP `complete` tool. See `crates/savvagent-protocol/SPEC.md`.
     #[tool(
         name = "complete",
-        description = "Run a completion against OpenAI's Chat Completions API (SPP v0.1.0)."
+        description = "Run a completion against OpenAI's Chat Completions API."
     )]
     pub async fn complete(
         &self,
@@ -125,6 +126,35 @@ impl OpenAiMcpServer {
             }
         }
     }
+
+    /// SPP `list_models` tool. Queries OpenAI's `/v1/models` and filters to
+    /// chat-capable id prefixes (`gpt-`, `o1-`, `o3-`, `o4-`).
+    #[tool(
+        name = "list_models",
+        description = "List models this provider can serve."
+    )]
+    pub async fn list_models_tool(&self) -> Result<CallToolResult, ErrorData> {
+        match self.provider.list_models().await {
+            Ok(resp) => {
+                let value = serde_json::to_value(&resp).map_err(|e| {
+                    ErrorData::internal_error(
+                        format!("failed to serialize ListModelsResponse: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured(value))
+            }
+            Err(spp_err) => {
+                let value = serde_json::to_value(&spp_err).map_err(|e| {
+                    ErrorData::internal_error(
+                        format!("failed to serialize ProviderError: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured_error(value))
+            }
+        }
+    }
 }
 
 #[tool_handler]
@@ -144,8 +174,8 @@ impl ServerHandler for OpenAiMcpServer {
                 "SPP-conformant OpenAI provider. Call `{}` with a CompleteRequest. \
                  For streaming, attach a progress token in `_meta`; events arrive as \
                  `notifications/progress` with `message` carrying the SPP StreamEvent JSON \
-                 (kind `{}`).",
-                COMPLETE_TOOL_NAME, STREAM_EVENT_KIND
+                 (kind `{}`). Call `{}` (no arguments) for the filtered model list.",
+                COMPLETE_TOOL_NAME, STREAM_EVENT_KIND, LIST_MODELS_TOOL_NAME
             ))
     }
 }
@@ -190,5 +220,57 @@ impl StreamEmitter for PeerEmitter {
                 rmcp::ServiceError::TransportClosed => EmitError::Disconnected,
                 other => EmitError::Transport(other.to_string()),
             })
+    }
+}
+
+#[cfg(test)]
+mod mcp_tests {
+    use super::*;
+    use crate::{DEFAULT_MODEL, OpenAiProvider};
+    use axum::{Json, Router, routing::get};
+    use savvagent_protocol::ListModelsResponse;
+    use serde_json::json;
+
+    /// `list_models_tool` is the MCP wrapper around `OpenAiProvider::list_models`.
+    /// Stand up a tiny axum mock for `/v1/models` and verify the wrapper
+    /// returns a structured `ListModelsResponse` payload.
+    #[tokio::test]
+    async fn list_models_tool_returns_structured_filtered_set() {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(json!({
+                    "data": [
+                        {"id": "gpt-4o-mini", "object": "model"},
+                        {"id": "text-embedding-3-small", "object": "model"},
+                        {"id": "o3-mini", "object": "model"}
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = OpenAiProvider::builder()
+            .api_key("test")
+            .base_url(format!("http://{addr}"))
+            .build()
+            .unwrap();
+        let server = OpenAiMcpServer::new(provider);
+        let result = server.list_models_tool().await.unwrap();
+        assert_ne!(result.is_error, Some(true), "tool returned error result");
+        let body = result
+            .structured_content
+            .expect("list_models_tool must populate structured_content");
+        let resp: ListModelsResponse =
+            serde_json::from_value(body).expect("structured payload decodes as ListModelsResponse");
+        let ids: Vec<&str> = resp.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"gpt-4o-mini"), "{ids:?}");
+        assert!(ids.contains(&"o3-mini"), "{ids:?}");
+        assert!(!ids.contains(&"text-embedding-3-small"), "{ids:?}");
+        assert_eq!(resp.default_model_id, Some(DEFAULT_MODEL.to_string()));
     }
 }
