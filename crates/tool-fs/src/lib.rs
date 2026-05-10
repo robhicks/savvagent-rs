@@ -1345,11 +1345,37 @@ mod tests {
         assert_eq!(written, "ok");
     }
 
+    #[test]
+    fn is_within_filters_outside_paths() {
+        let root = std::path::PathBuf::from("/root/project");
+        assert!(is_within(&root, &root));
+        assert!(is_within(
+            &std::path::PathBuf::from("/root/project/sub/file.rs"),
+            &root,
+        ));
+        assert!(!is_within(
+            &std::path::PathBuf::from("/root/other/file.rs"),
+            &root,
+        ));
+        assert!(!is_within(
+            &std::path::PathBuf::from("/root/projectsibling/file.rs"),
+            &root,
+        ));
+        assert!(!is_within(&std::path::PathBuf::from("/etc/passwd"), &root));
+    }
+
     #[tokio::test]
     async fn with_root_glob_filters_outside_matches() {
         // Inside the root: keep.rs, deep/also.rs.
         // Outside the root: a sibling file the glob would otherwise match
         // through a symlink.
+        //
+        // NOTE: `follow_links(false)` on the `WalkBuilder` is the primary
+        // defense here — the walker never descends through `escape-link`,
+        // so the post-walk `is_within` canonicalize filter at the tail of
+        // `glob` is not exercised by this test. That filter is covered by
+        // the `is_within_filters_outside_paths` unit test above as
+        // belt-and-suspenders.
         let inside = tempdir().unwrap();
         let outside = tempdir().unwrap();
         tokio::fs::write(inside.path().join("keep.rs"), b"")
