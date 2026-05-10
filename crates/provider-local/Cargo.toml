@@ -7,9 +7,8 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Ollama HTTP API as a Savvagent SPP provider"
 
-# Library only. The `savvagent-local` binary lives in the `savvagent` crate
-# (a thin shim around `provider_local::run`) so the release archive can ship
-# all binaries under a single installer.
+# Standalone savvagent-local MCP HTTP shim is deferred — provider runs
+# in-process via InProcessProviderClient for v0.5.
 [lib]
 name = "provider_local"
 path = "src/lib.rs"

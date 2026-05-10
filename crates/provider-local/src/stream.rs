@@ -21,9 +21,7 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use savvagent_mcp::StreamEmitter;
-use savvagent_protocol::{
-    self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta,
-};
+use savvagent_protocol::{self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta};
 
 use crate::api;
 use crate::translate::{message_text, stop_reason_from_ollama};
@@ -215,6 +213,16 @@ impl NdjsonDecoder {
         }
     }
 
+    /// Test-only constructor wrapping an arbitrary byte-chunk stream so the
+    /// decoder can be exercised without spinning up an HTTP server.
+    #[cfg(test)]
+    fn from_stream(s: futures::stream::BoxStream<'static, reqwest::Result<Bytes>>) -> Self {
+        Self {
+            inner: s,
+            buf: Vec::with_capacity(4 * 1024),
+        }
+    }
+
     async fn next(&mut self) -> Result<Option<api::ChatResponse>, spp::ProviderError> {
         loop {
             // Try to pop a complete line from the buffer.
@@ -311,10 +319,14 @@ mod tests {
         })));
 
         // First chunk must have MessageStart.
-        assert!(evs1.iter().any(|e| matches!(e, StreamEvent::MessageStart { .. })));
+        assert!(
+            evs1.iter()
+                .any(|e| matches!(e, StreamEvent::MessageStart { .. }))
+        );
         // Text deltas should be present.
         let has_delta = |evs: &[StreamEvent]| {
-            evs.iter().any(|e| matches!(e, StreamEvent::ContentBlockDelta { .. }))
+            evs.iter()
+                .any(|e| matches!(e, StreamEvent::ContentBlockDelta { .. }))
         };
         assert!(has_delta(&evs1));
         assert!(has_delta(&evs2));
@@ -471,6 +483,95 @@ mod tests {
         );
     }
 
+    // ── NDJSON decoder unit tests ─────────────────────────────────────────
+    //
+    // These exercise the decoder buffering directly without HTTP. The PR
+    // claims the decoder handles JSON documents that are split across
+    // multiple `Bytes` chunks (e.g. when the `\n` delimiter only arrives in
+    // the second chunk). These tests pin that behaviour down.
+
+    fn make_byte_stream(
+        chunks: Vec<&'static [u8]>,
+    ) -> futures::stream::BoxStream<'static, reqwest::Result<Bytes>> {
+        let v: Vec<reqwest::Result<Bytes>> = chunks
+            .into_iter()
+            .map(|c| Ok(Bytes::from_static(c)))
+            .collect();
+        futures::stream::iter(v).boxed()
+    }
+
+    #[tokio::test]
+    async fn ndjson_decoder_buffers_split_chunks() {
+        // A single JSON document split such that the trailing `\n` arrives
+        // only in the second chunk. The decoder must not yield the first
+        // chunk on its own.
+        let part1 =
+            br#"{"model":"llama3.2","message":{"role":"assistant","content":"he"# as &[u8];
+        let part2 = br#"llo"},"done":false}
+"# as &[u8];
+
+        let mut dec = NdjsonDecoder::from_stream(make_byte_stream(vec![part1, part2]));
+        let first = dec.next().await.unwrap().expect("expected one chunk");
+        let txt = first
+            .message
+            .as_ref()
+            .and_then(message_text)
+            .expect("decoded chunk should carry text");
+        assert_eq!(txt, "hello");
+
+        // No more lines — stream ends cleanly.
+        assert!(dec.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn ndjson_decoder_handles_multi_line_chunk() {
+        // A single byte chunk carrying TWO complete NDJSON lines. The
+        // decoder must yield both before pulling another chunk from the
+        // underlying stream.
+        let chunk = b"{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"a\"},\"done\":false}\n{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"b\"},\"done\":true,\"done_reason\":\"stop\"}\n" as &[u8];
+
+        let mut dec = NdjsonDecoder::from_stream(make_byte_stream(vec![chunk]));
+        let one = dec.next().await.unwrap().expect("first line");
+        let two = dec.next().await.unwrap().expect("second line");
+        assert_eq!(
+            one.message.as_ref().and_then(message_text).as_deref(),
+            Some("a")
+        );
+        assert!(two.done);
+        assert_eq!(
+            two.message.as_ref().and_then(message_text).as_deref(),
+            Some("b")
+        );
+        assert!(dec.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn ndjson_decoder_drains_final_partial_line_without_newline() {
+        // Underlying stream ends WITHOUT a trailing newline. The decoder
+        // is documented to drain the remaining buffer as one final line.
+        let chunk = br#"{"model":"m","message":{"role":"assistant","content":"x"},"done":true,"done_reason":"stop"}"#
+            as &[u8];
+        let mut dec = NdjsonDecoder::from_stream(make_byte_stream(vec![chunk]));
+        let line = dec.next().await.unwrap().expect("final partial line");
+        assert!(line.done);
+        assert!(dec.next().await.unwrap().is_none());
+    }
+
+    #[test]
+    fn pop_line_returns_none_until_newline_arrives() {
+        let mut dec = NdjsonDecoder {
+            inner: futures::stream::empty().boxed(),
+            buf: Vec::new(),
+        };
+        dec.buf.extend_from_slice(b"{\"a\":1");
+        assert!(dec.pop_line().is_none(), "no \\n yet — must buffer");
+        dec.buf.extend_from_slice(b"}\nremainder");
+        assert_eq!(dec.pop_line().as_deref(), Some("{\"a\":1}"));
+        // Remainder stays in the buffer until the next \n arrives.
+        assert!(dec.pop_line().is_none());
+        assert_eq!(dec.buf, b"remainder");
+    }
+
     // Integration test: mock Ollama server via axum.
     mod mock_server {
         use super::*;
@@ -512,9 +613,7 @@ mod tests {
                 model: "llama3.2".into(),
                 messages: vec![savvagent_protocol::Message {
                     role: savvagent_protocol::Role::User,
-                    content: vec![savvagent_protocol::ContentBlock::Text {
-                        text: "hi".into(),
-                    }],
+                    content: vec![savvagent_protocol::ContentBlock::Text { text: "hi".into() }],
                 }],
                 system: None,
                 tools: vec![],
@@ -542,12 +641,12 @@ mod tests {
             while let Some(e) = rx.recv().await {
                 events.push(e);
             }
-            assert!(events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::MessageStart { .. })));
-            assert!(events
-                .iter()
-                .any(|e| matches!(e, StreamEvent::MessageStop)));
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, StreamEvent::MessageStart { .. }))
+            );
+            assert!(events.iter().any(|e| matches!(e, StreamEvent::MessageStop)));
         }
 
         #[tokio::test]

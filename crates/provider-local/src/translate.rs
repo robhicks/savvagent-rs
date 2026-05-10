@@ -125,32 +125,54 @@ pub(crate) fn message_text(m: &api::Message) -> Option<String> {
     }
 }
 
-fn push_messages_for_spp(
-    m: &spp::Message,
-    out: &mut Vec<api::Message>,
-    has_tool_support: bool,
-) {
+fn push_messages_for_spp(m: &spp::Message, out: &mut Vec<api::Message>, has_tool_support: bool) {
     match m.role {
         spp::Role::User => {
-            // Collect tool results and text separately.
-            let mut tool_results: Vec<(&str, String)> = Vec::new();
-            let mut text_parts: Vec<&str> = Vec::new();
+            // Walk the blocks in their original order so the conversation
+            // context the model sees mirrors what the host built. Adjacent
+            // text blocks are merged into a single user message; each
+            // tool_result is emitted as its own message (tool-role when the
+            // model supports tools, otherwise rendered as user text).
+            let mut text_buf: Vec<&str> = Vec::new();
+
+            // Helper: flush any buffered text as one user message.
+            fn flush_text(buf: &mut Vec<&str>, out: &mut Vec<api::Message>) {
+                if !buf.is_empty() {
+                    let combined = buf.join("\n");
+                    out.push(api::Message::text("user", combined));
+                    buf.clear();
+                }
+            }
 
             for b in &m.content {
                 match b {
-                    spp::ContentBlock::Text { text } => text_parts.push(text.as_str()),
+                    spp::ContentBlock::Text { text } => text_buf.push(text.as_str()),
                     spp::ContentBlock::ToolResult {
                         tool_use_id,
                         content,
                         is_error,
                     } => {
+                        // Preserve order: flush pending text BEFORE the
+                        // tool_result so the assistant sees them in the
+                        // sequence the host produced.
+                        flush_text(&mut text_buf, out);
                         let result_text = flatten_tool_result_text(content);
                         let result = if *is_error {
                             format!("[error] {result_text}")
                         } else {
                             result_text
                         };
-                        tool_results.push((tool_use_id.as_str(), result));
+                        if has_tool_support {
+                            out.push(api::Message::tool_result(tool_use_id.as_str(), result));
+                        } else {
+                            // No tool calling on this model — render the
+                            // result as user text so the conversation
+                            // round-trips intact.
+                            out.push(api::Message::text(
+                                "user",
+                                format!("[tool result for {}]: {}", tool_use_id, result),
+                            ));
+                        }
                     }
                     spp::ContentBlock::Image { .. } => {
                         // Ollama's vision support is model-dependent; skip
@@ -160,26 +182,8 @@ fn push_messages_for_spp(
                 }
             }
 
-            if has_tool_support {
-                // Emit tool results as "tool" role messages, one per call.
-                for (id, result) in tool_results {
-                    out.push(api::Message::tool_result(id, result));
-                }
-            } else {
-                // Models without tool support: render tool results as
-                // "user" text so the conversation round-trips.
-                for (id, result) in &tool_results {
-                    out.push(api::Message::text(
-                        "user",
-                        format!("[tool result for {id}]: {result}"),
-                    ));
-                }
-            }
-
-            if !text_parts.is_empty() {
-                let combined = text_parts.join("\n");
-                out.push(api::Message::text("user", combined));
-            }
+            // Trailing text, if any.
+            flush_text(&mut text_buf, out);
         }
         spp::Role::Assistant => {
             // SPP assistant messages can contain text and/or tool_use blocks.
@@ -331,7 +335,9 @@ mod tests {
             model: "x".into(),
             messages: vec![spp::Message {
                 role: spp::Role::Assistant,
-                content: vec![spp::ContentBlock::Text { text: "sure".into() }],
+                content: vec![spp::ContentBlock::Text {
+                    text: "sure".into(),
+                }],
             }],
             system: None,
             tools: vec![],
@@ -355,7 +361,9 @@ mod tests {
             model: "llama3.1".into(),
             messages: vec![spp::Message {
                 role: spp::Role::User,
-                content: vec![spp::ContentBlock::Text { text: "call ls".into() }],
+                content: vec![spp::ContentBlock::Text {
+                    text: "call ls".into(),
+                }],
             }],
             system: None,
             tools: vec![ToolDef {
@@ -505,14 +513,144 @@ mod tests {
     }
 
     #[test]
+    fn user_message_with_interleaved_text_and_tool_results_preserves_order() {
+        use savvagent_protocol::ToolDef;
+        // SPP user message:
+        //   [text "before"][tool_result A][text "between"][tool_result B][text "after"]
+        // The Ollama messages must arrive in that exact order so the model
+        // sees the same conversational sequence.
+        let req = spp::CompleteRequest {
+            model: "llama3.1".into(),
+            messages: vec![spp::Message {
+                role: spp::Role::User,
+                content: vec![
+                    spp::ContentBlock::Text {
+                        text: "before".into(),
+                    },
+                    spp::ContentBlock::ToolResult {
+                        tool_use_id: "call-A".into(),
+                        content: vec![spp::ContentBlock::Text {
+                            text: "result A".into(),
+                        }],
+                        is_error: false,
+                    },
+                    spp::ContentBlock::Text {
+                        text: "between".into(),
+                    },
+                    spp::ContentBlock::ToolResult {
+                        tool_use_id: "call-B".into(),
+                        content: vec![spp::ContentBlock::Text {
+                            text: "result B".into(),
+                        }],
+                        is_error: false,
+                    },
+                    spp::ContentBlock::Text {
+                        text: "after".into(),
+                    },
+                ],
+            }],
+            system: None,
+            tools: vec![ToolDef {
+                name: "noop".into(),
+                description: "noop".into(),
+                input_schema: json!({}),
+            }],
+            temperature: None,
+            top_p: None,
+            max_tokens: 32,
+            stop_sequences: vec![],
+            stream: false,
+            thinking: None,
+            metadata: None,
+        };
+        let body = request_to_ollama(&req, false);
+
+        // Expect: 5 messages, in this exact order.
+        let summary: Vec<(String, String)> = body
+            .messages
+            .iter()
+            .map(|m| {
+                let s = match &m.content {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(other) => other.to_string(),
+                    None => String::new(),
+                };
+                (m.role.clone(), s)
+            })
+            .collect();
+
+        assert_eq!(summary.len(), 5, "got {summary:?}");
+        assert_eq!(summary[0].0, "user");
+        assert_eq!(summary[0].1, "before");
+        assert_eq!(summary[1].0, "tool");
+        assert!(summary[1].1.contains("call-A"));
+        assert!(summary[1].1.contains("result A"));
+        assert_eq!(summary[2].0, "user");
+        assert_eq!(summary[2].1, "between");
+        assert_eq!(summary[3].0, "tool");
+        assert!(summary[3].1.contains("call-B"));
+        assert!(summary[3].1.contains("result B"));
+        assert_eq!(summary[4].0, "user");
+        assert_eq!(summary[4].1, "after");
+    }
+
+    #[test]
+    fn user_message_without_tool_support_preserves_order_as_user_text() {
+        // Same shape as above but with no tools defined — every block
+        // becomes a user message and the order is still preserved.
+        let req = spp::CompleteRequest {
+            model: "llama3.2".into(),
+            messages: vec![spp::Message {
+                role: spp::Role::User,
+                content: vec![
+                    spp::ContentBlock::Text {
+                        text: "first".into(),
+                    },
+                    spp::ContentBlock::ToolResult {
+                        tool_use_id: "call-X".into(),
+                        content: vec![spp::ContentBlock::Text {
+                            text: "X result".into(),
+                        }],
+                        is_error: false,
+                    },
+                    spp::ContentBlock::Text {
+                        text: "last".into(),
+                    },
+                ],
+            }],
+            system: None,
+            tools: vec![],
+            temperature: None,
+            top_p: None,
+            max_tokens: 32,
+            stop_sequences: vec![],
+            stream: false,
+            thinking: None,
+            metadata: None,
+        };
+        let body = request_to_ollama(&req, false);
+        assert!(body.messages.iter().all(|m| m.role == "user"));
+        let texts: Vec<String> = body
+            .messages
+            .iter()
+            .map(|m| match &m.content {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(texts.len(), 3);
+        assert_eq!(texts[0], "first");
+        assert!(texts[1].contains("call-X") && texts[1].contains("X result"));
+        assert_eq!(texts[2], "last");
+    }
+
+    #[test]
     fn options_include_max_tokens() {
         let req = spp::CompleteRequest {
             model: "llama3.2".into(),
             messages: vec![spp::Message {
                 role: spp::Role::User,
-                content: vec![spp::ContentBlock::Text {
-                    text: "hi".into(),
-                }],
+                content: vec![spp::ContentBlock::Text { text: "hi".into() }],
             }],
             system: None,
             tools: vec![],

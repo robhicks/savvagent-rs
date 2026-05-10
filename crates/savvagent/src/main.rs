@@ -216,6 +216,11 @@ async fn build_in_process_host_with_model(
     model: String,
 ) -> Result<Arc<Host>> {
     let handler = (spec.build)(api_key).with_context(|| format!("building {} handler", spec.id))?;
+    if let Some(check) = spec.health_check {
+        check()
+            .await
+            .with_context(|| format!("{} health check", spec.id))?;
+    }
     let client: Box<dyn ProviderClient + Send + Sync> =
         Box::new(InProcessProviderClient::new(handler));
     // The endpoint variant is a placeholder when we hand the host a

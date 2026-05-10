@@ -31,7 +31,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use savvagent_mcp::{ProviderHandler, StreamEmitter};
-use savvagent_protocol::{CompleteRequest, CompleteResponse, ErrorKind, ProviderError, StreamEvent};
+use savvagent_protocol::{
+    CompleteRequest, CompleteResponse, ErrorKind, ProviderError, StreamEvent,
+};
 
 /// Default Ollama base URL. Override via [`OllamaProviderBuilder::base_url`]
 /// or the `OLLAMA_HOST` environment variable.
@@ -44,6 +46,52 @@ pub const DEFAULT_MODEL: &str = "llama3.2";
 pub struct OllamaProvider {
     http: reqwest::Client,
     base_url: String,
+}
+
+impl OllamaProvider {
+    /// Lightweight health probe. Issues a short-timeout `GET /api/tags`
+    /// against the configured base URL and returns a typed
+    /// [`ProviderError`] when Ollama is unreachable.
+    ///
+    /// Intended for the connect path so the user gets a useful "is `ollama
+    /// serve` running?" message instead of a successful "Connected" notice
+    /// followed by the first turn timing out.
+    pub async fn ready(&self) -> Result<(), ProviderError> {
+        let url = format!("{}/api/tags", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+            .map_err(|e| ProviderError {
+                kind: ErrorKind::Network,
+                message: format!(
+                    "Ollama not reachable at {} — is `ollama serve` running? ({e})",
+                    self.base_url
+                ),
+                retry_after_ms: None,
+                provider_code: None,
+            })?;
+        if !resp.status().is_success() {
+            return Err(ProviderError {
+                kind: ErrorKind::Network,
+                message: format!(
+                    "Ollama health probe at {} returned HTTP {} — is `ollama serve` running?",
+                    self.base_url,
+                    resp.status()
+                ),
+                retry_after_ms: None,
+                provider_code: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Configured Ollama base URL (no trailing slash).
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
 }
 
 /// Builder for [`OllamaProvider`]. Use [`OllamaProvider::builder`].
@@ -202,3 +250,68 @@ pub fn provider_for_tests(base_url: impl Into<String>) -> OllamaProvider {
 
 #[doc(hidden)]
 pub fn _events_phantom(_: StreamEvent) {}
+
+#[cfg(test)]
+mod ready_tests {
+    use super::*;
+    use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+
+    #[tokio::test]
+    async fn ready_succeeds_when_api_tags_returns_ok() {
+        let app = Router::new().route(
+            "/api/tags",
+            get(|| async {
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    "{\"models\":[]}",
+                )
+                    .into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = provider_for_tests(format!("http://{addr}"));
+        provider.ready().await.expect("ready should succeed");
+    }
+
+    #[tokio::test]
+    async fn ready_fails_when_ollama_is_unreachable() {
+        // Bind a port, drop the listener, then point the provider at it.
+        // No server is listening — the connection attempt must fail fast
+        // and the error must call out the URL and `ollama serve`.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let provider = provider_for_tests(format!("http://{addr}"));
+        let err = provider.ready().await.expect_err("ready must fail");
+        assert!(matches!(err.kind, ErrorKind::Network), "kind: {:?}", err);
+        assert!(
+            err.message.contains("Ollama not reachable") && err.message.contains("ollama serve"),
+            "expected actionable message, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_fails_on_non_2xx_status() {
+        let app = Router::new().route(
+            "/api/tags",
+            get(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom").into_response() }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = provider_for_tests(format!("http://{addr}"));
+        let err = provider.ready().await.expect_err("ready must fail on 5xx");
+        assert!(matches!(err.kind, ErrorKind::Network), "kind: {:?}", err);
+    }
+}

@@ -8,10 +8,17 @@
 //! Adding a new provider is a one-entry change — implement `ProviderHandler`
 //! in a new crate, expose a builder, and append to [`PROVIDERS`].
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
 use savvagent_mcp::ProviderHandler;
+
+/// Future returned by a provider's connect-time readiness probe.
+pub type HealthCheckFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+/// Function pointer to a provider's connect-time readiness probe.
+pub type HealthCheckFn = fn() -> HealthCheckFuture;
 
 /// Static metadata + factory for one provider.
 #[derive(Clone, Copy)]
@@ -33,6 +40,11 @@ pub struct ProviderSpec {
     /// Build an in-process handler bound to `api_key`. For keyless providers
     /// `api_key` is always an empty string.
     pub build: fn(api_key: &str) -> Result<Arc<dyn ProviderHandler>>,
+    /// Optional connect-time readiness probe. Run after [`build`] and
+    /// before swapping the host slot so reachability problems surface as
+    /// "Connect failed" rather than a silent first-turn timeout. Returns
+    /// `Ok(())` when the provider is reachable.
+    pub health_check: Option<HealthCheckFn>,
 }
 
 /// All providers the TUI offers in `/connect`.
@@ -44,6 +56,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_model: "claude-haiku-4-5",
         api_key_required: true,
         build: build_anthropic,
+        health_check: None,
     },
     ProviderSpec {
         id: "gemini",
@@ -52,6 +65,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_model: "gemini-1.5-flash",
         api_key_required: true,
         build: build_gemini,
+        health_check: None,
     },
     ProviderSpec {
         id: "openai",
@@ -60,6 +74,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_model: "gpt-4o-mini",
         api_key_required: true,
         build: build_openai,
+        health_check: None,
     },
     ProviderSpec {
         id: "local",
@@ -68,6 +83,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         default_model: "llama3.2",
         api_key_required: false,
         build: build_ollama,
+        health_check: Some(check_ollama),
     },
 ];
 
@@ -95,4 +111,14 @@ fn build_openai(api_key: &str) -> Result<Arc<dyn ProviderHandler>> {
 fn build_ollama(_api_key: &str) -> Result<Arc<dyn ProviderHandler>> {
     let p = provider_local::OllamaProvider::builder().build()?;
     Ok(Arc::new(p))
+}
+
+/// Probe Ollama's `/api/tags` endpoint with a short timeout so the user
+/// gets an actionable error when `ollama serve` isn't running.
+fn check_ollama() -> HealthCheckFuture {
+    Box::pin(async {
+        let p = provider_local::OllamaProvider::builder().build()?;
+        p.ready().await.map_err(|e| anyhow::anyhow!(e.message))?;
+        Ok(())
+    })
 }
