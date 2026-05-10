@@ -2330,6 +2330,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "provider-local"
+version = "0.4.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "futures",
+ "reqwest",
+ "savvagent-mcp",
+ "savvagent-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "provider-openai"
 version = "0.4.0"
 dependencies = [
@@ -2972,6 +2991,7 @@ dependencies = [
  "keyring",
  "provider-anthropic",
  "provider-gemini",
+ "provider-local",
  "provider-openai",
  "ratatui",
  "ratatui-code-editor",
