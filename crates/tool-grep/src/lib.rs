@@ -74,9 +74,7 @@ impl From<GrepToolError> for ErrorData {
             GrepToolError::InvalidArgument(_)
             | GrepToolError::Regex(_)
             | GrepToolError::Glob(_) => ErrorData::invalid_params(err.to_string(), None),
-            GrepToolError::OutsideRoot { .. } => {
-                ErrorData::invalid_request(err.to_string(), None)
-            }
+            GrepToolError::OutsideRoot { .. } => ErrorData::invalid_request(err.to_string(), None),
             GrepToolError::Io { .. } => ErrorData::internal_error(err.to_string(), None),
         }
     }
@@ -137,12 +135,9 @@ impl GrepTools {
         Parameters(input): Parameters<SearchInput>,
     ) -> Result<Json<SearchOutput>, ErrorData> {
         let root = self.root.clone();
-        let result =
-            tokio::task::spawn_blocking(move || search::run(root.as_deref(), input))
-                .await
-                .map_err(|e| {
-                    GrepToolError::InvalidArgument(format!("search task panicked: {e}"))
-                })??;
+        let result = tokio::task::spawn_blocking(move || search::run(root.as_deref(), input))
+            .await
+            .map_err(|e| GrepToolError::InvalidArgument(format!("search task panicked: {e}")))??;
         Ok(Json(result))
     }
 }

@@ -161,22 +161,33 @@ fn resolve_search_root(
     let raw = requested.unwrap_or(".");
     let Some(root) = project_root else {
         // Test/no-containment mode — accept whatever the caller passes.
-        return std::fs::canonicalize(raw)
-            .map_err(|e| GrepToolError::Io { op: "canonicalize".into(), source: e });
+        return std::fs::canonicalize(raw).map_err(|e| GrepToolError::Io {
+            op: "canonicalize".into(),
+            source: e,
+        });
     };
     let input = Path::new(raw);
-    if input.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err(GrepToolError::OutsideRoot { path: raw.to_string() });
+    if input
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(GrepToolError::OutsideRoot {
+            path: raw.to_string(),
+        });
     }
     let candidate = if input.is_absolute() {
         input.to_path_buf()
     } else {
         root.join(input)
     };
-    let canon = std::fs::canonicalize(&candidate)
-        .map_err(|e| GrepToolError::Io { op: "canonicalize".into(), source: e })?;
+    let canon = std::fs::canonicalize(&candidate).map_err(|e| GrepToolError::Io {
+        op: "canonicalize".into(),
+        source: e,
+    })?;
     if canon != *root && !canon.starts_with(root) {
-        return Err(GrepToolError::OutsideRoot { path: raw.to_string() });
+        return Err(GrepToolError::OutsideRoot {
+            path: raw.to_string(),
+        });
     }
     Ok(canon)
 }
@@ -420,7 +431,11 @@ mod tests {
         write(dir.path(), ".env", "SECRET=abc123\n");
         write(dir.path(), ".env.local", "SECRET=xyz\n");
         write(dir.path(), ".ssh/id_rsa", "ssh-rsa AAA\n");
-        write(dir.path(), "secrets/credentials.json", "{\"token\":\"xx\"}\n");
+        write(
+            dir.path(),
+            "secrets/credentials.json",
+            "{\"token\":\"xx\"}\n",
+        );
         write(dir.path(), "kept.rs", "let x = \"abc123\";\n");
         let canon = std::fs::canonicalize(dir.path()).unwrap();
 
@@ -434,6 +449,10 @@ mod tests {
         .unwrap();
 
         let files: Vec<_> = out.matches.iter().map(|m| m.file.as_str()).collect();
-        assert_eq!(files, vec!["kept.rs"], "sensitive paths must not leak: {out:?}");
+        assert_eq!(
+            files,
+            vec!["kept.rs"],
+            "sensitive paths must not leak: {out:?}"
+        );
     }
 }
