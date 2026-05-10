@@ -182,43 +182,63 @@ pub async fn run() -> anyhow::Result<()> {
         env!("CARGO_PKG_VERSION")
     );
 
-    let tools = build_tools_from_env();
+    let tools = build_tools_from_env()?;
     let service = tools.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
 
 /// Build a [`GrepTools`] honoring `SAVVAGENT_TOOL_GREP_ROOT`. Falls back to
-/// the process CWD; if both fail to canonicalize, the binary still serves
-/// (via [`GrepTools::new`]) so the host gets a clear "no matches" instead
-/// of a hard transport error — but a warning is logged.
-fn build_tools_from_env() -> GrepTools {
+/// the process CWD. Layer-1 path containment is non-optional: if neither
+/// the env var nor CWD can be canonicalized into a valid root, this
+/// returns an error so the binary exits non-zero rather than silently
+/// serving without containment.
+fn build_tools_from_env() -> anyhow::Result<GrepTools> {
     let env_root = std::env::var("SAVVAGENT_TOOL_GREP_ROOT")
         .ok()
         .filter(|s| !s.is_empty());
     if let Some(root) = env_root {
-        match GrepTools::with_root(&root) {
+        // The operator deliberately set the env var. If we can't honor it,
+        // fail closed rather than silently picking a different directory —
+        // that would be a privilege-confusion vector.
+        return match GrepTools::with_root(&root) {
             Ok(t) => {
                 tracing::info!(root = %root, "tool-grep containment enabled (env)");
-                return t;
+                Ok(t)
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     root = %root,
                     error = %e,
-                    "SAVVAGENT_TOOL_GREP_ROOT failed to canonicalize; falling back to CWD",
+                    "SAVVAGENT_TOOL_GREP_ROOT failed to canonicalize; refusing to start",
                 );
+                Err(anyhow::anyhow!(
+                    "SAVVAGENT_TOOL_GREP_ROOT={root} failed to canonicalize: {e}"
+                ))
             }
+        };
+    }
+    let cwd = std::env::current_dir().map_err(|e| {
+        tracing::error!(error = %e, "current_dir() failed; refusing to start without containment");
+        anyhow::anyhow!("current_dir() failed: {e}")
+    })?;
+    match GrepTools::with_root(&cwd) {
+        Ok(t) => {
+            tracing::info!(root = %cwd.display(), "tool-grep containment enabled (cwd)");
+            Ok(t)
+        }
+        Err(e) => {
+            tracing::error!(
+                root = %cwd.display(),
+                error = %e,
+                "CWD failed to canonicalize; refusing to start without containment",
+            );
+            Err(anyhow::anyhow!(
+                "cwd {} failed to canonicalize: {e}",
+                cwd.display()
+            ))
         }
     }
-    if let Ok(cwd) = std::env::current_dir()
-        && let Ok(t) = GrepTools::with_root(&cwd)
-    {
-        tracing::info!(root = %cwd.display(), "tool-grep containment enabled (cwd)");
-        return t;
-    }
-    tracing::warn!("tool-grep running without containment (no usable root)");
-    GrepTools::new()
 }
 
 #[cfg(test)]
