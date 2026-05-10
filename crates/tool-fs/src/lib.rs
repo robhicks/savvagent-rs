@@ -23,6 +23,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod edit;
+pub use edit::{
+    InsertInput, InsertOutput, MultiEdit, MultiEditInput, MultiEditOutput, ReplaceCount,
+    ReplaceInput, ReplaceOutput,
+};
+
 use std::path::{Path, PathBuf};
 
 use rmcp::{
@@ -217,6 +223,23 @@ fn io_err(op: &str, source: std::io::Error) -> FsToolError {
         op: op.to_string(),
         source,
     }
+}
+
+/// Map a blocking-task `JoinError` to `ErrorData::internal_error`. Used by
+/// the edit handlers that delegate their actual filesystem write to
+/// [`tokio::task::spawn_blocking`].
+fn join_err(e: tokio::task::JoinError) -> ErrorData {
+    ErrorData::internal_error(format!("write task failed: {e}"), None)
+}
+
+/// Drive [`edit::atomic_write`] on a blocking task and surface its errors.
+/// Shared by `replace`, `insert`, and `multi_edit` so each handler stays a
+/// single readable expression.
+async fn spawn_atomic_write(path: PathBuf, contents: String) -> Result<(), ErrorData> {
+    tokio::task::spawn_blocking(move || edit::atomic_write(&path, contents.as_bytes()))
+        .await
+        .map_err(join_err)?
+        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +483,125 @@ impl FsTools {
         }))
     }
 
+    /// Replace `old` with `new` in a file. Default contract: `old` must be
+    /// unique. Pass `count: { exactly: N }` or `count: "all"` to relax.
+    #[tool(
+        name = "replace",
+        description = "Replace `old` with `new` in a file. By default `old` must be unique; pass count to relax."
+    )]
+    pub async fn replace(
+        &self,
+        Parameters(input): Parameters<edit::ReplaceInput>,
+    ) -> Result<Json<edit::ReplaceOutput>, ErrorData> {
+        let (path, text) = self.read_text_for_edit(&input.path).await?;
+        let (new_text, n) = edit::apply_replace(&text, &input.old, &input.new, input.count)?;
+        spawn_atomic_write(path, new_text).await?;
+        Ok(Json(edit::ReplaceOutput {
+            path: input.path,
+            replacements: n,
+        }))
+    }
+
+    /// Insert a block of text after a 1-indexed line. `after_line=0` prepends.
+    #[tool(
+        name = "insert",
+        description = "Insert text after the Nth line of a file (1-indexed; 0 prepends)."
+    )]
+    pub async fn insert(
+        &self,
+        Parameters(input): Parameters<edit::InsertInput>,
+    ) -> Result<Json<edit::InsertOutput>, ErrorData> {
+        let (path, text) = self.read_text_for_edit(&input.path).await?;
+        let (new_text, n) = edit::apply_insert(&text, input.after_line, &input.text)?;
+        spawn_atomic_write(path, new_text).await?;
+        Ok(Json(edit::InsertOutput {
+            path: input.path,
+            lines_inserted: n,
+        }))
+    }
+
+    /// Apply a sequence of edits with logical-failure atomicity: if any edit
+    /// in the batch fails, the file on disk is left untouched.
+    ///
+    /// Note: this is *logical* atomicity (we don't commit until every edit
+    /// computes), not OS-crash atomicity. The atomic-write step itself does
+    /// give crash-safe replacement of the final file via tmp + rename + parent
+    /// fsync; see [`edit::atomic_write`].
+    #[tool(
+        name = "multi_edit",
+        description = "Apply a batch of replace/insert edits atomically. On any failure, the original file is unchanged."
+    )]
+    pub async fn multi_edit(
+        &self,
+        Parameters(input): Parameters<edit::MultiEditInput>,
+    ) -> Result<Json<edit::MultiEditOutput>, ErrorData> {
+        let (path, text) = self.read_text_for_edit(&input.path).await?;
+        let mut current = text;
+        for (i, entry) in input.edits.iter().enumerate() {
+            // Identify the failing step so the agent can correct just that one
+            // rather than re-deriving its batch from a generic error.
+            let kind = match entry {
+                edit::MultiEdit::Replace { .. } => "replace",
+                edit::MultiEdit::Insert { .. } => "insert",
+            };
+            let step = i + 1;
+            current = match entry {
+                edit::MultiEdit::Replace { old, new, count } => {
+                    edit::apply_replace(&current, old, new, *count)
+                        .map_err(|e| {
+                            FsToolError::InvalidArgument(format!("edit #{step} ({kind}): {e}"))
+                        })?
+                        .0
+                }
+                edit::MultiEdit::Insert { after_line, text } => {
+                    edit::apply_insert(&current, *after_line, text)
+                        .map_err(|e| {
+                            FsToolError::InvalidArgument(format!("edit #{step} ({kind}): {e}"))
+                        })?
+                        .0
+                }
+            };
+        }
+        spawn_atomic_write(path, current).await?;
+        Ok(Json(edit::MultiEditOutput { path: input.path }))
+    }
+
     // -- path resolution helpers --------------------------------------------
+
+    /// Shared setup for the three edit handlers: empty-path check, write
+    /// resolution, deny-floor check, read, and UTF-8 decode. Returns the
+    /// resolved (canonical) target path and the current file contents.
+    async fn read_text_for_edit(&self, raw: &str) -> Result<(PathBuf, String), FsToolError> {
+        if raw.is_empty() {
+            return Err(FsToolError::InvalidArgument("path is empty".into()));
+        }
+        let path = self.resolve_for_write(raw)?;
+        self.check_deny_floor(raw, &path)?;
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| io_err("read", e))?;
+        let text = String::from_utf8(bytes).map_err(|e| FsToolError::NotUtf8(e.to_string()))?;
+        Ok((path, text))
+    }
+
+    /// Evaluate the sensitive-path deny floor against the path *relative to
+    /// the project root*. With containment off, the raw input is used — that
+    /// preserves the no-sandbox semantics of [`FsTools::new`] while still
+    /// catching obvious shapes like `.env` or `secrets/credentials.json`.
+    fn check_deny_floor(&self, raw: &str, resolved: &Path) -> Result<(), FsToolError> {
+        let relative = match self.root.as_deref() {
+            Some(root) => resolved
+                .strip_prefix(root)
+                .expect("resolve_for_write guarantees containment under root"),
+            None => Path::new(raw),
+        };
+        if edit::is_denied(relative) {
+            return Err(FsToolError::OutsideRoot {
+                path: raw.to_string(),
+            });
+        }
+        Ok(())
+    }
 
     /// Resolve an input path that **must already exist** (read/list).
     ///
@@ -1105,6 +1246,257 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    use crate::edit::{InsertInput, MultiEdit, MultiEditInput, ReplaceInput};
+
+    #[tokio::test]
+    async fn replace_tool_unique_match() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        tokio::fs::write(&p, b"foo bar baz").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .replace(Parameters(ReplaceInput {
+                path: "a.txt".into(),
+                old: "bar".into(),
+                new: "BAR".into(),
+                count: None,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out.0.replacements, 1);
+        assert_eq!(tokio::fs::read_to_string(&p).await.unwrap(), "foo BAR baz");
+    }
+
+    #[tokio::test]
+    async fn replace_tool_rejects_env_path() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join(".env");
+        tokio::fs::write(&p, b"SECRET=abc").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let err = tools
+            .replace(Parameters(ReplaceInput {
+                path: ".env".into(),
+                old: "abc".into(),
+                new: "xyz".into(),
+                count: None,
+            }))
+            .await
+            .err()
+            .expect("deny-floor must reject .env");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+        assert_eq!(tokio::fs::read_to_string(&p).await.unwrap(), "SECRET=abc");
+    }
+
+    #[tokio::test]
+    async fn insert_tool_prepends() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        tokio::fs::write(&p, b"second\n").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .insert(Parameters(InsertInput {
+                path: "a.txt".into(),
+                after_line: 0,
+                text: "first".into(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out.0.lines_inserted, 1);
+        assert_eq!(
+            tokio::fs::read_to_string(&p).await.unwrap(),
+            "first\nsecond\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_edit_tool_atomic_on_failure() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        tokio::fs::write(&p, b"foo bar baz").await.unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let err = tools
+            .multi_edit(Parameters(MultiEditInput {
+                path: "a.txt".into(),
+                edits: vec![
+                    MultiEdit::Replace {
+                        old: "foo".into(),
+                        new: "FOO".into(),
+                        count: None,
+                    },
+                    MultiEdit::Replace {
+                        old: "missing".into(),
+                        new: "X".into(),
+                        count: None,
+                    },
+                ],
+            }))
+            .await
+            .err()
+            .expect("second edit must fail");
+        // Error must identify the failing step so the agent can fix just that
+        // one (FIX 4) AND retain the underlying cause for diagnosis.
+        assert!(
+            err.message.contains("edit #2 (replace)"),
+            "missing step prefix: {}",
+            err.message
+        );
+        assert!(err.message.contains("not found"), "{}", err.message);
+        assert_eq!(
+            tokio::fs::read_to_string(&p).await.unwrap(),
+            "foo bar baz",
+            "atomicity broken — original file modified"
+        );
+
+        // No leftover tmp files in parent.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".savvagent-tmp.")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "leftover tmp file: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn multi_edit_tool_round_trip() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        tokio::fs::write(&p, b"line1\nline2\nline3\n")
+            .await
+            .unwrap();
+
+        let tools = FsTools::with_root(dir.path()).unwrap();
+        let out = tools
+            .multi_edit(Parameters(MultiEditInput {
+                path: "a.txt".into(),
+                edits: vec![
+                    MultiEdit::Replace {
+                        old: "line2".into(),
+                        new: "LINE_TWO".into(),
+                        count: None,
+                    },
+                    MultiEdit::Insert {
+                        after_line: 1,
+                        text: "inserted".into(),
+                    },
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(out.0.path, "a.txt");
+        assert_eq!(
+            tokio::fs::read_to_string(&p).await.unwrap(),
+            "line1\ninserted\nLINE_TWO\nline3\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_tools_handle_workspace_path_containing_credential() {
+        // Regression for the deny-floor relative-path fix: a workspace whose
+        // absolute path itself contains "credential" must not false-positive
+        // and reject every legitimate edit inside it.
+        let parent = tempdir().unwrap();
+        let workspace = parent.path().join("my-credentials-app");
+        std::fs::create_dir(&workspace).unwrap();
+        let target = workspace.join("source.rs");
+        tokio::fs::write(&target, b"let x = 1;").await.unwrap();
+
+        let tools = FsTools::with_root(&workspace).unwrap();
+        let out = tools
+            .replace(Parameters(ReplaceInput {
+                path: "source.rs".into(),
+                old: "x".into(),
+                new: "y".into(),
+                count: None,
+            }))
+            .await
+            .expect("workspace path containing 'credential' must not false-positive");
+        assert_eq!(out.0.replacements, 1);
+        assert_eq!(
+            tokio::fs::read_to_string(&target).await.unwrap(),
+            "let y = 1;"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_tools_reject_absolute_path_outside_root() {
+        // Containment: absolute paths outside the project root must be
+        // rejected by every edit handler, and the target file must not be
+        // touched.
+        let inside = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let escape = outside.path().join("target.txt");
+        tokio::fs::write(&escape, b"foo").await.unwrap();
+
+        let tools = FsTools::with_root(inside.path()).unwrap();
+
+        // replace
+        let err = tools
+            .replace(Parameters(ReplaceInput {
+                path: escape.to_string_lossy().into_owned(),
+                old: "foo".into(),
+                new: "bar".into(),
+                count: None,
+            }))
+            .await
+            .err()
+            .expect("replace must reject absolute paths outside the root");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+        assert_eq!(tokio::fs::read_to_string(&escape).await.unwrap(), "foo");
+
+        // insert
+        let err = tools
+            .insert(Parameters(InsertInput {
+                path: escape.to_string_lossy().into_owned(),
+                after_line: 0,
+                text: "x".into(),
+            }))
+            .await
+            .err()
+            .expect("insert must reject absolute paths outside the root");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+        assert_eq!(tokio::fs::read_to_string(&escape).await.unwrap(), "foo");
+
+        // multi_edit
+        let err = tools
+            .multi_edit(Parameters(MultiEditInput {
+                path: escape.to_string_lossy().into_owned(),
+                edits: vec![MultiEdit::Replace {
+                    old: "foo".into(),
+                    new: "bar".into(),
+                    count: None,
+                }],
+            }))
+            .await
+            .err()
+            .expect("multi_edit must reject absolute paths outside the root");
+        assert!(
+            err.message.to_lowercase().contains("outside"),
+            "{}",
+            err.message
+        );
+        assert_eq!(tokio::fs::read_to_string(&escape).await.unwrap(), "foo");
     }
 
     #[tokio::test]
