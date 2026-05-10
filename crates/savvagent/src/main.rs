@@ -18,6 +18,7 @@
 //! - `SAVVAGENT_MODEL`          (overrides the per-provider default)
 //! - `SAVVAGENT_TOOL_FS_BIN`    (default `savvagent-tool-fs` on $PATH)
 //! - `SAVVAGENT_TOOL_BASH_BIN`  (default `savvagent-tool-bash` on $PATH)
+//! - `SAVVAGENT_TOOL_GREP_BIN`  (default `savvagent-tool-grep` on $PATH)
 
 mod app;
 mod creds;
@@ -58,14 +59,19 @@ type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
 struct ToolBins {
     fs: Option<PathBuf>,
     bash: Option<PathBuf>,
+    grep: Option<PathBuf>,
 }
 
 impl ToolBins {
     /// Append every populated entry as a stdio [`ToolEndpoint`] on `config`.
     fn apply(&self, mut config: HostConfig) -> HostConfig {
-        for path in [self.fs.as_deref(), self.bash.as_deref()]
-            .into_iter()
-            .flatten()
+        for path in [
+            self.fs.as_deref(),
+            self.bash.as_deref(),
+            self.grep.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             config = config.with_tool(ToolEndpoint::Stdio {
                 command: path.to_path_buf(),
@@ -85,6 +91,7 @@ async fn main() -> Result<()> {
     let tool_bins = ToolBins {
         fs: locate_bundled_bin("savvagent-tool-fs", "SAVVAGENT_TOOL_FS_BIN"),
         bash: locate_bundled_bin("savvagent-tool-bash", "SAVVAGENT_TOOL_BASH_BIN"),
+        grep: locate_bundled_bin("savvagent-tool-grep", "SAVVAGENT_TOOL_GREP_BIN"),
     };
 
     let initial = bootstrap_host(&project_root, &tool_bins).await;
@@ -123,6 +130,11 @@ async fn main() -> Result<()> {
     if tool_bins.bash.is_none() {
         app.push_note(
             "Note: savvagent-tool-bash not found — bash disabled. Run `cargo build` or set SAVVAGENT_TOOL_BASH_BIN.",
+        );
+    }
+    if tool_bins.grep.is_none() {
+        app.push_note(
+            "Note: savvagent-tool-grep not found — search disabled. Run `cargo build` or set SAVVAGENT_TOOL_GREP_BIN.",
         );
     }
     let res = run_app(

@@ -39,11 +39,11 @@ struct ToolServer {
 impl ToolRegistry {
     /// Spawn each configured tool server and aggregate their tool lists.
     ///
-    /// `project_root` is forwarded to every spawned child via two parallel
-    /// env vars — `SAVVAGENT_TOOL_FS_ROOT` and `SAVVAGENT_TOOL_BASH_ROOT` —
-    /// so the bundled tool binaries confine themselves to the host's project
-    /// root by default. Setting both on every tool is harmless: each tool
-    /// reads only the var it cares about.
+    /// `project_root` is forwarded to every spawned child via three parallel
+    /// env vars — `SAVVAGENT_TOOL_FS_ROOT`, `SAVVAGENT_TOOL_BASH_ROOT`, and
+    /// `SAVVAGENT_TOOL_GREP_ROOT` — so the bundled tool binaries confine
+    /// themselves to the host's project root by default. Setting all three
+    /// on every tool is harmless: each tool reads only the var it cares about.
     ///
     /// `sandbox` is applied to each spawn when [`SandboxConfig::enabled`] is
     /// `true` and the platform wrapper binary (`bwrap` / `sandbox-exec`) is
@@ -66,6 +66,7 @@ impl ToolRegistry {
                     cmd.args(args);
                     cmd.env("SAVVAGENT_TOOL_FS_ROOT", project_root);
                     cmd.env("SAVVAGENT_TOOL_BASH_ROOT", project_root);
+                    cmd.env("SAVVAGENT_TOOL_GREP_ROOT", project_root);
 
                     // Apply the OS sandbox wrapper if configured.
                     let wrapper = apply_sandbox(&mut cmd, command, project_root, sandbox);
