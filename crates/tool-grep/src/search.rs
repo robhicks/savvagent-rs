@@ -489,4 +489,28 @@ mod tests {
         .unwrap();
         assert!(!out.matches.is_empty(), "multiline should match: {out:?}");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn with_root_search_filters_symlinked_match() {
+        let inside = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        write(outside.path(), "escape.rs", "fn secret() {}\n");
+        let canon_inside = std::fs::canonicalize(inside.path()).unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), inside.path().join("escape-link")).unwrap();
+
+        let out = run(
+            Some(&canon_inside),
+            SearchInput {
+                pattern: "secret".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            out.matches.is_empty(),
+            "follow_links(false) must prevent symlink escape: {out:?}"
+        );
+    }
 }
