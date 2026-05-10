@@ -1029,15 +1029,14 @@ mod list_models_tests {
                         id: "alpha".into(),
                         display_name: Some("Alpha".into()),
                         context_window: Some(8192),
-                        default: true,
                     },
                     ModelInfo {
                         id: "beta".into(),
                         display_name: None,
                         context_window: None,
-                        default: false,
                     },
                 ],
+                default_model_id: Some("alpha".into()),
             })
         }
     }
@@ -1081,8 +1080,7 @@ mod list_models_tests {
             .expect("list_models should succeed");
         let ids: Vec<_> = resp.models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["alpha", "beta"]);
-        assert!(resp.models[0].default);
-        assert!(!resp.models[1].default);
+        assert_eq!(resp.default_model_id, Some("alpha".into()));
     }
 
     #[tokio::test]
@@ -1095,7 +1093,7 @@ mod list_models_tests {
             .list_models()
             .await
             .expect_err("default impl must error");
-        assert!(matches!(err.kind, ErrorKind::Internal));
+        assert!(matches!(err.kind, ErrorKind::NotImplemented));
         assert!(err.message.contains("list_models"), "msg: {}", err.message);
     }
 }

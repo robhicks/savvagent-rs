@@ -135,12 +135,9 @@ impl ProviderHandler for OpenAiProvider {
             .await
             .map_err(map_reqwest_error)?;
         if !resp.status().is_success() {
-            return Err(ProviderError {
-                kind: ErrorKind::Network,
-                message: format!("OpenAI /v1/models returned HTTP {}", resp.status()),
-                retry_after_ms: None,
-                provider_code: None,
-            });
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_status_error("OpenAI /v1/models", status, body));
         }
         #[derive(serde::Deserialize)]
         struct ModelsList {
@@ -158,21 +155,26 @@ impl ProviderHandler for OpenAiProvider {
         })?;
 
         let prefixes = ["gpt-", "o1-", "o3-", "o4-"];
-        let models = raw
+        let models: Vec<ModelInfo> = raw
             .data
             .into_iter()
             .filter(|m| prefixes.iter().any(|p| m.id.starts_with(p)))
-            .map(|m| {
-                let is_default = m.id == DEFAULT_MODEL;
-                ModelInfo {
-                    id: m.id.clone(),
-                    display_name: Some(m.id),
-                    context_window: None,
-                    default: is_default,
-                }
+            .map(|m| ModelInfo {
+                id: m.id.clone(),
+                display_name: Some(m.id),
+                context_window: None,
             })
             .collect();
-        Ok(ListModelsResponse { models })
+        // Advertise DEFAULT_MODEL as the default only when it actually appears
+        // in the filtered list. Hosts treat `None` as "no default advertised".
+        let default_model_id = models
+            .iter()
+            .any(|m| m.id == DEFAULT_MODEL)
+            .then(|| DEFAULT_MODEL.to_string());
+        Ok(ListModelsResponse {
+            models,
+            default_model_id,
+        })
     }
 
     async fn complete(
@@ -227,6 +229,28 @@ fn map_reqwest_error(e: reqwest::Error) -> ProviderError {
     ProviderError {
         kind,
         message: e.to_string(),
+        retry_after_ms: None,
+        provider_code: None,
+    }
+}
+
+/// Build a `Network`-kind [`ProviderError`] that surfaces the response body
+/// alongside the HTTP status. The body is truncated at 512 bytes so a wall of
+/// JSON doesn't blow up the TUI note line.
+fn http_status_error(label: &str, status: reqwest::StatusCode, body: String) -> ProviderError {
+    let truncated = if body.len() > 512 {
+        format!("{}…", &body[..512])
+    } else {
+        body
+    };
+    let message = if truncated.is_empty() {
+        format!("{label} returned HTTP {status}")
+    } else {
+        format!("{label} returned HTTP {status}: {truncated}")
+    };
+    ProviderError {
+        kind: ErrorKind::Network,
+        message,
         retry_after_ms: None,
         provider_code: None,
     }
@@ -410,17 +434,51 @@ mod list_models_tests {
         assert!(!ids.contains(&"text-embedding-3-small"), "{ids:?}");
         assert!(!ids.contains(&"whisper-1"), "{ids:?}");
 
-        // gpt-4o-mini matches DEFAULT_MODEL so exactly one entry is flagged.
-        let defaults: Vec<_> = resp.models.iter().filter(|m| m.default).collect();
-        assert_eq!(defaults.len(), 1);
-        assert_eq!(defaults[0].id, DEFAULT_MODEL);
+        // gpt-4o-mini matches DEFAULT_MODEL so it must be advertised as the
+        // default model id on the response envelope.
+        assert_eq!(resp.default_model_id, Some(DEFAULT_MODEL.to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_models_default_model_id_none_when_default_missing() {
+        // Mock that returns chat-capable ids but does NOT include DEFAULT_MODEL.
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                Json(json!({
+                    "data": [
+                        {"id": "gpt-4-turbo", "object": "model"},
+                        {"id": "o1-preview", "object": "model"}
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = OpenAiProvider::builder()
+            .api_key("test")
+            .base_url(format!("http://{addr}"))
+            .build()
+            .unwrap();
+        let resp = provider.list_models().await.unwrap();
+        assert!(!resp.models.iter().any(|m| m.id == DEFAULT_MODEL));
+        assert_eq!(resp.default_model_id, None);
     }
 
     #[tokio::test]
     async fn list_models_propagates_http_failure() {
         let app = Router::new().route(
             "/v1/models",
-            get(|| async { (axum::http::StatusCode::UNAUTHORIZED, "no auth") }),
+            get(|| async {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    r#"{"error":"invalid_api_key"}"#,
+                )
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -436,5 +494,12 @@ mod list_models_tests {
         let err = provider.list_models().await.expect_err("must fail on 401");
         assert!(matches!(err.kind, ErrorKind::Network), "kind: {:?}", err);
         assert!(err.message.contains("HTTP 401"), "msg: {}", err.message);
+        // The response body must show up in the error so a user staring at
+        // the TUI note can tell `invalid_api_key` from `model_overloaded`.
+        assert!(
+            err.message.contains("invalid_api_key"),
+            "msg: {}",
+            err.message
+        );
     }
 }

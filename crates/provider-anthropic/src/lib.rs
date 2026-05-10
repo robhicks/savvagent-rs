@@ -130,21 +130,19 @@ impl ProviderHandler for AnthropicProvider {
                     id: "claude-opus-4-5".into(),
                     display_name: Some("Claude Opus 4.5".into()),
                     context_window: Some(200_000),
-                    default: false,
                 },
                 ModelInfo {
                     id: "claude-sonnet-4-5".into(),
                     display_name: Some("Claude Sonnet 4.5".into()),
                     context_window: Some(200_000),
-                    default: false,
                 },
                 ModelInfo {
                     id: "claude-haiku-4-5".into(),
                     display_name: Some("Claude Haiku 4.5".into()),
                     context_window: Some(200_000),
-                    default: true,
                 },
             ],
+            default_model_id: Some("claude-haiku-4-5".into()),
         })
     }
 
@@ -373,8 +371,6 @@ mod tests {
             ids.iter().any(|id| id.starts_with("claude-sonnet-")),
             "{ids:?}"
         );
-        let defaults: Vec<_> = resp.models.iter().filter(|m| m.default).collect();
-        assert_eq!(defaults.len(), 1, "exactly one model is the default");
-        assert_eq!(defaults[0].id, "claude-haiku-4-5");
+        assert_eq!(resp.default_model_id, Some("claude-haiku-4-5".into()));
     }
 }

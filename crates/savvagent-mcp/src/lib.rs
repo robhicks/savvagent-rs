@@ -40,13 +40,13 @@ pub trait ProviderClient: Send + Sync {
     /// List the models the underlying provider advertises.
     ///
     /// The default impl returns a [`ProviderError`] with kind
-    /// [`ErrorKind::Internal`](savvagent_protocol::ErrorKind::Internal) so
-    /// hosts can detect "not advertised" and fall through to optimistic
+    /// [`ErrorKind::NotImplemented`](savvagent_protocol::ErrorKind::NotImplemented)
+    /// so hosts can detect "not advertised" and fall through to optimistic
     /// model selection.
     async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
         Err(ProviderError {
-            kind: savvagent_protocol::ErrorKind::Internal,
-            message: "provider does not advertise list_models".into(),
+            kind: savvagent_protocol::ErrorKind::NotImplemented,
+            message: "list_models not implemented by this provider".into(),
             retry_after_ms: None,
             provider_code: None,
         })
@@ -73,12 +73,12 @@ pub trait ProviderHandler: Send + Sync {
     /// List the models this provider can serve.
     ///
     /// The default impl returns a [`ProviderError`] with kind
-    /// [`ErrorKind::Internal`](savvagent_protocol::ErrorKind::Internal) and a
-    /// message hosts treat as "list_models not advertised". Providers that
-    /// can enumerate models should override this method.
+    /// [`ErrorKind::NotImplemented`](savvagent_protocol::ErrorKind::NotImplemented)
+    /// and a message hosts treat as "list_models not advertised". Providers
+    /// that can enumerate models should override this method.
     async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
         Err(ProviderError {
-            kind: savvagent_protocol::ErrorKind::Internal,
+            kind: savvagent_protocol::ErrorKind::NotImplemented,
             message: "list_models not implemented by this provider".into(),
             retry_after_ms: None,
             provider_code: None,
@@ -224,7 +224,10 @@ mod tests {
             .list_models()
             .await
             .expect_err("default impl errors");
-        assert!(matches!(err.kind, savvagent_protocol::ErrorKind::Internal));
+        assert!(matches!(
+            err.kind,
+            savvagent_protocol::ErrorKind::NotImplemented
+        ));
         assert!(
             err.message.contains("list_models"),
             "message: {}",
@@ -250,8 +253,8 @@ mod tests {
                         id: "delegated".into(),
                         display_name: None,
                         context_window: None,
-                        default: true,
                     }],
+                    default_model_id: Some("delegated".into()),
                 })
             }
         }
@@ -262,6 +265,6 @@ mod tests {
             .expect("delegation should succeed");
         assert_eq!(resp.models.len(), 1);
         assert_eq!(resp.models[0].id, "delegated");
-        assert!(resp.models[0].default);
+        assert_eq!(resp.default_model_id, Some("delegated".into()));
     }
 }

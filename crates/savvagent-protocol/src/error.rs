@@ -48,6 +48,10 @@ pub enum ErrorKind {
     Refusal,
     /// Network failure between provider server and vendor API.
     Network,
+    /// The provider does not implement the requested tool (e.g. `list_models`).
+    /// Hosts treat this as "fall through to optimistic path" rather than a real
+    /// error.
+    NotImplemented,
     /// Anything else.
     Internal,
 }

@@ -169,12 +169,9 @@ impl ProviderHandler for OllamaProvider {
             .await
             .map_err(map_reqwest_error)?;
         if !resp.status().is_success() {
-            return Err(ProviderError {
-                kind: ErrorKind::Network,
-                message: format!("Ollama /api/tags returned HTTP {}", resp.status()),
-                retry_after_ms: None,
-                provider_code: None,
-            });
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_status_error("Ollama /api/tags", status, body));
         }
         #[derive(serde::Deserialize)]
         struct Tags {
@@ -190,20 +187,24 @@ impl ProviderHandler for OllamaProvider {
             retry_after_ms: None,
             provider_code: None,
         })?;
+        let models: Vec<ModelInfo> = tags
+            .models
+            .into_iter()
+            .map(|t| ModelInfo {
+                id: t.name.clone(),
+                display_name: Some(t.name),
+                context_window: None,
+            })
+            .collect();
+        // Advertise DEFAULT_MODEL as the default only when it appears in tags;
+        // a user that hasn't pulled `llama3.2` shouldn't see it as default.
+        let default_model_id = models
+            .iter()
+            .any(|m| m.id == DEFAULT_MODEL)
+            .then(|| DEFAULT_MODEL.to_string());
         Ok(ListModelsResponse {
-            models: tags
-                .models
-                .into_iter()
-                .map(|t| {
-                    let is_default = t.name == DEFAULT_MODEL;
-                    ModelInfo {
-                        id: t.name.clone(),
-                        display_name: Some(t.name),
-                        context_window: None,
-                        default: is_default,
-                    }
-                })
-                .collect(),
+            models,
+            default_model_id,
         })
     }
 
@@ -257,6 +258,27 @@ fn map_reqwest_error(e: reqwest::Error) -> ProviderError {
     ProviderError {
         kind,
         message: e.to_string(),
+        retry_after_ms: None,
+        provider_code: None,
+    }
+}
+
+/// Build a `Network`-kind [`ProviderError`] that surfaces the response body
+/// alongside the HTTP status, truncated at 512 bytes.
+fn http_status_error(label: &str, status: reqwest::StatusCode, body: String) -> ProviderError {
+    let truncated = if body.len() > 512 {
+        format!("{}…", &body[..512])
+    } else {
+        body
+    };
+    let message = if truncated.is_empty() {
+        format!("{label} returned HTTP {status}")
+    } else {
+        format!("{label} returned HTTP {status}: {truncated}")
+    };
+    ProviderError {
+        kind: ErrorKind::Network,
+        message,
         retry_after_ms: None,
         provider_code: None,
     }
@@ -394,16 +416,44 @@ mod list_models_tests {
         let resp = provider.list_models().await.unwrap();
         let ids: Vec<_> = resp.models.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["llama3.2", "qwen2.5-coder:7b"]);
-        // `llama3.2` matches DEFAULT_MODEL so it's flagged as default.
-        assert!(resp.models[0].default);
-        assert!(!resp.models[1].default);
+        // `llama3.2` matches DEFAULT_MODEL so it's advertised as the default.
+        assert_eq!(resp.default_model_id, Some(DEFAULT_MODEL.to_string()));
+    }
+
+    #[tokio::test]
+    async fn list_models_default_model_id_none_when_not_pulled() {
+        let app = Router::new().route(
+            "/api/tags",
+            get(|| async {
+                Json(json!({
+                    "models": [
+                        {"name": "qwen2.5-coder:7b", "model": "qwen2.5-coder:7b", "size": 0}
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = provider_for_tests(format!("http://{addr}"));
+        let resp = provider.list_models().await.unwrap();
+        assert!(!resp.models.iter().any(|m| m.id == DEFAULT_MODEL));
+        assert_eq!(resp.default_model_id, None);
     }
 
     #[tokio::test]
     async fn list_models_propagates_http_failure() {
         let app = Router::new().route(
             "/api/tags",
-            get(|| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+            get(|| async {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    r#"{"error":"ollama_overloaded"}"#,
+                )
+            }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -415,5 +465,10 @@ mod list_models_tests {
         let err = provider.list_models().await.expect_err("must fail on 5xx");
         assert!(matches!(err.kind, ErrorKind::Network), "kind: {:?}", err);
         assert!(err.message.contains("HTTP 500"), "msg: {}", err.message);
+        assert!(
+            err.message.contains("ollama_overloaded"),
+            "msg: {}",
+            err.message
+        );
     }
 }

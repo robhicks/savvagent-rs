@@ -1175,7 +1175,6 @@ mod model_validation_tests {
             id: id.to_string(),
             display_name: None,
             context_window: None,
-            default: false,
         }
     }
 
