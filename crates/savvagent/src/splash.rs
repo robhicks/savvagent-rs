@@ -10,6 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph},
 };
+use savvagent_host::SandboxConfig;
 
 /// How long the splash lingers before auto-dismissing.
 pub const SPLASH_DURATION: Duration = Duration::from_secs(3);
@@ -38,6 +39,8 @@ pub fn render(frame: &mut Frame, area: Rect) {
     let hint_style = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::ITALIC);
+    let sandbox_on_style = Style::default().fg(Color::Green);
+    let sandbox_off_style = Style::default().fg(Color::Yellow);
 
     let mut lines: Vec<Line<'static>> = LOGO
         .iter()
@@ -46,6 +49,22 @@ pub fn render(frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(TAGLINE, tagline_style)).centered());
     lines.push(Line::from(""));
+
+    let sandbox_cfg = SandboxConfig::load();
+    let (sandbox_text, sandbox_style) = if sandbox_cfg.enabled {
+        (
+            "sandbox: on (use /sandbox off to disable)",
+            sandbox_on_style,
+        )
+    } else {
+        (
+            "sandbox: off (use /sandbox on to enable)",
+            sandbox_off_style,
+        )
+    };
+    lines.push(Line::from(Span::styled(sandbox_text, sandbox_style)).centered());
+    lines.push(Line::from(""));
+
     lines.push(
         Line::from(Span::styled(
             format!("{HINT} · v{}", env!("CARGO_PKG_VERSION")),

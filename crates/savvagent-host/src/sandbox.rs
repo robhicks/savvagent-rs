@@ -2,8 +2,11 @@
 //!
 //! Each tool child process can be wrapped in an OS sandbox so that it cannot
 //! access the network or write outside the project root even if the tool binary
-//! itself is compromised. Sandboxing is **opt-in** for v0.5.0 — set
-//! [`SandboxConfig::enabled`] to `true` to activate it.
+//! itself is compromised. Sandboxing is **default-on** as of v0.7.0 on Linux
+//! and macOS — set [`SandboxConfig::enabled`] to `false` (or run `/sandbox
+//! off`) to opt out. Existing configs that explicitly set `enabled = false`
+//! are preserved across upgrade via the struct-level `#[serde(default)]` on
+//! [`SandboxConfig`].
 //!
 //! # Platform support
 //!
@@ -56,10 +59,15 @@ pub struct ToolSandboxOverride {
 }
 
 /// Sandbox configuration. Persisted to `~/.savvagent/sandbox.toml`.
+///
+/// The struct-level `#[serde(default)]` means any missing field is populated
+/// from `SandboxConfig::default()` — so a partial `sandbox.toml` (e.g. only
+/// `allow_net = false`) inherits the v0.7 default-on `enabled = true` rather
+/// than failing with a missing-field error or silently flipping to `false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SandboxConfig {
-    /// Whether to apply OS-level sandboxing to tool spawns. Default: `false`.
-    #[serde(default)]
+    /// Whether to apply OS-level sandboxing to tool spawns. Default (v0.7+): `true`.
     pub enabled: bool,
 
     /// Allow network access for all tools when sandboxed. Default: `false`.
@@ -68,34 +76,26 @@ pub struct SandboxConfig {
     /// because many bash commands require network (curl, cargo, etc.). To
     /// sandbox bash off the network, set `allow_net = false` explicitly in
     /// `tool_overrides["tool-bash"]`.
-    #[serde(default)]
     pub allow_net: bool,
 
     /// Per-tool override map. Key is a substring of the tool binary path
     /// (e.g. `"tool-bash"` matches any path containing `tool-bash`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub tool_overrides: HashMap<String, ToolSandboxOverride>,
 
     /// Additional paths to bind read-write inside the sandbox for all tools.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_binds: Vec<PathBuf>,
 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
-        let mut tool_overrides = HashMap::new();
-        // tool-bash needs network for curl, cargo, package managers, etc.
-        tool_overrides.insert(
-            "tool-bash".to_string(),
-            ToolSandboxOverride {
-                allow_net: Some(true),
-                extra_binds: Vec::new(),
-            },
-        );
         Self {
-            enabled: false,
+            // v0.7: default-on. Existing `enabled = false` configs are
+            // preserved via `#[serde(default)]` on the struct (Task 14.3).
+            enabled: true,
             allow_net: false,
-            tool_overrides,
+            tool_overrides: HashMap::new(),
             extra_binds: Vec::new(),
         }
     }
@@ -128,11 +128,25 @@ impl SandboxConfig {
     /// Resolve whether network should be allowed for a tool identified by its
     /// binary path.
     pub fn net_allowed_for(&self, tool_bin: &Path) -> bool {
-        if let Some(ov) = self.find_override(tool_bin) {
-            if let Some(net) = ov.allow_net {
-                return net;
+        let bin_str = tool_bin.to_string_lossy();
+
+        // User-defined overrides take precedence.
+        for (key, ov) in &self.tool_overrides {
+            if bin_str.contains(key.as_str()) {
+                if let Some(net) = ov.allow_net {
+                    return net;
+                }
             }
         }
+
+        // Built-in per-tool defaults. `tool-bash` needs network for cargo /
+        // npm / curl unless globally denied or per-user overridden.
+        // PR 15 replaces this with a runtime permission decision via the
+        // permissions layer.
+        if bin_str.contains("tool-bash") {
+            return true;
+        }
+
         self.allow_net
     }
 
@@ -159,8 +173,16 @@ fn load_from_path(path: &Path) -> SandboxConfig {
         Ok(text) => match toml::from_str::<SandboxConfig>(&text) {
             Ok(cfg) => cfg,
             Err(e) => {
-                tracing::debug!("sandbox.toml parse error (using defaults): {e}");
-                SandboxConfig::default()
+                tracing::warn!(
+                    "sandbox.toml at {} failed to parse: {e}. Falling back to \
+                     disabled to preserve any prior opt-out intent. Fix the file \
+                     and reload to re-enable.",
+                    path.display()
+                );
+                SandboxConfig {
+                    enabled: false,
+                    ..SandboxConfig::default()
+                }
             }
         },
         Err(_) => SandboxConfig::default(),
@@ -575,10 +597,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn config_on() -> SandboxConfig {
-        SandboxConfig {
-            enabled: true,
-            ..SandboxConfig::default()
-        }
+        // v0.7 default-on: the new `SandboxConfig::default()` already has
+        // `enabled = true`, so this helper is equivalent to `default()`.
+        SandboxConfig::default()
     }
 
     fn config_off() -> SandboxConfig {
@@ -606,20 +627,52 @@ mod tests {
     }
 
     #[test]
-    fn default_config_has_sandboxing_disabled() {
+    fn default_config_has_sandboxing_enabled() {
         let cfg = SandboxConfig::default();
-        assert!(!cfg.enabled);
+        assert!(
+            cfg.enabled,
+            "v0.7 default-on: SandboxConfig::default() must have enabled=true"
+        );
     }
 
     #[test]
-    fn default_config_tool_bash_gets_net_override() {
+    fn default_config_grants_tool_bash_net_via_builtin_fallback() {
         let cfg = SandboxConfig::default();
-        let bash_bin = PathBuf::from("/usr/local/bin/savvagent-tool-bash");
-        // tool-bash should have network allowed even when global allow_net = false.
-        assert!(!cfg.allow_net, "global allow_net should default false");
         assert!(
-            cfg.net_allowed_for(&bash_bin),
-            "tool-bash override should allow net"
+            cfg.tool_overrides.is_empty(),
+            "default no longer populates tool_overrides — built-in fallback handles tool-bash"
+        );
+        assert!(
+            cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-bash")),
+            "tool-bash must still get net access via the built-in fallback"
+        );
+        // Non-bash tools still inherit the global allow_net = false.
+        assert!(
+            !cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-fs")),
+            "non-bash tools should not get net by default"
+        );
+    }
+
+    #[test]
+    fn user_tool_overrides_do_not_drop_tool_bash_net_default() {
+        // User provides an override for tool-fs only. The tool-bash net
+        // default must survive (built-in fallback, not Default impl).
+        let toml_str = r#"
+            enabled = true
+            allow_net = false
+
+            [tool_overrides.tool-fs]
+            allow_net = false
+            extra_binds = ["/data"]
+        "#;
+        let cfg: SandboxConfig = toml::from_str(toml_str).unwrap();
+        assert!(
+            cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-bash")),
+            "tool-bash net access must survive a user override for a different tool"
+        );
+        assert!(
+            !cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-fs")),
+            "tool-fs's user override must be respected"
         );
     }
 
@@ -1018,6 +1071,52 @@ mod tests {
         assert_eq!(
             total, 5,
             "expected 2 (--tmpfs, .ssh) + 3 (--ro-bind, /dev/null, .netrc) = 5 args, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn load_from_path_returns_default_on_when_file_absent() {
+        let td = tempfile::TempDir::new().unwrap();
+        let missing = td.path().join("does-not-exist.toml");
+        let cfg = load_from_path(&missing);
+        assert!(cfg.enabled, "absent file must default to enabled=true");
+    }
+
+    #[test]
+    fn load_from_path_preserves_explicit_enabled_false() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        std::fs::write(&path, "enabled = false\n").unwrap();
+        let cfg = load_from_path(&path);
+        assert!(
+            !cfg.enabled,
+            "explicit `enabled = false` must survive upgrade"
+        );
+    }
+
+    #[test]
+    fn load_from_path_partial_file_defaults_enabled_true() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        // No `enabled` key — only an unrelated field.
+        std::fs::write(&path, "allow_net = false\n").unwrap();
+        let cfg = load_from_path(&path);
+        assert!(
+            cfg.enabled,
+            "partial file with no `enabled` key must default to enabled=true"
+        );
+    }
+
+    #[test]
+    fn load_from_path_falls_back_to_disabled_on_parse_error() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        // Malformed TOML — unclosed string.
+        std::fs::write(&path, "enabled = \"unclosed\n").unwrap();
+        let cfg = load_from_path(&path);
+        assert!(
+            !cfg.enabled,
+            "parse error must fall back to disabled (fail-safe), not default-on"
         );
     }
 

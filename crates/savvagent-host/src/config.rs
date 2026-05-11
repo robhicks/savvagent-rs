@@ -55,8 +55,9 @@ pub struct HostConfig {
     /// OS-level sandbox configuration for tool spawns (Layer 3).
     ///
     /// When `None`, the host loads `~/.savvagent/sandbox.toml` via
-    /// [`SandboxConfig::load`]. Sandboxing is disabled by default
-    /// (`SandboxConfig::enabled = false`); set it to `true` to activate.
+    /// [`SandboxConfig::load`]. Sandboxing is enabled by default on Linux and
+    /// macOS as of v0.7 (`SandboxConfig::enabled = true`); set it to `false`
+    /// to disable, or run `/sandbox off` in the TUI.
     pub sandbox: Option<SandboxConfig>,
 }
 
@@ -116,7 +117,8 @@ impl HostConfig {
     }
 
     /// Override the sandbox configuration. When unset, the host loads
-    /// `~/.savvagent/sandbox.toml` at startup (default: disabled).
+    /// `~/.savvagent/sandbox.toml` at startup. Sandboxing is enabled by
+    /// default on Linux and macOS as of v0.7.
     pub fn with_sandbox(mut self, sandbox: SandboxConfig) -> Self {
         self.sandbox = Some(sandbox);
         self
