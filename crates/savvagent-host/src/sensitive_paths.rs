@@ -24,6 +24,21 @@
 
 use std::path::PathBuf;
 
+/// Path stems under `$HOME` whose contents must be treated as sensitive.
+/// Used as the single source of truth by both [`sensitive_paths_for_user`]
+/// (which joins each entry against `$HOME` for the OS sandbox overlay)
+/// and [`is_sensitive_path`] (which checks whether an arbitrary path
+/// falls under any of these stems).
+const SENSITIVE_HOME_STEMS: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".netrc",
+    ".mozilla",
+    ".config/gh",
+    ".config/google-chrome",
+];
+
 /// Sensitive directories under `$HOME` whose contents must not be readable
 /// by tool spawns. Returned paths are absolute and pre-expanded against
 /// the current user's home directory. Paths that do not exist on disk are
@@ -32,15 +47,10 @@ pub fn sensitive_paths_for_user() -> Vec<PathBuf> {
     let Some(home) = home_dir() else {
         return Vec::new();
     };
-    let mut candidates: Vec<PathBuf> = vec![
-        home.join(".ssh"),
-        home.join(".aws"),
-        home.join(".gnupg"),
-        home.join(".netrc"),
-        home.join(".config").join("gh"),
-        home.join(".mozilla"),
-        home.join(".config").join("google-chrome"),
-    ];
+    let mut candidates: Vec<PathBuf> = SENSITIVE_HOME_STEMS
+        .iter()
+        .map(|stem| home.join(stem))
+        .collect();
     if cfg!(target_os = "macos") {
         candidates.push(
             home.join("Library")
@@ -79,24 +89,12 @@ fn dotenv_match(path: &str) -> bool {
 }
 
 fn sensitive_segment_match(path: &str) -> bool {
-    const SEGMENTS: &[&str] = &[
-        ".ssh", ".aws", ".gnupg", ".netrc", ".mozilla", "google-chrome",
-    ];
-    for seg in SEGMENTS {
-        if path == *seg
-            || path.starts_with(&format!("{seg}/"))
-            || path.contains(&format!("/{seg}/"))
-            || path.ends_with(&format!("/{seg}"))
-        {
-            return true;
-        }
-    }
-    // Special-case ~/.config/gh — `gh` is too short to match
-    // unqualified, so require the `.config/gh` segment combination.
-    path == ".config/gh"
-        || path.starts_with(".config/gh/")
-        || path.contains("/.config/gh/")
-        || path.ends_with("/.config/gh")
+    SENSITIVE_HOME_STEMS.iter().any(|stem| {
+        path == *stem
+            || path.starts_with(&format!("{stem}/"))
+            || path.contains(&format!("/{stem}/"))
+            || path.ends_with(&format!("/{stem}"))
+    })
 }
 
 fn home_dir() -> Option<PathBuf> {
