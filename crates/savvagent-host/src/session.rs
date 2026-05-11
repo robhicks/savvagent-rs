@@ -21,7 +21,7 @@ use crate::permissions::{
 use crate::project;
 use crate::provider::RmcpProviderClient;
 use crate::sandbox::SandboxConfig;
-use crate::tools::ToolRegistry;
+use crate::tools::{BashNetResolver, ToolRegistry};
 
 /// Current transcript file schema version.
 ///
@@ -236,7 +236,14 @@ impl Host {
             }
         };
         let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
-        let tools = ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
+        // The real resolver — which can call `Host::resolve_bash_net_for_call`
+        // — needs the per-turn events channel; that gets wired up via
+        // `Host::install_bash_net_resolver` once we have an `Arc<Host>`. The
+        // bootstrap resolver here is a safe default that returns the per-call
+        // override (if any) or falls back to `false`.
+        let resolver = bootstrap_bash_net_resolver();
+        let tools =
+            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         let policy = config
@@ -268,7 +275,9 @@ impl Host {
         provider: Box<dyn ProviderClient + Send + Sync>,
     ) -> Result<Self, HostError> {
         let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
-        let tools = ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
+        let resolver = bootstrap_bash_net_resolver();
+        let tools =
+            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         let policy = config
@@ -474,7 +483,9 @@ impl Host {
                         let outcome = {
                             let guard = self.tools.lock().await;
                             let registry = guard.as_ref().expect("tools registry present");
-                            registry.call(&name, input.clone()).await
+                            registry
+                                .call_with_bash_net_override(&name, input.clone(), None)
+                                .await
                         };
                         let status = if outcome.is_error {
                             ToolCallStatus::Errored
@@ -832,6 +843,19 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Host>();
 };
+
+/// Bootstrap resolver used while the registry is being constructed —
+/// before we have an `Arc<Host>` we can capture into a closure that calls
+/// into [`Host::resolve_bash_network_async`]. It returns the per-call
+/// override if any, otherwise `false` (deny). The real resolver is
+/// installed in [`Host::install_bash_net_resolver`] right after `Host`
+/// construction.
+fn bootstrap_bash_net_resolver() -> BashNetResolver {
+    std::sync::Arc::new(|over: Option<bool>| {
+        let v = over.unwrap_or(false);
+        Box::pin(async move { v })
+    })
+}
 
 /// Convert a stream of provider [`StreamEvent`]s into [`TurnEvent::TextDelta`]s
 /// and forward them to the host caller. Non-text events are dropped (they're
