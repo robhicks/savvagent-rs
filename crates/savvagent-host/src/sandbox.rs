@@ -56,10 +56,15 @@ pub struct ToolSandboxOverride {
 }
 
 /// Sandbox configuration. Persisted to `~/.savvagent/sandbox.toml`.
+///
+/// The struct-level `#[serde(default)]` means any missing field is populated
+/// from `SandboxConfig::default()` — so a partial `sandbox.toml` (e.g. only
+/// `allow_net = false`) inherits the v0.7 default-on `enabled = true` rather
+/// than failing with a missing-field error or silently flipping to `false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SandboxConfig {
-    /// Whether to apply OS-level sandboxing to tool spawns. Default: `false`.
-    #[serde(default)]
+    /// Whether to apply OS-level sandboxing to tool spawns. Default (v0.7+): `true`.
     pub enabled: bool,
 
     /// Allow network access for all tools when sandboxed. Default: `false`.
@@ -68,16 +73,15 @@ pub struct SandboxConfig {
     /// because many bash commands require network (curl, cargo, etc.). To
     /// sandbox bash off the network, set `allow_net = false` explicitly in
     /// `tool_overrides["tool-bash"]`.
-    #[serde(default)]
     pub allow_net: bool,
 
     /// Per-tool override map. Key is a substring of the tool binary path
     /// (e.g. `"tool-bash"` matches any path containing `tool-bash`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub tool_overrides: HashMap<String, ToolSandboxOverride>,
 
     /// Additional paths to bind read-write inside the sandbox for all tools.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_binds: Vec<PathBuf>,
 }
 
@@ -1038,6 +1042,19 @@ mod tests {
         std::fs::write(&path, "enabled = false\n").unwrap();
         let cfg = load_from_path(&path);
         assert!(!cfg.enabled, "explicit `enabled = false` must survive upgrade");
+    }
+
+    #[test]
+    fn load_from_path_partial_file_defaults_enabled_true() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        // No `enabled` key — only an unrelated field.
+        std::fs::write(&path, "allow_net = false\n").unwrap();
+        let cfg = load_from_path(&path);
+        assert!(
+            cfg.enabled,
+            "partial file with no `enabled` key must default to enabled=true"
+        );
     }
 
     #[test]
