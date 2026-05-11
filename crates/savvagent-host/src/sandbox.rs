@@ -304,6 +304,15 @@ fn apply_linux(
     // New session to prevent the tool from sending signals to the terminal.
     wrapper_args.push("--new-session".into());
 
+    // Read-side deny floor: hide $HOME secrets from the spawn. The set of
+    // paths is the single source of truth declared by
+    // `sensitive_paths::sensitive_paths_for_user`.
+    for sensitive in crate::sensitive_paths::sensitive_paths_for_user() {
+        for arg in hide_mount_args(&sensitive) {
+            wrapper_args.push(arg.into());
+        }
+    }
+
     // Separator and then the original command.
     wrapper_args.push("--".into());
     wrapper_args.push(orig_program);
@@ -483,7 +492,7 @@ fn canonical_or_original(p: &Path) -> Option<PathBuf> {
 ///   (read returns 0 bytes; writes fail with EACCES).
 ///
 /// Symlinks are followed before classifying — `~/.aws` → real dir works.
-#[allow(dead_code)] // wired into apply_linux in Task 13.7
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn hide_mount_args(path: &Path) -> Vec<String> {
     let resolved = match std::fs::canonicalize(path) {
         Ok(p) => p,
@@ -910,6 +919,50 @@ mod tests {
         let missing = td.path().join("nonexistent");
         let args = hide_mount_args(&missing);
         assert!(args.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn apply_linux_includes_sensitive_path_overlays() {
+        // Create a fake $HOME with one sensitive directory and one sensitive file
+        // so the helper actually has paths to mask.
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(home.path().join(".ssh")).unwrap();
+        std::fs::write(home.path().join(".netrc"), "secret\n").unwrap();
+        let prev_home = std::env::var_os("HOME");
+        // SAFETY: this test temporarily mutates HOME. There is no production
+        // alternative because apply_linux must read the real env to assemble its
+        // bwrap args; the canonical_or_original tests in this file use the same
+        // pattern. Cargo runs unit tests in this binary in parallel, so the test
+        // restores HOME at the end. If a flake is observed, gate with
+        // serial_test::serial.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+
+        let project_root = tempfile::TempDir::new().unwrap();
+        let mut cmd = make_cmd("/usr/bin/echo");
+        let config = config_on();
+        let tool_bin = std::path::PathBuf::from("/path/to/tool-fs");
+        apply_sandbox(&mut cmd, &tool_bin, project_root.path(), &config);
+
+        let dbg = format!("{:?}", cmd.as_std());
+
+        unsafe {
+            match prev_home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert!(
+            dbg.contains("--tmpfs") && dbg.contains(".ssh"),
+            "expected .ssh tmpfs overlay in:\n{dbg}"
+        );
+        assert!(
+            dbg.contains("--ro-bind") && dbg.contains(".netrc"),
+            "expected .netrc ro-bind overlay in:\n{dbg}"
+        );
     }
 
     #[test]
