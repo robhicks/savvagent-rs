@@ -1032,6 +1032,15 @@ mod tests {
     }
 
     #[test]
+    fn load_from_path_preserves_explicit_enabled_false() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        std::fs::write(&path, "enabled = false\n").unwrap();
+        let cfg = load_from_path(&path);
+        assert!(!cfg.enabled, "explicit `enabled = false` must survive upgrade");
+    }
+
+    #[test]
     fn sandbox_config_roundtrips_toml() {
         let cfg = SandboxConfig {
             enabled: true,
