@@ -100,3 +100,79 @@ fn sensitive_segment_match(path: &str) -> bool {
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    struct HomeOverride {
+        _td: TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl HomeOverride {
+        fn new() -> Self {
+            let td = TempDir::new().unwrap();
+            let prev = std::env::var_os("HOME");
+            // SAFETY: tests in this module run single-threaded by default
+            // and never inspect HOME from another thread.
+            unsafe {
+                std::env::set_var("HOME", td.path());
+            }
+            Self { _td: td, prev }
+        }
+
+        fn home(&self) -> PathBuf {
+            std::env::var_os("HOME").map(PathBuf::from).unwrap()
+        }
+    }
+
+    impl Drop for HomeOverride {
+        fn drop(&mut self) {
+            // SAFETY: see HomeOverride::new.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sensitive_paths_returns_only_existing_dirs() {
+        let h = HomeOverride::new();
+        fs::create_dir_all(h.home().join(".ssh")).unwrap();
+        fs::create_dir_all(h.home().join(".aws")).unwrap();
+        // intentionally do NOT create .gnupg
+
+        let paths = sensitive_paths_for_user();
+        let names: Vec<_> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|n| n == ".ssh"));
+        assert!(names.iter().any(|n| n == ".aws"));
+        assert!(!names.iter().any(|n| n == ".gnupg"));
+    }
+
+    #[test]
+    fn sensitive_paths_returns_empty_when_no_home() {
+        let _saved = std::env::var_os("HOME");
+        // SAFETY: tests in this module run single-threaded by default
+        // and never inspect HOME from another thread.
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        let paths = sensitive_paths_for_user();
+        assert!(paths.is_empty());
+        if let Some(h) = _saved {
+            // SAFETY: see above.
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+    }
+}
