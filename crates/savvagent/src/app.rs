@@ -95,6 +95,59 @@ pub struct Command {
     pub needs_arg: bool,
 }
 
+/// Parsed `/bash` slash-command suffix. The TUI uses this to thread an
+/// optional per-call network override down to
+/// [`savvagent_host::Host::run_bash_command`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashCommand {
+    /// Per-call override of `tool-bash`'s network access. `None` means
+    /// "use the resolved permission decision".
+    pub net_override: Option<bool>,
+    /// The shell command itself, stripped of recognised flags.
+    pub command: String,
+}
+
+/// Error returned by [`parse_bash_command`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum BashCommandError {
+    /// The user typed `/bash` (or `/bash --net`) with nothing after.
+    EmptyCommand,
+}
+
+impl std::fmt::Display for BashCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BashCommandError::EmptyCommand => write!(f, "bash command is empty"),
+        }
+    }
+}
+
+impl std::error::Error for BashCommandError {}
+
+/// Parse the suffix of a `/bash` slash command. Recognises a leading
+/// `--net` / `--no-net` flag and returns the rest verbatim as `command`.
+///
+/// The flag must appear *first* — `echo --net hi` is a literal command,
+/// not a flag-prefixed invocation. This keeps quoting simple: anything
+/// after the (optional) leading flag is forwarded as-is to `bash -c`.
+pub fn parse_bash_command(input: &str) -> Result<BashCommand, BashCommandError> {
+    let trimmed = input.trim_start();
+    let (net_override, rest) = if let Some(stripped) = trimmed.strip_prefix("--net ") {
+        (Some(true), stripped.trim_start())
+    } else if let Some(stripped) = trimmed.strip_prefix("--no-net ") {
+        (Some(false), stripped.trim_start())
+    } else {
+        (None, trimmed)
+    };
+    if rest.is_empty() {
+        return Err(BashCommandError::EmptyCommand);
+    }
+    Ok(BashCommand {
+        net_override,
+        command: rest.to_string(),
+    })
+}
+
 /// Outcome of [`App::select_command`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandSelection {
@@ -406,6 +459,12 @@ impl App {
                 description: "Show sandbox status (`/sandbox on` or `/sandbox off` to toggle)"
                     .into(),
                 needs_arg: false,
+            },
+            Command {
+                name: "/bash".into(),
+                description: "Run a shell command (use `--net` / `--no-net` to override network)"
+                    .into(),
+                needs_arg: true,
             },
             Command {
                 name: "/quit".into(),
@@ -1023,5 +1082,47 @@ mod tests {
         let req = app.pending_permission.expect("pending should be set");
         assert_eq!(req.id, 42);
         assert_eq!(req.name, "run");
+    }
+
+    #[test]
+    fn bash_command_parses_net_flag() {
+        let p = parse_bash_command("--net curl https://example.com").unwrap();
+        assert_eq!(p.net_override, Some(true));
+        assert_eq!(p.command, "curl https://example.com");
+    }
+
+    #[test]
+    fn bash_command_parses_no_net_flag() {
+        let p = parse_bash_command("--no-net ls /tmp").unwrap();
+        assert_eq!(p.net_override, Some(false));
+        assert_eq!(p.command, "ls /tmp");
+    }
+
+    #[test]
+    fn bash_command_without_flag_has_no_override() {
+        let p = parse_bash_command("ls /tmp").unwrap();
+        assert_eq!(p.net_override, None);
+        assert_eq!(p.command, "ls /tmp");
+    }
+
+    #[test]
+    fn bash_command_flag_only_recognised_at_start() {
+        // A --net mid-command is part of the command body.
+        let p = parse_bash_command("echo --net hi").unwrap();
+        assert_eq!(p.net_override, None);
+        assert_eq!(p.command, "echo --net hi");
+    }
+
+    #[test]
+    fn bash_command_empty_after_flag_is_an_error() {
+        assert!(parse_bash_command("--net   ").is_err());
+        assert!(parse_bash_command("").is_err());
+    }
+
+    #[test]
+    fn bash_command_leading_whitespace_trimmed() {
+        let p = parse_bash_command("   --net  echo hi").unwrap();
+        assert_eq!(p.net_override, Some(true));
+        assert_eq!(p.command, "echo hi");
     }
 }

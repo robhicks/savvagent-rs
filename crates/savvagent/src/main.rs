@@ -32,12 +32,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use app::{App, CommandSelection, Entry, InputMode, collect_transcript_entries};
+use app::{
+    App, CommandSelection, Entry, InputMode, collect_transcript_entries, parse_bash_command,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
 use savvagent_host::{
-    Host, HostConfig, PermissionDecision, ProviderEndpoint, SandboxConfig, ToolEndpoint,
-    TranscriptError, TurnEvent,
+    Host, HostConfig, PermissionDecision, ProviderEndpoint, SandboxConfig, ToolCallStatus,
+    ToolEndpoint, TranscriptError, TurnEvent,
 };
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
@@ -48,6 +50,10 @@ enum WorkerMsg {
     Event(TurnEvent),
     /// Sent if `run_turn_streaming` returned an error.
     Error(String),
+    /// Sent when a `/bash` direct-invocation worker finishes (success or
+    /// error). The main loop uses this to clear `app.is_loading`, mirroring
+    /// the `TurnComplete` path for model-driven turns.
+    BashDone,
 }
 
 type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
@@ -353,12 +359,16 @@ async fn dispatch_slash_command(
     host_slot: &HostSlot,
     project_root: &Path,
     tool_bins: &ToolBins,
+    worker_tx: &mpsc::Sender<WorkerMsg>,
 ) {
     let trimmed = cmd.trim_start();
-    let (head, rest) = match trimmed.split_once(char::is_whitespace) {
-        Some((h, r)) => (h, r.trim()),
+    // `/bash` preserves the unparsed remainder verbatim (no `trim()` on
+    // `rest`) so quoting like `--net   curl …` survives.
+    let (head, rest_raw) = match trimmed.split_once(char::is_whitespace) {
+        Some((h, r)) => (h, r),
         None => (trimmed, ""),
     };
+    let rest = rest_raw.trim();
 
     match head {
         "/tools" => {
@@ -375,6 +385,10 @@ async fn dispatch_slash_command(
         }
         "/sandbox" => {
             handle_sandbox_command(app, rest, host_slot).await;
+            return;
+        }
+        "/bash" => {
+            handle_bash_slash_command(app, rest_raw, host_slot, worker_tx).await;
             return;
         }
         _ => {}
@@ -796,6 +810,106 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
     }
 }
 
+/// `/bash <cmd>` — run `cmd` through `tool-bash` without round-tripping
+/// through the provider. `--net` / `--no-net` flags at the front of `rest`
+/// override the bash-network policy for this call only.
+///
+/// The call is dispatched on a worker task; its
+/// [`TurnEvent`]s — most importantly any
+/// [`TurnEvent::BashNetworkRequested`] the resolver emits — are forwarded
+/// to the main loop's worker channel so the modal flow stays unchanged.
+async fn handle_bash_slash_command(
+    app: &mut App,
+    rest_raw: &str,
+    host_slot: &HostSlot,
+    worker_tx: &mpsc::Sender<WorkerMsg>,
+) {
+    let parsed = match parse_bash_command(rest_raw) {
+        Ok(p) => p,
+        Err(_) => {
+            app.push_note(
+                "Usage: /bash [--net|--no-net] <command>. Example: /bash --net curl https://example.com",
+            );
+            return;
+        }
+    };
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note("Not connected — `/connect` first, then `/bash <command>`.");
+        return;
+    };
+    if app.is_loading {
+        app.push_note("Cannot /bash during an in-flight turn — wait for it to finish.");
+        return;
+    }
+
+    // Surface the invocation in the transcript so its eventual result is
+    // attached to a visible Tool entry (matches how model-driven calls
+    // render).
+    app.entries.push(Entry::Tool {
+        name: "run".to_string(),
+        arguments: format!("/bash {}", parsed.command),
+        status: None,
+        result_preview: None,
+    });
+    app.is_loading = true;
+    app.update_metrics();
+
+    let tx = worker_tx.clone();
+    let command = parsed.command.clone();
+    let net_override = parsed.net_override;
+    tokio::spawn(async move {
+        let (ev_tx, mut ev_rx) = mpsc::channel::<TurnEvent>(8);
+        let host_for_run = host.clone();
+        let runner = tokio::spawn(async move {
+            host_for_run
+                .run_bash_command(&command, net_override, Some(ev_tx))
+                .await
+        });
+        // Forward bash-network prompt events into the main loop. The
+        // forwarder exits when `ev_tx` is dropped (i.e. the runner
+        // returns).
+        let forwarder_tx = tx.clone();
+        let forwarder = tokio::spawn(async move {
+            while let Some(ev) = ev_rx.recv().await {
+                if forwarder_tx.send(WorkerMsg::Event(ev)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let outcome = runner.await;
+        // Forwarder will drain on ev_tx drop; join it so we don't race a
+        // dangling event past the final ToolCallFinished.
+        let _ = forwarder.await;
+        match outcome {
+            Ok(Ok((is_error, payload))) => {
+                let status = if is_error {
+                    ToolCallStatus::Errored
+                } else {
+                    ToolCallStatus::Ok
+                };
+                let _ = tx
+                    .send(WorkerMsg::Event(TurnEvent::ToolCallFinished {
+                        name: "run".into(),
+                        status,
+                        result: payload,
+                    }))
+                    .await;
+                let _ = tx.send(WorkerMsg::BashDone).await;
+            }
+            Ok(Err(msg)) => {
+                let _ = tx.send(WorkerMsg::Error(format!("/bash: {msg}"))).await;
+                let _ = tx.send(WorkerMsg::BashDone).await;
+            }
+            Err(join_err) => {
+                let _ = tx
+                    .send(WorkerMsg::Error(format!("/bash worker failed: {join_err}")))
+                    .await;
+                let _ = tx.send(WorkerMsg::BashDone).await;
+            }
+        }
+    });
+}
+
 fn fmt_overrides(cfg: &SandboxConfig) -> String {
     if cfg.tool_overrides.is_empty() {
         return "(none)".into();
@@ -897,6 +1011,10 @@ async fn run_app(
                     app.entries.push(Entry::Note(format!("Error: {msg}")));
                     app.update_metrics();
                 }
+                WorkerMsg::BashDone => {
+                    app.is_loading = false;
+                    app.update_metrics();
+                }
             }
         }
 
@@ -960,6 +1078,7 @@ async fn run_app(
                                     &host_slot,
                                     &project_root,
                                     &tool_bins,
+                                    &worker_tx,
                                 )
                                 .await;
                                 continue;
@@ -1031,8 +1150,15 @@ async fn run_app(
                 }
                 KeyCode::Enter => {
                     if let Some(CommandSelection::Execute(cmd)) = app.select_command() {
-                        dispatch_slash_command(app, &cmd, &host_slot, &project_root, &tool_bins)
-                            .await;
+                        dispatch_slash_command(
+                            app,
+                            &cmd,
+                            &host_slot,
+                            &project_root,
+                            &tool_bins,
+                            &worker_tx,
+                        )
+                        .await;
                     }
                 }
                 KeyCode::Backspace if !app.palette_pop_char() => {

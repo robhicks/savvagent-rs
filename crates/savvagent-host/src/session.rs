@@ -711,6 +711,41 @@ impl Host {
         }
     }
 
+    /// Invoke the registered `tool-bash` `run` tool directly, outside the
+    /// model-driven tool-use loop. Used by the TUI's `/bash` slash command
+    /// so a user can run a shell command without round-tripping through
+    /// the provider.
+    ///
+    /// `net_override` is forwarded to
+    /// [`crate::tools::ToolRegistry::call_with_bash_net_override`]:
+    /// `Some(true)` / `Some(false)` short-circuit the bash-network policy
+    /// for this call; `None` defers to the policy (which may emit
+    /// [`TurnEvent::BashNetworkRequested`] on `events` if one is
+    /// supplied).
+    ///
+    /// Returns `Ok((is_error, payload))` — `is_error == true` means the
+    /// underlying tool reported failure (non-zero exit, transport error,
+    /// etc.); `payload` is the textual tool-result. Returns
+    /// `Err("tool-bash not registered")` when no bash endpoint was
+    /// configured on the host.
+    pub async fn run_bash_command(
+        &self,
+        command: &str,
+        net_override: Option<bool>,
+        events: Option<mpsc::Sender<TurnEvent>>,
+    ) -> Result<(bool, String), String> {
+        let _events_guard = CurrentTurnEventsGuard::install(&self.current_turn_events, &events);
+        let input = serde_json::json!({ "command": command });
+        let guard = self.tools.lock().await;
+        let registry = guard
+            .as_ref()
+            .ok_or_else(|| "tool registry unavailable".to_string())?;
+        let outcome = registry
+            .call_with_bash_net_override("run", input, net_override)
+            .await;
+        Ok((outcome.is_error, outcome.payload))
+    }
+
     /// Install the real bash-net resolver into the tool registry. The
     /// resolver captures `Arc`-shared handles to the permission policy,
     /// pending-prompt map, current-turn events, and request-id counter
