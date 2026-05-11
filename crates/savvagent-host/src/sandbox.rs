@@ -93,7 +93,9 @@ impl Default for SandboxConfig {
             },
         );
         Self {
-            enabled: false,
+            // v0.7: default-on. Existing `enabled = false` configs are
+            // preserved via `#[serde(default)]` on the struct (Task 14.3).
+            enabled: true,
             allow_net: false,
             tool_overrides,
             extra_binds: Vec::new(),
@@ -1019,6 +1021,14 @@ mod tests {
             total, 5,
             "expected 2 (--tmpfs, .ssh) + 3 (--ro-bind, /dev/null, .netrc) = 5 args, got {args:?}"
         );
+    }
+
+    #[test]
+    fn load_from_path_returns_default_on_when_file_absent() {
+        let td = tempfile::TempDir::new().unwrap();
+        let missing = td.path().join("does-not-exist.toml");
+        let cfg = load_from_path(&missing);
+        assert!(cfg.enabled, "absent file must default to enabled=true");
     }
 
     #[test]
