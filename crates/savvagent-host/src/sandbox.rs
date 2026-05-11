@@ -475,6 +475,31 @@ fn canonical_or_original(p: &Path) -> Option<PathBuf> {
     Some(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
 }
 
+/// Build `bwrap` arguments that hide the contents of `path` from a tool
+/// spawn. Returns the empty vector if `path` does not exist.
+///
+/// - Directories are masked with `--tmpfs <path>` (empty in-memory mount).
+/// - Regular files are masked with `--ro-bind /dev/null <path>`
+///   (read returns 0 bytes; writes fail with EACCES).
+///
+/// Symlinks are followed before classifying — `~/.aws` → real dir works.
+fn hide_mount_args(path: &Path) -> Vec<String> {
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let meta = match std::fs::metadata(&resolved) {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    let target = path.display().to_string();
+    if meta.is_dir() {
+        vec!["--tmpfs".into(), target]
+    } else {
+        vec!["--ro-bind".into(), "/dev/null".into(), target]
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -849,6 +874,41 @@ mod tests {
             profile.contains(r#"(allow file-write* (subpath "/tmp/with\"quote"))"#),
             "extra bind not properly escaped:\n{profile}"
         );
+    }
+
+    #[test]
+    fn hide_mount_args_for_existing_directory_use_tmpfs() {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join(".ssh");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let args = hide_mount_args(&dir);
+        assert_eq!(args, vec!["--tmpfs".into(), dir.display().to_string()]);
+    }
+
+    #[test]
+    fn hide_mount_args_for_existing_file_use_ro_bind_dev_null() {
+        let td = tempfile::TempDir::new().unwrap();
+        let file = td.path().join(".netrc");
+        std::fs::write(&file, "secret\n").unwrap();
+
+        let args = hide_mount_args(&file);
+        assert_eq!(
+            args,
+            vec![
+                "--ro-bind".into(),
+                "/dev/null".into(),
+                file.display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hide_mount_args_for_missing_path_returns_empty() {
+        let td = tempfile::TempDir::new().unwrap();
+        let missing = td.path().join("nonexistent");
+        let args = hide_mount_args(&missing);
+        assert!(args.is_empty());
     }
 
     #[test]
