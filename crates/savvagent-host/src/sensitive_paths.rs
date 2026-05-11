@@ -135,4 +135,15 @@ mod tests {
         let paths = sensitive_paths_under(td.path());
         assert!(paths.is_empty(), "expected empty, got {:?}", paths);
     }
+
+    #[test]
+    fn dotenv_basenames_are_sensitive() {
+        assert!(is_sensitive_path(".env"));
+        assert!(is_sensitive_path(".env.local"));
+        assert!(is_sensitive_path(".env.production"));
+        assert!(is_sensitive_path("apps/web/.env"));
+        assert!(is_sensitive_path("apps/web/.env.local"));
+        assert!(!is_sensitive_path(".envrc"));
+        assert!(!is_sensitive_path("env"));
+    }
 }
