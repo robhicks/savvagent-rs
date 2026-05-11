@@ -11,12 +11,6 @@
 //! returns `None`; callers fall back to the active theme and emit a
 //! warning line.
 
-// Tasks 16.5-16.6 wire `load`, `save`, and the `Theme` type into the
-// render path and `/theme` slash command. Until those land in the same
-// PR the public API is unused at the crate level (tests cover the
-// internals). The `allow(dead_code)` here is removed by 16.5-16.6.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -33,6 +27,9 @@ pub enum Theme {
 
 impl Theme {
     /// Stable wire name used in `theme.toml` and `/theme <name>`.
+    // The render path doesn't need wire names — only the `/theme` slash
+    // command does. Wired up in Task 16.6.
+    #[allow(dead_code)]
     pub fn name(self) -> &'static str {
         match self {
             Theme::Dark => "dark",
@@ -42,6 +39,8 @@ impl Theme {
     }
 
     /// Parse a wire name. Returns `None` for unknown inputs (case-sensitive).
+    // Wired up by `/theme <name>` in Task 16.6.
+    #[allow(dead_code)]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "dark" => Some(Theme::Dark),
@@ -52,6 +51,8 @@ impl Theme {
     }
 
     /// Every built-in theme, in display order.
+    // Used by `/theme list` in Task 16.6.
+    #[allow(dead_code)]
     pub fn all() -> [Theme; 3] {
         [Theme::Dark, Theme::Light, Theme::HighContrast]
     }
@@ -109,6 +110,8 @@ pub(crate) fn load_from_path(path: &Path) -> Theme {
 /// Persist the selected theme. Returns `Ok(())` on success or if `$HOME`
 /// is unset (silent no-op; matches `sandbox.rs::save` behavior for now,
 /// though follow-up #20 may tighten this to an error).
+// Wired up by `/theme <name>` in Task 16.6.
+#[allow(dead_code)]
 pub fn save(theme: Theme) -> std::io::Result<()> {
     match config_path() {
         Some(path) => save_to_path(&path, theme),
@@ -116,6 +119,9 @@ pub fn save(theme: Theme) -> std::io::Result<()> {
     }
 }
 
+// Used by `save` and tests; will get a direct caller in Task 16.6 — for
+// now keep the targeted allow so clippy -D warnings doesn't trip.
+#[allow(dead_code)]
 pub(crate) fn save_to_path(path: &Path, theme: Theme) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

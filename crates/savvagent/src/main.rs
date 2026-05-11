@@ -22,6 +22,7 @@
 
 mod app;
 mod creds;
+mod palette;
 mod providers;
 mod splash;
 mod theme;
