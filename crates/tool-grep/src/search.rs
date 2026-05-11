@@ -418,8 +418,7 @@ mod tests {
                 ..Default::default()
             },
         )
-        .err()
-        .expect("expected OutsideRoot error");
+        .expect_err("expected OutsideRoot error");
         let msg = err.to_string().to_lowercase();
         assert!(msg.contains("outside"), "{msg}");
     }
