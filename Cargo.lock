@@ -2728,6 +2728,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ratatui-themes"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd1a71b2897e290f5e18ba55138074b4ceb1a765ba0d7219e55fef5459497d5f"
+dependencies = [
+ "ratatui",
+ "serde",
+]
+
+[[package]]
 name = "ratatui-widgets"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3090,13 +3100,16 @@ dependencies = [
  "ratatui",
  "ratatui-code-editor",
  "ratatui-explorer",
+ "ratatui-themes",
  "rmcp",
  "savvagent-host",
  "savvagent-mcp",
  "savvagent-protocol",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tool-bash",
  "tool-fs",
  "tool-grep",

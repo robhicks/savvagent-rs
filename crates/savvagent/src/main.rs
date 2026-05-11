@@ -24,6 +24,7 @@ mod app;
 mod creds;
 mod providers;
 mod splash;
+mod theme;
 mod tui;
 mod ui;
 

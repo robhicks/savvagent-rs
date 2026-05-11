@@ -84,6 +84,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # TUI deps (only used by savvagent crate, but pinned here for consistency)
 crossterm = "0.29"
 ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+ratatui-themes = "0.2.0"
 tui-textarea = { package = "tui-textarea-2", version = "0.10" }
 ratatui-explorer = "0.3"
 ratatui-code-editor = "0.0.3"
