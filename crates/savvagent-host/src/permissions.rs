@@ -69,6 +69,38 @@ pub enum PermissionDecision {
     Deny,
 }
 
+/// Policy controlling whether `tool-bash` is allowed network access.
+///
+/// Evaluated once per session on the first `tool-bash` invocation. The
+/// resulting decision is cached on [`PermissionPolicy`] and reused for
+/// all subsequent bash invocations until the session ends. Per-call
+/// `/bash --net` / `/bash --no-net` flags bypass the cache without
+/// updating it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BashNetworkPolicy {
+    /// Prompt on first invocation, cache the answer for the session.
+    #[default]
+    Ask,
+    /// Network always allowed — no prompt.
+    Always,
+    /// Network always denied — no prompt.
+    Never,
+}
+
+/// User's choice in response to the [`BashNetworkPolicy::Ask`] prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BashNetworkChoice {
+    /// Allow network for this invocation only. Does NOT update the cache.
+    Once,
+    /// Allow network for the rest of the session. Updates the cache.
+    AlwaysThisSession,
+    /// Deny network for this invocation. Does NOT update the cache.
+    DenyOnce,
+    /// Deny network for the rest of the session. Updates the cache.
+    DenyAlways,
+}
+
 /// A normalized argument pattern attached to a [`Rule`].
 ///
 /// - [`ArgPattern::Any`] — matches any args for the rule's tool.
@@ -246,6 +278,15 @@ pub struct PermissionPolicy {
     /// Rules loaded from `permissions.toml`. Mutable; written through on
     /// [`PermissionPolicy::add_rule`].
     toml_rules: Arc<RwLock<Vec<Rule>>>,
+    /// Policy for `tool-bash` network access. Loaded from
+    /// `permissions.toml`'s `[bash_network] mode = "ask"|"always"|"never"`.
+    /// Defaults to [`BashNetworkPolicy::Ask`].
+    bash_network: BashNetworkPolicy,
+    /// Session-scoped cached decision. Populated by
+    /// [`PermissionPolicy::resolve_bash_network`] when the user picks an
+    /// "always" / "deny-always" variant. `None` means "not yet decided
+    /// in this session".
+    bash_network_decision: Arc<RwLock<Option<bool>>>,
 }
 
 impl PermissionPolicy {
@@ -265,6 +306,8 @@ impl PermissionPolicy {
             front_matter_rules,
             toml_path,
             toml_rules: Arc::new(RwLock::new(toml_rules)),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -278,6 +321,55 @@ impl PermissionPolicy {
             front_matter_rules: Arc::new(Vec::new()),
             toml_path: None,
             toml_rules: Arc::new(RwLock::new(Vec::new())),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Test-only setter for the bash-network policy. Used by tests to
+    /// exercise [`PermissionPolicy::resolve_bash_network`] without going
+    /// through the (still-TBD) `permissions.toml` loader.
+    #[cfg(test)]
+    pub(crate) fn with_bash_network(mut self, policy: BashNetworkPolicy) -> Self {
+        self.bash_network = policy;
+        self
+    }
+
+    /// Resolve `tool-bash` network access for the current invocation.
+    /// Honors the configured [`BashNetworkPolicy`] and the session
+    /// decision cache; prompts via `prompt` only when the policy is
+    /// `Ask` and the cache is empty.
+    ///
+    /// Returns the resolved `allow_net` boolean. May update
+    /// `bash_network_decision` (the session cache) if the user picks an
+    /// "always" / "deny-always" variant.
+    pub fn resolve_bash_network<F: FnOnce() -> BashNetworkChoice>(&self, prompt: F) -> bool {
+        match self.bash_network {
+            BashNetworkPolicy::Always => {
+                *self.bash_network_decision.write().unwrap() = Some(true);
+                true
+            }
+            BashNetworkPolicy::Never => {
+                *self.bash_network_decision.write().unwrap() = Some(false);
+                false
+            }
+            BashNetworkPolicy::Ask => {
+                if let Some(cached) = *self.bash_network_decision.read().unwrap() {
+                    return cached;
+                }
+                match prompt() {
+                    BashNetworkChoice::Once => true,
+                    BashNetworkChoice::AlwaysThisSession => {
+                        *self.bash_network_decision.write().unwrap() = Some(true);
+                        true
+                    }
+                    BashNetworkChoice::DenyOnce => false,
+                    BashNetworkChoice::DenyAlways => {
+                        *self.bash_network_decision.write().unwrap() = Some(false);
+                        false
+                    }
+                }
+            }
         }
     }
 
@@ -492,6 +584,8 @@ mod tests {
             front_matter_rules: Arc::new(Vec::new()),
             toml_path: None,
             toml_rules: Arc::new(RwLock::new(Vec::new())),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -684,6 +778,8 @@ mod tests {
             front_matter_rules: Arc::new(Vec::new()),
             toml_path: Some(toml_path.clone()),
             toml_rules: Arc::new(RwLock::new(Vec::new())),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
         };
 
         p.add_rule(
@@ -722,6 +818,8 @@ mod tests {
             front_matter_rules: Arc::new(Vec::new()),
             toml_path: None,
             toml_rules: Arc::new(RwLock::new(Vec::new())),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
         };
         assert_eq!(
             p.evaluate("read_file", &json!({"path": "src/lib.rs"})),
