@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::project;
+use crate::sensitive_paths::is_sensitive_path;
 
 /// Outcome of evaluating a tool call against the policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,7 +285,9 @@ impl PermissionPolicy {
         if let Some(p) = path_arg(args) {
             if is_sensitive_path(&p) {
                 return Verdict::Deny {
-                    reason: format!("path `{p}` is policy-protected (.env / .ssh)"),
+                    reason: format!(
+                        "path `{p}` is policy-protected (matches sensitive-path deny list)"
+                    ),
                 };
             }
         }
@@ -445,15 +448,6 @@ fn short_args(args: &Value) -> String {
     } else {
         format!("{}...", &s[..80])
     }
-}
-
-fn is_sensitive_path(p: &str) -> bool {
-    let s = p.replace('\\', "/");
-    let last = s.rsplit('/').next().unwrap_or("");
-    if last == ".env" || last.starts_with(".env.") {
-        return true;
-    }
-    s == ".ssh" || s.starts_with(".ssh/") || s.contains("/.ssh/") || s.ends_with("/.ssh")
 }
 
 fn is_under(p: &str, root: &Path) -> bool {
