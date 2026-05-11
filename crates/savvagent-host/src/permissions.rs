@@ -842,8 +842,7 @@ mod tests {
 
     #[test]
     fn bash_network_always_resolves_without_prompt() {
-        let p = PermissionPolicy::transient("/tmp/x")
-            .with_bash_network(BashNetworkPolicy::Always);
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Always);
         let prompted = std::cell::Cell::new(false);
         let allowed = p.resolve_bash_network(|| {
             prompted.set(true);
@@ -856,8 +855,7 @@ mod tests {
 
     #[test]
     fn bash_network_never_resolves_false_without_prompt() {
-        let p = PermissionPolicy::transient("/tmp/x")
-            .with_bash_network(BashNetworkPolicy::Never);
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Never);
         let prompted = std::cell::Cell::new(false);
         let allowed = p.resolve_bash_network(|| {
             prompted.set(true);
@@ -870,8 +868,7 @@ mod tests {
 
     #[test]
     fn bash_network_ask_prompts_then_caches_always() {
-        let p = PermissionPolicy::transient("/tmp/x")
-            .with_bash_network(BashNetworkPolicy::Ask);
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
 
         // First call: prompt fires, user picks AlwaysThisSession.
         let count = std::cell::Cell::new(0);
@@ -892,8 +889,7 @@ mod tests {
 
     #[test]
     fn bash_network_ask_once_does_not_cache() {
-        let p = PermissionPolicy::transient("/tmp/x")
-            .with_bash_network(BashNetworkPolicy::Ask);
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
 
         let count = std::cell::Cell::new(0);
         let prompt = || {

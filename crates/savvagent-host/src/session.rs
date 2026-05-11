@@ -778,7 +778,11 @@ impl Host {
             Box::pin(async move {
                 let summary = "tool-bash spawn requests network access".to_string();
                 resolve_bash_network_with_state(
-                    &policy, &pending, &next_id, events.as_ref(), summary,
+                    &policy,
+                    &pending,
+                    &next_id,
+                    events.as_ref(),
+                    summary,
                 )
                 .await
                 .unwrap_or(false)
@@ -1266,7 +1270,11 @@ mod policy_tests {
             Box::pin(async move {
                 let summary = "tool-bash spawn requests network access".to_string();
                 super::resolve_bash_network_with_state(
-                    &policy, &pending, &next_id, events.as_ref(), summary,
+                    &policy,
+                    &pending,
+                    &next_id,
+                    events.as_ref(),
+                    summary,
                 )
                 .await
                 .unwrap_or(false)
@@ -1297,10 +1305,7 @@ mod policy_tests {
             .await;
 
         let allow_first = first.await.unwrap();
-        assert!(
-            allow_first,
-            "AlwaysThisSession must resolve allow_net=true"
-        );
+        assert!(allow_first, "AlwaysThisSession must resolve allow_net=true");
 
         // Second resolve: should NOT emit another prompt (cache hit).
         // Drop the existing receiver's stash by trying a non-blocking

@@ -50,9 +50,8 @@ const TOOL_BASH_MARKER: &str = "tool-bash";
 /// return it directly without touching the session cache. `None` means
 /// "resolve via permission policy" (which may emit a `BashNetworkRequested`
 /// prompt and await the user's answer).
-pub(crate) type BashNetResolver = Arc<
-    dyn Fn(Option<bool>) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync + 'static,
->;
+pub(crate) type BashNetResolver =
+    Arc<dyn Fn(Option<bool>) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync + 'static>;
 
 /// Aggregate view of all connected tool servers.
 pub(crate) struct ToolRegistry {
@@ -188,9 +187,7 @@ impl ToolRegistry {
                         for t in tools {
                             let name = t.name.to_string();
                             if routes.contains_key(&name) || tool_names.contains(&name) {
-                                anyhow::bail!(
-                                    "duplicate tool `{name}` advertised by {label}"
-                                );
+                                anyhow::bail!("duplicate tool `{name}` advertised by {label}");
                             }
                             tool_names.insert(name.clone());
                             defs.push(ToolDef {
@@ -202,9 +199,7 @@ impl ToolRegistry {
                         // Probe done — shut it down so the lazy spawn gets
                         // a clean slate at first call.
                         if let Err(e) = service.cancel().await {
-                            tracing::warn!(
-                                "tool-bash probe shutdown error (ignored): {e}"
-                            );
+                            tracing::warn!("tool-bash probe shutdown error (ignored): {e}");
                         }
                         if lazy_bash.is_some() {
                             anyhow::bail!(
@@ -255,9 +250,7 @@ impl ToolRegistry {
                         for t in tools {
                             let name = t.name.to_string();
                             if routes.insert(name.clone(), idx).is_some() {
-                                anyhow::bail!(
-                                    "duplicate tool `{name}` advertised by {label}"
-                                );
+                                anyhow::bail!("duplicate tool `{name}` advertised by {label}");
                             }
                             defs.push(ToolDef {
                                 name,
@@ -384,7 +377,11 @@ impl LazyBash {
         // lock. We snapshot the current resolver under a brief read lock,
         // then drop the lock before awaiting so the host can swap the
         // resolver freely.
-        let resolver = self.resolver.read().expect("resolver lock poisoned").clone();
+        let resolver = self
+            .resolver
+            .read()
+            .expect("resolver lock poisoned")
+            .clone();
         let allow_net = (resolver)(net_override).await;
 
         // Step 2: lock the active server slot so we get a single
@@ -435,9 +432,7 @@ impl LazyBash {
                 service,
                 allow_net,
             });
-            tracing::debug!(
-                "lazy tool-bash: (re)spawned with allow_net={allow_net}"
-            );
+            tracing::debug!("lazy tool-bash: (re)spawned with allow_net={allow_net}");
         }
 
         // Step 3: dispatch the call. `guard.as_ref().unwrap()` is safe — we
@@ -454,9 +449,7 @@ impl LazyBash {
                     ToolCallOutcome::success(payload)
                 }
             }
-            Err(e) => ToolCallOutcome::error(format!(
-                "tool transport error on {name}: {e}"
-            )),
+            Err(e) => ToolCallOutcome::error(format!("tool transport error on {name}: {e}")),
         }
     }
 }
