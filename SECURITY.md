@@ -15,12 +15,20 @@ As of v0.7, when `enabled = true` (the default on Linux and macOS):
   work out of the box. A runtime permission prompt
   (`Once`/`Always-this-session`/`Deny`) replaces the static fallback in a
   follow-up release tracked under issue #17.
-- **Reads** of well-known sensitive paths under `$HOME` are denied:
-  `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.config/gh`, `~/.mozilla`,
-  `~/.config/google-chrome`, and (on macOS) the Firefox / Chrome profile
-  directories under `~/Library/Application Support`. The canonical list
-  lives in `crates/savvagent-host/src/sensitive_paths.rs`
-  (`SENSITIVE_HOME_STEMS`).
+- **Reads** of well-known sensitive paths under `$HOME` are denied. The
+  canonical list lives in `crates/savvagent-host/src/sensitive_paths.rs`
+  (`SENSITIVE_HOME_STEMS`). On every supported platform it currently
+  includes `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.config/gh`,
+  `~/.mozilla`, and `~/.config/google-chrome`. macOS additionally covers
+  the Firefox and Chrome profile directories under `~/Library/Application
+  Support`.
+
+  Entries in `SENSITIVE_HOME_STEMS` that do not exist on disk at sandbox
+  setup time are filtered out by the helper that resolves the list to
+  real paths — so e.g. `~/.mozilla` is listed for all platforms but
+  contributes a sandbox rule only when that directory actually exists
+  for the running user (typical on Linux, uncommon on a default macOS
+  install).
 
 ## What the sandbox does not cover
 
@@ -52,8 +60,12 @@ Or in `~/.savvagent/sandbox.toml`:
 enabled = false
 ```
 
-A user who explicitly sets `enabled = false` keeps that value across
-upgrade.
+A user who explicitly sets `enabled = false` (or `enabled = true`)
+keeps that value across upgrade. The in-memory representation
+(`SandboxMode`) distinguishes the explicit on/off choice from "no
+preference declared," so future splash and TUI surfaces can suppress
+the v0.7-style nag line for users who have made an explicit
+selection.
 
 ## Reporting
 

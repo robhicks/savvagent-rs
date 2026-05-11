@@ -42,7 +42,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
 use savvagent_host::{
     BashNetworkChoice, Host, HostConfig, PermissionDecision, ProviderEndpoint, SandboxConfig,
-    ToolCallStatus, ToolEndpoint, TranscriptError, TurnEvent,
+    SandboxMode, ToolCallStatus, ToolEndpoint, TranscriptError, TurnEvent,
 };
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
@@ -751,15 +751,24 @@ async fn perform_model_change(
 async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
     match rest {
         "on" | "off" => {
-            let enable = rest == "on";
-            // Load the existing on-disk config, flip enabled, save.
+            // Both subcommands set an *explicit* mode — the splash uses that
+            // signal to suppress its v0.7-style nag banner.
+            let new_mode = if rest == "on" {
+                SandboxMode::On
+            } else {
+                SandboxMode::Off
+            };
             let mut cfg = SandboxConfig::load();
-            cfg.enabled = enable;
+            cfg.mode = new_mode;
             match cfg.save().await {
                 Ok(()) => {
                     app.push_note(format!(
                         "Sandbox {}: will take effect after the next /connect.",
-                        if enable { "enabled" } else { "disabled" }
+                        if new_mode == SandboxMode::On {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
                     ));
                 }
                 Err(e) => {
@@ -775,7 +784,7 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
                     let cfg = SandboxConfig::load();
                     app.push_note(format!(
                         "Sandbox (on-disk, not yet active): enabled={}  allow_net={}  per-tool overrides: {}",
-                        cfg.enabled,
+                        cfg.is_enabled(),
                         cfg.allow_net,
                         fmt_overrides(&cfg),
                     ));
@@ -784,11 +793,11 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
                     let cfg = host.sandbox_config();
                     app.push_note(format!(
                         "Sandbox: enabled={}  allow_net={}  per-tool overrides: {}",
-                        cfg.enabled,
+                        cfg.is_enabled(),
                         cfg.allow_net,
                         fmt_overrides(cfg),
                     ));
-                    if cfg.enabled {
+                    if cfg.is_enabled() {
                         #[cfg(target_os = "linux")]
                         app.push_note("  wrapper: bwrap (Linux)");
                         #[cfg(target_os = "macos")]
