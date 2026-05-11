@@ -390,6 +390,10 @@ async fn dispatch_slash_command(
             handle_sandbox_command(app, rest, host_slot).await;
             return;
         }
+        "/theme" => {
+            handle_theme_command(app, rest);
+            return;
+        }
         "/bash" => {
             handle_bash_slash_command(app, rest_raw, host_slot, worker_tx).await;
             return;
@@ -808,6 +812,51 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
         other => {
             app.push_note(format!(
                 "Unknown sandbox subcommand `{other}`. Usage: /sandbox  |  /sandbox on  |  /sandbox off"
+            ));
+        }
+    }
+}
+
+/// `/theme` (no args or `list`) prints every built-in theme with the
+/// active one marked. `/theme <name>` switches to the requested theme
+/// and persists it to `~/.savvagent/theme.toml`; an unknown name is a
+/// soft error that leaves the active theme unchanged.
+///
+/// The theme change is applied at the next [`ui::render`] call — no
+/// host reconnect or widget rebuild needed.
+fn handle_theme_command(app: &mut App, args: &str) {
+    let trimmed = args.trim();
+    if trimmed.is_empty() || trimmed == "list" {
+        app.push_note("themes:");
+        for t in theme::Theme::all() {
+            let marker = if t == app.active_theme { " (active)" } else { "" };
+            app.push_note(format!("  {}{}", t.name(), marker));
+        }
+        return;
+    }
+
+    match theme::Theme::from_name(trimmed) {
+        Some(new_theme) => {
+            app.active_theme = new_theme;
+            match theme::save(new_theme) {
+                Ok(()) => {
+                    app.push_note(format!("theme set to `{}`", new_theme.name()));
+                }
+                Err(e) => {
+                    app.push_note(format!(
+                        "theme `{}` applied for this session, but persistence failed: {e}",
+                        new_theme.name()
+                    ));
+                }
+            }
+        }
+        None => {
+            let names: Vec<&str> = theme::Theme::all().iter().map(|t| t.name()).collect();
+            app.push_note(format!(
+                "theme `{}` not found — keeping `{}`. Available: {}",
+                trimmed,
+                app.active_theme.name(),
+                names.join(", ")
             ));
         }
     }
@@ -1520,5 +1569,148 @@ mod model_validation_tests {
             }
             other => panic!("expected Proceed with warning, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod theme_command_tests {
+    use super::{App, Entry, handle_theme_command, theme};
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    // `theme::save` writes to `$HOME/.savvagent/theme.toml`, and `App::new`
+    // reads it. We point `$HOME` at a per-test temp dir to avoid touching
+    // the developer's real theme. Env vars are process-global, so the
+    // tests in this module run under a Mutex.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
+        _td: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn new() -> Self {
+            let td = tempfile::TempDir::new().expect("tempdir");
+            let prev = std::env::var_os("HOME");
+            // SAFETY: env mutation guarded by HOME_LOCK across this module's tests.
+            unsafe { std::env::set_var("HOME", td.path()) };
+            Self { _td: td, prev }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: env mutation guarded by HOME_LOCK across this module's tests.
+            unsafe {
+                match &self.prev {
+                    Some(p) => std::env::set_var("HOME", p),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    fn fresh_app() -> App {
+        App::new("test-model".into(), PathBuf::from("/tmp"))
+    }
+
+    fn note_lines(app: &App) -> Vec<&str> {
+        app.entries
+            .iter()
+            .filter_map(|e| {
+                if let Entry::Note(t) = e {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn list_marks_active_theme() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        let initial_notes = note_lines(&app).len();
+        handle_theme_command(&mut app, "list");
+        let notes = note_lines(&app);
+        let new_notes: Vec<&&str> = notes.iter().skip(initial_notes).collect();
+        assert!(
+            new_notes.iter().any(|l| l.contains("themes:")),
+            "expected `themes:` header, got: {new_notes:?}"
+        );
+        // App::new()'s default is Theme::Dark, so dark should be marked.
+        assert!(
+            new_notes
+                .iter()
+                .any(|l| l.contains("dark") && l.contains("(active)")),
+            "expected dark marked active, got: {new_notes:?}"
+        );
+        // Every built-in must appear.
+        for t in theme::Theme::all() {
+            assert!(
+                new_notes.iter().any(|l| l.contains(t.name())),
+                "expected `{}` to appear in list, got: {new_notes:?}",
+                t.name()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_args_lists_themes_like_list() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        let initial_notes = note_lines(&app).len();
+        handle_theme_command(&mut app, "");
+        let notes = note_lines(&app);
+        assert!(notes.len() > initial_notes);
+        assert!(notes[initial_notes..].iter().any(|l| l.contains("themes:")));
+    }
+
+    #[test]
+    fn unknown_name_does_not_change_active_theme() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        let original = app.active_theme;
+        handle_theme_command(&mut app, "totally-bogus");
+        assert_eq!(
+            app.active_theme, original,
+            "unknown name must not change the active theme"
+        );
+        let notes = note_lines(&app);
+        let last = notes.last().unwrap();
+        assert!(last.contains("totally-bogus"), "last note: {last}");
+        assert!(last.contains("not found"), "last note: {last}");
+        // The error message must enumerate the legal names.
+        for t in theme::Theme::all() {
+            assert!(last.contains(t.name()), "last note: {last}");
+        }
+    }
+
+    #[test]
+    fn known_name_sets_active_theme() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        handle_theme_command(&mut app, "light");
+        assert_eq!(app.active_theme, theme::Theme::Light);
+        let notes = note_lines(&app);
+        assert!(notes.last().unwrap().contains("set to `light`"));
+    }
+
+    #[test]
+    fn known_name_persists_through_load() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        handle_theme_command(&mut app, "high-contrast");
+        assert_eq!(app.active_theme, theme::Theme::HighContrast);
+        // A brand-new App should now load the saved value.
+        let app2 = fresh_app();
+        assert_eq!(app2.active_theme, theme::Theme::HighContrast);
     }
 }

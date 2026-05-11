@@ -516,6 +516,11 @@ impl App {
                 needs_arg: false,
             },
             Command {
+                name: "/theme".into(),
+                description: "List themes or set one (`/theme list` or `/theme <name>`)".into(),
+                needs_arg: false,
+            },
+            Command {
                 name: "/bash".into(),
                 description: "Run a shell command (use `--net` / `--no-net` to override network)"
                     .into(),
