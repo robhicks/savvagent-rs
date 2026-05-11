@@ -38,8 +38,8 @@ use app::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
 use savvagent_host::{
-    Host, HostConfig, PermissionDecision, ProviderEndpoint, SandboxConfig, ToolCallStatus,
-    ToolEndpoint, TranscriptError, TurnEvent,
+    BashNetworkChoice, Host, HostConfig, PermissionDecision, ProviderEndpoint, SandboxConfig,
+    ToolCallStatus, ToolEndpoint, TranscriptError, TurnEvent,
 };
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
@@ -1289,6 +1289,39 @@ async fn run_app(
                 };
                 if let Some((decision, persist)) = action {
                     resolve_pending_permission(app, &host_slot, decision, persist).await;
+                }
+            }
+            InputMode::BashNetworkPrompt { id, .. } => {
+                let choice = match key.code {
+                    KeyCode::Char('o') | KeyCode::Char('O') => Some(BashNetworkChoice::Once),
+                    KeyCode::Char('a') | KeyCode::Char('A') => {
+                        Some(BashNetworkChoice::AlwaysThisSession)
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('D') => Some(BashNetworkChoice::DenyOnce),
+                    KeyCode::Char('f')
+                    | KeyCode::Char('F')
+                    | KeyCode::Char('n')
+                    | KeyCode::Char('N') => Some(BashNetworkChoice::DenyAlways),
+                    KeyCode::Esc => Some(BashNetworkChoice::DenyOnce),
+                    _ => None,
+                };
+                if let Some(choice) = choice {
+                    if let Some(host) = current_host(&host_slot).await {
+                        let host = host.clone();
+                        tokio::spawn(async move {
+                            host.resolve_bash_network_decision(id, choice).await;
+                        });
+                    }
+                    app.input_mode = InputMode::Editing;
+                    let label = match choice {
+                        BashNetworkChoice::Once => "bash net: allowed once",
+                        BashNetworkChoice::AlwaysThisSession => {
+                            "bash net: always allowed (this session)"
+                        }
+                        BashNetworkChoice::DenyOnce => "bash net: denied once",
+                        BashNetworkChoice::DenyAlways => "bash net: never (this session)",
+                    };
+                    app.push_note(label);
                 }
             }
             InputMode::SelectingTranscript => match key.code {

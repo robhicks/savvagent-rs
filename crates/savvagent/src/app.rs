@@ -30,6 +30,17 @@ pub enum InputMode {
     EnteringApiKey,
     /// Tool-permission modal up; the turn loop is paused on a `oneshot`.
     PermissionPrompt,
+    /// Bash-network prompt modal up; the lazy bash spawn is paused on
+    /// a `oneshot` keyed by `id`. The user picks Once /
+    /// AlwaysThisSession / DenyOnce / DenyAlways via a single-key
+    /// hotkey; the choice is forwarded to
+    /// [`savvagent_host::Host::resolve_bash_network_decision`].
+    BashNetworkPrompt {
+        /// Opaque host-side request id; pass back when resolving.
+        id: u64,
+        /// Human-readable summary from the policy.
+        summary: String,
+    },
     /// Transcript picker open — selecting a file for `/resume`.
     SelectingTranscript,
 }
@@ -337,14 +348,12 @@ impl App {
                 });
                 self.input_mode = InputMode::PermissionPrompt;
             }
-            TurnEvent::BashNetworkRequested { id: _, summary } => {
-                // TODO(v0.7 PR 15): wire the modal handler. For now we
-                // surface the prompt as a Note so the event surface stays
-                // visible during development; the dedicated modal lands
-                // in the follow-up TUI task.
+            TurnEvent::BashNetworkRequested { id, summary } => {
                 self.flush_live_text();
-                self.entries
-                    .push(Entry::Note(format!("bash network requested: {summary}")));
+                self.entries.push(Entry::Note(format!(
+                    "bash network access requested — see modal ({summary})"
+                )));
+                self.input_mode = InputMode::BashNetworkPrompt { id, summary };
             }
             TurnEvent::ToolCallDenied { name, reason } => {
                 self.flush_live_text();
@@ -1124,5 +1133,38 @@ mod tests {
         let p = parse_bash_command("   --net  echo hi").unwrap();
         assert_eq!(p.net_override, Some(true));
         assert_eq!(p.command, "echo hi");
+    }
+
+    #[test]
+    fn bash_network_request_enters_modal_with_id_and_summary() {
+        let mut app = fresh_app();
+        app.apply_turn_event(TurnEvent::BashNetworkRequested {
+            id: 7,
+            summary: "tool-bash spawn requests network access".into(),
+        });
+        match &app.input_mode {
+            InputMode::BashNetworkPrompt { id, summary } => {
+                assert_eq!(*id, 7);
+                assert!(summary.contains("tool-bash"), "summary: {summary}");
+            }
+            other => panic!(
+                "expected BashNetworkPrompt, got {:?}",
+                input_mode_label(other)
+            ),
+        }
+    }
+
+    fn input_mode_label(m: &InputMode) -> &'static str {
+        match m {
+            InputMode::Editing => "Editing",
+            InputMode::ViewingFile => "ViewingFile",
+            InputMode::EditingFile => "EditingFile",
+            InputMode::CommandPalette => "CommandPalette",
+            InputMode::SelectingProvider => "SelectingProvider",
+            InputMode::EnteringApiKey => "EnteringApiKey",
+            InputMode::PermissionPrompt => "PermissionPrompt",
+            InputMode::BashNetworkPrompt { .. } => "BashNetworkPrompt",
+            InputMode::SelectingTranscript => "SelectingTranscript",
+        }
     }
 }
