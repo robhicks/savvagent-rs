@@ -284,6 +284,15 @@ impl App {
                 });
                 self.input_mode = InputMode::PermissionPrompt;
             }
+            TurnEvent::BashNetworkRequested { id: _, summary } => {
+                // TODO(v0.7 PR 15): wire the modal handler. For now we
+                // surface the prompt as a Note so the event surface stays
+                // visible during development; the dedicated modal lands
+                // in the follow-up TUI task.
+                self.flush_live_text();
+                self.entries
+                    .push(Entry::Note(format!("bash network requested: {summary}")));
+            }
             TurnEvent::ToolCallDenied { name, reason } => {
                 self.flush_live_text();
                 self.entries

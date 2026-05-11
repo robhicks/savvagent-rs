@@ -15,7 +15,9 @@ use thiserror::Error;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::config::{HostConfig, ProviderEndpoint};
-use crate::permissions::{PermissionDecision, PermissionPolicy, Verdict};
+use crate::permissions::{
+    BashNetworkChoice, BashNetworkPolicy, PermissionDecision, PermissionPolicy, Verdict,
+};
 use crate::project;
 use crate::provider::RmcpProviderClient;
 use crate::sandbox::SandboxConfig;
@@ -164,6 +166,18 @@ pub enum TurnEvent {
         /// Full argument JSON, in case the UI wants to render it expanded.
         args: Value,
     },
+    /// Tool-bash is about to be spawned and the configured
+    /// [`BashNetworkPolicy`] is `Ask` with no cached decision for this
+    /// session. The host pauses the spawn until the embedder calls
+    /// [`Host::resolve_bash_network_decision`] with `id`.
+    BashNetworkRequested {
+        /// Opaque request id; pass back to
+        /// [`Host::resolve_bash_network_decision`].
+        id: u64,
+        /// Human-readable summary of the bash invocation, suitable for
+        /// display in a modal (e.g., the first ~80 chars of the command).
+        summary: String,
+    },
     /// A tool call was refused (by policy or by the user). No `ToolCallStarted`
     /// or `ToolCallFinished` is emitted for this call — only this event plus a
     /// synthetic error `tool_result` appended to the conversation.
@@ -200,6 +214,10 @@ pub struct Host {
     /// `PermissionRequested`; the matching `oneshot` is consumed by
     /// [`Host::resolve_permission`].
     pending: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
+    /// Outstanding `BashNetworkRequested` prompts, keyed by event id. The
+    /// matching `oneshot` is consumed by
+    /// [`Host::resolve_bash_network_decision`].
+    pending_bash_network: Mutex<HashMap<u64, oneshot::Sender<BashNetworkChoice>>>,
     /// Monotonic source for permission-request ids.
     next_request_id: AtomicU64,
 }
@@ -236,6 +254,7 @@ impl Host {
             policy,
             sandbox,
             pending: Mutex::new(HashMap::new()),
+            pending_bash_network: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
         })
     }
@@ -267,6 +286,7 @@ impl Host {
             policy,
             sandbox,
             pending: Mutex::new(HashMap::new()),
+            pending_bash_network: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
         })
     }
@@ -640,6 +660,72 @@ impl Host {
         let sender = self.pending.lock().await.remove(&id);
         if let Some(tx) = sender {
             let _ = tx.send(decision);
+        }
+    }
+
+    /// Resolve a previously-emitted
+    /// [`TurnEvent::BashNetworkRequested`]. The embedder (TUI) calls this
+    /// after the user picks Once / AlwaysThisSession / DenyOnce /
+    /// DenyAlways from the modal. The corresponding spawn resumes.
+    ///
+    /// A no-op if `id` is unknown — that handles double-resolves and
+    /// races where the spawn was cancelled before the user answered.
+    pub async fn resolve_bash_network_decision(&self, id: u64, choice: BashNetworkChoice) {
+        let tx = self.pending_bash_network.lock().await.remove(&id);
+        if let Some(tx) = tx {
+            let _ = tx.send(choice);
+        }
+    }
+
+    /// Resolve `tool-bash`'s network access for an upcoming spawn,
+    /// emitting [`TurnEvent::BashNetworkRequested`] and awaiting the
+    /// user's decision if the policy is `Ask` and no decision is cached.
+    ///
+    /// Returns `Ok(allow_net)` if a decision was made (or no prompt was
+    /// needed), or `Err(())` if the events channel is gone (the turn
+    /// was aborted while the prompt was outstanding).
+    ///
+    /// We cannot pass an async closure to
+    /// [`PermissionPolicy::resolve_bash_network`] because it expects
+    /// `FnOnce() -> BashNetworkChoice`. So we handle `Ask` + cache-empty
+    /// here at the async boundary, and only call into the sync resolver
+    /// to keep the cache-update logic single-sourced.
+    #[allow(dead_code)] // wired up to the tool-bash spawn path in the next commit
+    pub(crate) async fn resolve_bash_network_async(
+        &self,
+        events: Option<&mpsc::Sender<TurnEvent>>,
+        summary: String,
+    ) -> Result<bool, ()> {
+        match self.policy.bash_network() {
+            BashNetworkPolicy::Always => Ok(true),
+            BashNetworkPolicy::Never => Ok(false),
+            BashNetworkPolicy::Ask => {
+                if let Some(cached) = self.policy.bash_network_cached() {
+                    return Ok(cached);
+                }
+                // No cache — emit a prompt and await.
+                let Some(events) = events else {
+                    // No interactive surface — collapse to deny so the
+                    // spawn doesn't hang on a oneshot that nobody resolves.
+                    return Ok(false);
+                };
+                let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+                let (tx, rx) = oneshot::channel();
+                self.pending_bash_network.lock().await.insert(id, tx);
+                if events
+                    .send(TurnEvent::BashNetworkRequested { id, summary })
+                    .await
+                    .is_err()
+                {
+                    self.pending_bash_network.lock().await.remove(&id);
+                    return Err(());
+                }
+                let choice = rx.await.map_err(|_| ())?;
+                // Update cache via the same sync resolver — pass a closure
+                // that returns the choice we already have.
+                let allow = self.policy.resolve_bash_network(|| choice);
+                Ok(allow)
+            }
         }
     }
 

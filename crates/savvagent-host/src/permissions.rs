@@ -335,6 +335,19 @@ impl PermissionPolicy {
         self
     }
 
+    /// Returns the configured bash network policy.
+    pub fn bash_network(&self) -> BashNetworkPolicy {
+        self.bash_network
+    }
+
+    /// Returns the cached bash network decision for this session, if any.
+    /// `None` means the user has not yet picked an "always" / "deny-always"
+    /// variant in the `Ask` policy's modal — and so the next bash spawn
+    /// will prompt again.
+    pub fn bash_network_cached(&self) -> Option<bool> {
+        *self.bash_network_decision.read().unwrap()
+    }
+
     /// Resolve `tool-bash` network access for the current invocation.
     /// Honors the configured [`BashNetworkPolicy`] and the session
     /// decision cache; prompts via `prompt` only when the policy is
