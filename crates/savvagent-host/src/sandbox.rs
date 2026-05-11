@@ -424,14 +424,29 @@ fn scheme_quote(s: &str) -> String {
     out
 }
 
-/// Build the TinyScheme profile passed to `sandbox-exec -p`. Pure string
-/// composition — separated out so it can be unit-tested on any platform.
+/// Build the TinyScheme profile passed to `sandbox-exec -p`. Reads the real
+/// sensitive-path list from `sensitive_paths::sensitive_paths_for_user`.
+/// Thin shim around [`build_macos_profile_with`] for testability.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn build_macos_profile(project_root: &Path, allow_net: bool, extra_binds: &[&Path]) -> String {
+    let sensitive = crate::sensitive_paths::sensitive_paths_for_user();
+    build_macos_profile_with(project_root, allow_net, extra_binds, &sensitive)
+}
+
+/// Build the TinyScheme profile from explicit inputs. Pure string composition —
+/// does not read `$HOME` or any other process state. Tests pass a synthetic
+/// sensitive list.
 ///
 /// Path strings are escaped via [`scheme_quote`] so that paths containing
 /// `"`, `\`, or newlines cannot break out of the string literal and corrupt
 /// the profile.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn build_macos_profile(project_root: &Path, allow_net: bool, extra_binds: &[&Path]) -> String {
+fn build_macos_profile_with(
+    project_root: &Path,
+    allow_net: bool,
+    extra_binds: &[&Path],
+    sensitive: &[PathBuf],
+) -> String {
     let project_root_str = scheme_quote(&project_root.to_string_lossy());
 
     let mut profile = String::from("(version 1)\n");
@@ -446,6 +461,14 @@ fn build_macos_profile(project_root: &Path, allow_net: bool, extra_binds: &[&Pat
     for bind in extra_binds {
         let bind_str = scheme_quote(&bind.to_string_lossy());
         profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", bind_str));
+    }
+
+    // Read-side deny floor: forbid reads of sensitive paths even though the
+    // base policy allows file-read* by default. Sensitive list is the single
+    // source of truth from `sensitive_paths::sensitive_paths_for_user`.
+    for path in sensitive {
+        let q = scheme_quote(&path.to_string_lossy());
+        profile.push_str(&format!("(deny file-read* (subpath \"{}\"))\n", q));
     }
 
     // Deny network unless allowed.
@@ -883,6 +906,35 @@ mod tests {
             !allowed.contains("(deny network*)"),
             "(deny network*) should be absent when allow_net=true:\n{allowed}"
         );
+    }
+
+    #[test]
+    fn build_macos_profile_with_appends_file_read_deny_for_sensitive_paths() {
+        let root = std::path::Path::new("/Users/alice/project");
+        let sensitive: Vec<std::path::PathBuf> = vec![
+            std::path::PathBuf::from("/Users/alice/.ssh"),
+            std::path::PathBuf::from("/Users/alice/.aws"),
+        ];
+        let extra_binds: Vec<&std::path::Path> = vec![];
+
+        let profile = build_macos_profile_with(
+            root,
+            /* allow_net = */ false,
+            &extra_binds,
+            &sensitive,
+        );
+
+        assert!(
+            profile.contains(r#"(deny file-read* (subpath "/Users/alice/.ssh"))"#),
+            "missing .ssh deny clause in profile:\n{profile}"
+        );
+        assert!(
+            profile.contains(r#"(deny file-read* (subpath "/Users/alice/.aws"))"#),
+            "missing .aws deny clause in profile:\n{profile}"
+        );
+        // Sanity: existing clauses still present.
+        assert!(profile.contains("(allow file-write* (subpath \"/Users/alice/project\"))"));
+        assert!(profile.contains("(deny network*)"));
     }
 
     #[test]
