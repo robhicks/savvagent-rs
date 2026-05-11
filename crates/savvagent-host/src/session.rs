@@ -898,10 +898,13 @@ fn bootstrap_bash_net_resolver() -> BashNetResolver {
     })
 }
 
-/// Shared resolver-state logic. Same as
-/// [`Host::resolve_bash_network_async`] but pure-function over its
-/// inputs so the lazy-bash resolver closure (which can't borrow `&self`)
-/// can call it too.
+/// Shared resolver-state logic. Pure-function over its inputs so the
+/// lazy-bash resolver closure (which can't borrow `&self`) and any
+/// future direct callers can both use it. Emits
+/// [`TurnEvent::BashNetworkRequested`] on the supplied channel when
+/// the policy is `Ask` and no cached decision exists, awaits the
+/// matching [`Host::resolve_bash_network_decision`] call, and
+/// returns the resolved `allow_net`.
 async fn resolve_bash_network_with_state(
     policy: &PermissionPolicy,
     pending: &Mutex<HashMap<u64, oneshot::Sender<BashNetworkChoice>>>,
@@ -1168,6 +1171,128 @@ mod policy_tests {
         );
         // Allow lets the call reach the empty registry → "unknown tool".
         assert!(outcome.tool_calls[0].result.contains("unknown tool"));
+    }
+
+    /// Lazy-spawn end-to-end (no real bash binary): build the exact
+    /// resolver closure `Host::wire_self_into_resolver` builds, drive it
+    /// twice, and confirm only the first call emits a prompt — the
+    /// second hits the session cache after `AlwaysThisSession`. This is
+    /// the contract the lazy `tool-bash` spawn relies on for "prompt
+    /// once per session", and the regression is what made this PR
+    /// necessary: with the old eager spawn the question was already
+    /// settled at registry-connect time.
+    #[tokio::test]
+    async fn lazy_bash_resolver_prompts_once_then_caches_session() {
+        use std::sync::Arc;
+
+        use crate::permissions::BashNetworkPolicy;
+        use crate::tools::BashNetResolver;
+
+        // Build a transient Ask-policy host and reach into its state to
+        // construct the same resolver closure
+        // `wire_self_into_resolver` produces. We test through the
+        // resolver because the registry's lazy-bash dispatch path goes
+        // through exactly this closure on every call.
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("noop", json!({})));
+        let project_root = std::env::temp_dir().join("savvagent-lazy-bash-test");
+        let config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(project_root.clone())
+        .with_policy(
+            PermissionPolicy::transient(project_root).with_bash_network(BashNetworkPolicy::Ask),
+        );
+        let host = Arc::new(Host::with_components(config, provider).await.unwrap());
+
+        // Recreate exactly the resolver closure
+        // `Host::wire_self_into_resolver` installs into the registry's
+        // lazy slot. We can't easily reach into a real lazy slot
+        // without a working tool-bash binary in the test environment;
+        // building the resolver by hand exercises the same code path.
+        let policy = host.policy.clone();
+        let pending = host.pending_bash_network.clone();
+        let next_id = host.next_request_id.clone();
+        let current_events = host.current_turn_events.clone();
+        let resolver: BashNetResolver = Arc::new(move |over: Option<bool>| {
+            if let Some(v) = over {
+                return Box::pin(async move { v });
+            }
+            let policy = policy.clone();
+            let pending = pending.clone();
+            let next_id = next_id.clone();
+            let events = current_events
+                .lock()
+                .expect("current_turn_events poisoned")
+                .clone();
+            Box::pin(async move {
+                let summary = "tool-bash spawn requests network access".to_string();
+                super::resolve_bash_network_with_state(
+                    &policy, &pending, &next_id, events.as_ref(), summary,
+                )
+                .await
+                .unwrap_or(false)
+            })
+        });
+
+        // Publish a per-turn events channel into the host's slot — same
+        // as `CurrentTurnEventsGuard::install` would do at turn start.
+        let (events_tx, mut events_rx) = mpsc::channel::<TurnEvent>(8);
+        *host.current_turn_events.lock().unwrap() = Some(events_tx);
+
+        // Spawn the first resolve in a task so we can pump events and
+        // call resolve_bash_network_decision concurrently. Note: the
+        // resolver future is `Send + 'static` because all state is Arc.
+        let resolver_clone = resolver.clone();
+        let first = tokio::spawn(async move { (resolver_clone)(None).await });
+
+        // We expect a single BashNetworkRequested. Pluck its id, then
+        // answer AlwaysThisSession so the cache populates.
+        let id = loop {
+            match events_rx.recv().await {
+                Some(TurnEvent::BashNetworkRequested { id, .. }) => break id,
+                Some(_other) => continue,
+                None => panic!("events channel closed before BashNetworkRequested arrived"),
+            }
+        };
+        host.resolve_bash_network_decision(id, BashNetworkChoice::AlwaysThisSession)
+            .await;
+
+        let allow_first = first.await.unwrap();
+        assert!(
+            allow_first,
+            "AlwaysThisSession must resolve allow_net=true"
+        );
+
+        // Second resolve: should NOT emit another prompt (cache hit).
+        // Drop the existing receiver's stash by trying a non-blocking
+        // recv after the second resolve.
+        let allow_second = (resolver)(None).await;
+        assert!(
+            allow_second,
+            "second resolve must reuse the cached AlwaysThisSession decision"
+        );
+
+        // Drain any pending events with a tiny window and assert none
+        // are BashNetworkRequested. We use try_recv repeatedly with no
+        // sleep — the channel either has the message already or it
+        // never will because the resolve_bash_network_with_state path
+        // short-circuited via `policy.bash_network_cached()`.
+        loop {
+            match events_rx.try_recv() {
+                Ok(TurnEvent::BashNetworkRequested { .. }) => {
+                    panic!("second resolve must NOT emit a BashNetworkRequested");
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+
+        // Drop the resolver so the test exits cleanly.
+        drop(resolver);
     }
 
     /// `non-streaming` `run_turn` has no event channel, so any Ask collapses
