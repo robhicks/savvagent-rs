@@ -22,18 +22,13 @@ use std::path::{Path, PathBuf};
 
 /// Built-in theme variants. Wire identifiers (`dark` / `light` /
 /// `high-contrast`) are stable and persisted to `theme.toml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Theme {
+    #[default]
     Dark,
     Light,
     HighContrast,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::Dark
-    }
 }
 
 impl Theme {
@@ -129,4 +124,108 @@ pub(crate) fn save_to_path(path: &Path, theme: Theme) -> std::io::Result<()> {
     let text =
         toml::to_string(&config).expect("ThemeConfig serialization is infallible");
     std::fs::write(path, text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // --- Task 16.2: Theme::from_name + Theme::all ---
+
+    #[test]
+    fn from_name_recognises_built_ins() {
+        assert_eq!(Theme::from_name("dark"), Some(Theme::Dark));
+        assert_eq!(Theme::from_name("light"), Some(Theme::Light));
+        assert_eq!(Theme::from_name("high-contrast"), Some(Theme::HighContrast));
+    }
+
+    #[test]
+    fn from_name_rejects_unknown() {
+        assert_eq!(Theme::from_name("solarized"), None);
+        assert_eq!(Theme::from_name(""), None);
+        assert_eq!(Theme::from_name("DARK"), None);
+        assert_eq!(Theme::from_name("HIGH-CONTRAST"), None);
+    }
+
+    #[test]
+    fn all_returns_three_built_ins() {
+        let themes = Theme::all();
+        assert_eq!(themes.len(), 3);
+        assert!(themes.contains(&Theme::Dark));
+        assert!(themes.contains(&Theme::Light));
+        assert!(themes.contains(&Theme::HighContrast));
+    }
+
+    #[test]
+    fn name_round_trips_through_from_name() {
+        for t in Theme::all() {
+            assert_eq!(Theme::from_name(t.name()), Some(t));
+        }
+    }
+
+    // --- Task 16.3: theme.toml round-trip ---
+
+    #[test]
+    fn theme_config_serializes_and_deserializes() {
+        for t in Theme::all() {
+            let config = ThemeConfig { theme: t };
+            let text = toml::to_string(&config).unwrap();
+            let parsed: ThemeConfig = toml::from_str(&text).unwrap();
+            assert_eq!(parsed.theme, t);
+        }
+    }
+
+    #[test]
+    fn theme_config_missing_field_defaults_to_dark() {
+        let parsed: ThemeConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn theme_config_with_unknown_name_is_a_parse_error() {
+        // serde's untagged-enum-via-rename matches strictly; an unknown
+        // wire name should fail deserialization, NOT silently default.
+        let r: Result<ThemeConfig, _> = toml::from_str(r#"theme = "solarized""#);
+        assert!(r.is_err(), "unknown theme name should fail to parse");
+    }
+
+    // --- Task 16.4: load_from_path + save_to_path round-trip ---
+
+    #[test]
+    fn load_from_path_returns_default_when_file_absent() {
+        let td = TempDir::new().unwrap();
+        let missing = td.path().join("theme.toml");
+        assert_eq!(load_from_path(&missing), Theme::Dark);
+    }
+
+    #[test]
+    fn load_from_path_returns_default_on_parse_error() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("theme.toml");
+        std::fs::write(&path, r#"theme = "totally-bogus""#).unwrap();
+        assert_eq!(
+            load_from_path(&path),
+            Theme::Dark,
+            "parse failure must fall back to default, not crash"
+        );
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("nested").join("theme.toml");
+        // Parent dir does not exist yet — save_to_path must create it.
+        save_to_path(&path, Theme::HighContrast).unwrap();
+        assert_eq!(load_from_path(&path), Theme::HighContrast);
+    }
+
+    #[test]
+    fn save_overwrites_previous_value() {
+        let td = TempDir::new().unwrap();
+        let path = td.path().join("theme.toml");
+        save_to_path(&path, Theme::Light).unwrap();
+        save_to_path(&path, Theme::Dark).unwrap();
+        assert_eq!(load_from_path(&path), Theme::Dark);
+    }
 }
