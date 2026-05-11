@@ -32,7 +32,6 @@
 //! `/sandbox` command.
 
 use std::collections::HashMap;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -307,11 +306,9 @@ fn apply_linux(
     // Read-side deny floor: hide $HOME secrets from the spawn. The set of
     // paths is the single source of truth declared by
     // `sensitive_paths::sensitive_paths_for_user`.
-    for sensitive in crate::sensitive_paths::sensitive_paths_for_user() {
-        for arg in hide_mount_args(&sensitive) {
-            wrapper_args.push(arg.into());
-        }
-    }
+    wrapper_args.extend(overlay_args_for_paths(
+        &crate::sensitive_paths::sensitive_paths_for_user(),
+    ));
 
     // Separator and then the original command.
     wrapper_args.push("--".into());
@@ -482,6 +479,21 @@ fn canonical_or_original(p: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+}
+
+/// Build the full deny-floor arg sequence for a list of sensitive paths.
+/// Each path contributes whatever `hide_mount_args` returns (tmpfs for
+/// dirs, ro-bind /dev/null for files, nothing for missing entries).
+/// Pure — does not read the env.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn overlay_args_for_paths(paths: &[PathBuf]) -> Vec<OsString> {
+    let mut out = Vec::new();
+    for sensitive in paths {
+        for arg in hide_mount_args(sensitive) {
+            out.push(arg.into());
+        }
+    }
+    out
 }
 
 /// Build `bwrap` arguments that hide the contents of `path` from a tool
@@ -922,46 +934,27 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn apply_linux_includes_sensitive_path_overlays() {
-        // Create a fake $HOME with one sensitive directory and one sensitive file
-        // so the helper actually has paths to mask.
-        let home = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir_all(home.path().join(".ssh")).unwrap();
-        std::fs::write(home.path().join(".netrc"), "secret\n").unwrap();
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: this test temporarily mutates HOME. There is no production
-        // alternative because apply_linux must read the real env to assemble its
-        // bwrap args; the canonical_or_original tests in this file use the same
-        // pattern. Cargo runs unit tests in this binary in parallel, so the test
-        // restores HOME at the end. If a flake is observed, gate with
-        // serial_test::serial.
-        unsafe {
-            std::env::set_var("HOME", home.path());
-        }
+    fn overlay_args_for_paths_emits_tmpfs_for_dirs_and_ro_bind_for_files() {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join(".ssh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = td.path().join(".netrc");
+        std::fs::write(&file, "secret\n").unwrap();
+        let missing = td.path().join("nonexistent");
 
-        let project_root = tempfile::TempDir::new().unwrap();
-        let mut cmd = make_cmd("/usr/bin/echo");
-        let config = config_on();
-        let tool_bin = std::path::PathBuf::from("/path/to/tool-fs");
-        apply_sandbox(&mut cmd, &tool_bin, project_root.path(), &config);
+        let args = overlay_args_for_paths(&[dir.clone(), file.clone(), missing]);
+        let dbg = format!("{args:?}");
 
-        let dbg = format!("{:?}", cmd.as_std());
-
-        unsafe {
-            match prev_home {
-                Some(h) => std::env::set_var("HOME", h),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-
-        assert!(
-            dbg.contains("--tmpfs") && dbg.contains(".ssh"),
-            "expected .ssh tmpfs overlay in:\n{dbg}"
-        );
-        assert!(
-            dbg.contains("--ro-bind") && dbg.contains(".netrc"),
-            "expected .netrc ro-bind overlay in:\n{dbg}"
+        assert!(dbg.contains("--tmpfs"));
+        assert!(dbg.contains(".ssh"));
+        assert!(dbg.contains("--ro-bind"));
+        assert!(dbg.contains("/dev/null"));
+        assert!(dbg.contains(".netrc"));
+        // Missing path contributes nothing — count the args.
+        let total: usize = args.len();
+        assert_eq!(
+            total, 5,
+            "expected 2 (--tmpfs, .ssh) + 3 (--ro-bind, /dev/null, .netrc) = 5 args, got {args:?}"
         );
     }
 
