@@ -711,23 +711,25 @@ impl Host {
         }
     }
 
-    /// Invoke the registered `tool-bash` `run` tool directly, outside the
-    /// model-driven tool-use loop. Used by the TUI's `/bash` slash command
-    /// so a user can run a shell command without round-tripping through
-    /// the provider.
+    /// Run a single shell command via `tool-bash`. Used by the TUI's
+    /// `/bash` slash command so a user can run a shell command without
+    /// round-tripping through the provider.
     ///
-    /// `net_override` is forwarded to
-    /// [`crate::tools::ToolRegistry::call_with_bash_net_override`]:
-    /// `Some(true)` / `Some(false)` short-circuit the bash-network policy
-    /// for this call; `None` defers to the policy (which may emit
-    /// [`TurnEvent::BashNetworkRequested`] on `events` if one is
-    /// supplied).
+    /// Returns `Err("tool registry unavailable")` if the host has been
+    /// shut down. If `tool-bash` is not configured on this host, returns
+    /// `Ok((true, "unknown tool: run"))` from the tool dispatch layer.
     ///
-    /// Returns `Ok((is_error, payload))` — `is_error == true` means the
-    /// underlying tool reported failure (non-zero exit, transport error,
-    /// etc.); `payload` is the textual tool-result. Returns
-    /// `Err("tool-bash not registered")` when no bash endpoint was
-    /// configured on the host.
+    /// `net_override`:
+    /// - `None` — use the configured bash-network policy (default: `Ask`).
+    /// - `Some(true)` — force `allow_net = true` for this call only.
+    /// - `Some(false)` — force `allow_net = false` for this call only.
+    ///
+    /// Per-call overrides do not mutate the session decision cache.
+    ///
+    /// `events` — channel to receive
+    /// [`TurnEvent::BashNetworkRequested`] events during the call.
+    /// Required when the policy is `Ask` and no decision is cached,
+    /// otherwise the resolver collapses to deny.
     pub async fn run_bash_command(
         &self,
         command: &str,
@@ -943,10 +945,11 @@ fn bootstrap_bash_net_resolver() -> BashNetResolver {
     })
 }
 
-/// Reasons [`resolve_bash_network_with_state`] can fail to produce a
-/// decision. Each variant short-circuits the lazy spawn to "deny" via
-/// the resolver closure's `unwrap_or(false)` and is logged so an
-/// operator can trace why the bash spawn never reached the user.
+/// Reasons the lazy bash-network resolver can fail to produce a
+/// decision. Each variant short-circuits the lazy spawn to "deny"
+/// (via the resolver closure installed on the tool registry) and is
+/// logged so an operator can trace why the bash spawn never reached
+/// the user.
 #[derive(Debug, thiserror::Error)]
 pub enum BashNetResolveError {
     /// `policy = Ask` and the bash spawn was triggered with no

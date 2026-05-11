@@ -96,9 +96,18 @@ struct LazyBash {
     /// `Host` construction completes — at `connect` time we can't yet
     /// capture `self` into the closure.
     resolver: Arc<RwLock<BashNetResolver>>,
-    /// Currently-active spawned server, if any. Lock guards the entire
-    /// (resolve → reuse-or-respawn → dispatch) sequence for one call so
-    /// concurrent calls can't race to spawn two children.
+    /// Currently-active spawned server, if any.
+    ///
+    /// The lock guards only the (reuse-or-respawn → dispatch) sequence
+    /// — the resolver runs unlocked (it may park on a user prompt, and
+    /// we don't want to serialize that across all bash dispatches).
+    ///
+    /// Today's flow is serial-by-construction at the TUI layer
+    /// (`app.is_loading` gate prevents concurrent `/bash` invocations
+    /// and model-driven calls run sequentially through the turn loop),
+    /// so concurrent dispatches don't race in practice. If a future
+    /// caller breaks that, both could park on the same prompt's
+    /// `oneshot`.
     active: Mutex<Option<ActiveBashServer>>,
 }
 

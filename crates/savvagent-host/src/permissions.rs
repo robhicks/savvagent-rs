@@ -278,9 +278,13 @@ pub struct PermissionPolicy {
     /// Rules loaded from `permissions.toml`. Mutable; written through on
     /// [`PermissionPolicy::add_rule`].
     toml_rules: Arc<RwLock<Vec<Rule>>>,
-    /// Policy for `tool-bash` network access. Loaded from
-    /// `permissions.toml`'s `[bash_network] mode = "ask"|"always"|"never"`.
-    /// Defaults to [`BashNetworkPolicy::Ask`].
+    /// Configured bash-network policy for this session.
+    ///
+    /// Currently always [`BashNetworkPolicy::default()`] (`Ask`) from
+    /// [`PermissionPolicy::default_for`]. A `permissions.toml` loader
+    /// for the `[bash_network] mode = "ask"|"always"|"never"` shape is
+    /// a v0.7+ follow-up. Tests can override via the
+    /// `#[cfg(test)] with_bash_network` setter.
     bash_network: BashNetworkPolicy,
     /// Session-scoped cached decision. Populated by
     /// [`PermissionPolicy::resolve_bash_network`] when the user picks an
