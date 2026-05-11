@@ -115,8 +115,7 @@ pub(crate) fn save_to_path(path: &Path, theme: Theme) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let config = ThemeConfig { theme };
-    let text =
-        toml::to_string(&config).expect("ThemeConfig serialization is infallible");
+    let text = toml::to_string(&config).expect("ThemeConfig serialization is infallible");
     std::fs::write(path, text)
 }
 

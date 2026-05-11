@@ -829,7 +829,11 @@ fn handle_theme_command(app: &mut App, args: &str) {
     if trimmed.is_empty() || trimmed == "list" {
         app.push_note("themes:");
         for t in theme::Theme::all() {
-            let marker = if t == app.active_theme { " (active)" } else { "" };
+            let marker = if t == app.active_theme {
+                " (active)"
+            } else {
+                ""
+            };
             app.push_note(format!("  {}{}", t.name(), marker));
         }
         return;

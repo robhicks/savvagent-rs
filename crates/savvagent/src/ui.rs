@@ -190,10 +190,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("{:<10} ", cmd.name), style),
-                    Span::styled(
-                        &cmd.description,
-                        palette.base_style().fg(palette.muted),
-                    ),
+                    Span::styled(&cmd.description, palette.base_style().fg(palette.muted)),
                 ]))
             })
             .collect();
