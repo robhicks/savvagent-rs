@@ -581,10 +581,9 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn config_on() -> SandboxConfig {
-        SandboxConfig {
-            enabled: true,
-            ..SandboxConfig::default()
-        }
+        // v0.7 default-on: the new `SandboxConfig::default()` already has
+        // `enabled = true`, so this helper is equivalent to `default()`.
+        SandboxConfig::default()
     }
 
     fn config_off() -> SandboxConfig {
@@ -612,9 +611,12 @@ mod tests {
     }
 
     #[test]
-    fn default_config_has_sandboxing_disabled() {
+    fn default_config_has_sandboxing_enabled() {
         let cfg = SandboxConfig::default();
-        assert!(!cfg.enabled);
+        assert!(
+            cfg.enabled,
+            "v0.7 default-on: SandboxConfig::default() must have enabled=true"
+        );
     }
 
     #[test]
