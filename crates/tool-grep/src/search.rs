@@ -209,6 +209,20 @@ fn is_sensitive_path(path: &Path) -> bool {
     })
 }
 
+/// Render a path as a string using `/` as the component separator regardless
+/// of host OS. The `SearchMatch.file` field is documented as a path relative
+/// to the search root; cross-platform consumers expect one canonical shape.
+/// Backslashes are legal Unix filename characters, so we only rewrite on
+/// Windows.
+fn to_forward_slashes(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 struct CollectSink<'a, M: grep_matcher::Matcher> {
     rel: &'a Path,
     out: &'a mut Vec<SearchMatch>,
@@ -247,7 +261,7 @@ impl<'a, M: grep_matcher::Matcher> grep_searcher::Sink for CollectSink<'a, M> {
             .unwrap_or(1);
 
         self.out.push(SearchMatch {
-            file: self.rel.to_string_lossy().into_owned(),
+            file: to_forward_slashes(self.rel),
             line: line_no,
             column,
             text: line,
@@ -267,6 +281,18 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn to_forward_slashes_emits_posix_separators() {
+        // PathBuf::from_iter uses the host's native separator, so on Windows
+        // this yields `src\a.rs`. The helper must collapse both shapes to
+        // a single canonical forward-slash form for the SPP wire output.
+        let p: PathBuf = ["src", "a.rs"].iter().collect();
+        assert_eq!(to_forward_slashes(&p), "src/a.rs");
+
+        let p: PathBuf = ["lone.rs"].iter().collect();
+        assert_eq!(to_forward_slashes(&p), "lone.rs");
     }
 
     #[test]
