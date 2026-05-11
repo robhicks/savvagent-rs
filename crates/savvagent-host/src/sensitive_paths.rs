@@ -16,11 +16,16 @@
 //!   compromised tool bypasses the in-process check, the kernel refuses
 //!   the read.
 //!
-//! The OS sandbox list lives under `$HOME`; the in-process check is a
-//! superset that also covers project-relative `.env*` files.
+//! The two layers overlap but neither is a strict superset: the in-process
+//! check additionally covers project-relative `.env*` files anywhere in the
+//! path, while the OS sandbox additionally hides the macOS browser profile
+//! directories (`Library/Application Support/Firefox`,
+//! `…/Google/Chrome`).
 //!
-//! Single source of truth — both consumers import from here. Drift
-//! between layers is impossible by construction.
+//! Single source of truth FOR THE HOST CRATE — `permissions.rs` and
+//! `sandbox.rs` both consume this module. `tool-fs` and `tool-grep` carry
+//! their own narrower checks (defense in depth); unifying them across
+//! crate boundaries is tracked as a v0.7+ follow-up.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -30,7 +35,7 @@ use std::path::PathBuf;
 /// (which joins each entry against `$HOME` for the OS sandbox overlay)
 /// and [`is_sensitive_path`] (which checks whether an arbitrary path
 /// falls under any of these stems).
-const SENSITIVE_HOME_STEMS: &[&str] = &[
+pub const SENSITIVE_HOME_STEMS: &[&str] = &[
     ".ssh",
     ".aws",
     ".gnupg",
@@ -88,10 +93,10 @@ fn sensitive_paths_under(home: &Path) -> Vec<PathBuf> {
 /// must not read or write. Covers:
 ///
 /// - `.env` and `.env.*` files anywhere in the path.
-/// - Any path whose components include one of the sensitive home
-///   directories listed in [`sensitive_paths_for_user`] (`.ssh`, `.aws`,
-///   `.gnupg`, `gh`, `google-chrome`, `.mozilla`).
-/// - Absolute paths that fall *under* any of those directories.
+/// - Any path whose components fall under one of the home-directory stems
+///   in [`SENSITIVE_HOME_STEMS`] (`.ssh`, `.aws`, `.gnupg`, `.netrc`,
+///   `.mozilla`, `.config/gh`, `.config/google-chrome`).
+/// - Absolute paths that fall *under* any of those stems.
 pub fn is_sensitive_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     if dotenv_match(&normalized) {

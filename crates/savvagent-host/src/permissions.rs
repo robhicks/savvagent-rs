@@ -16,9 +16,11 @@
 //! `evaluate` walks rule sources in this order, returning the verdict from
 //! the first match:
 //!
-//! 1. **Sensitive-path floor.** `.env*` files and anything under `.ssh/`
-//!    are *always* `Deny`, regardless of any other rule. This is the
-//!    inviolable security floor.
+//! 1. **Sensitive-path floor.** Anything matching
+//!    [`crate::sensitive_paths::is_sensitive_path`] is *always* `Deny`,
+//!    regardless of any other rule. As of v0.7 the floor covers `.env*`
+//!    files plus the home-directory secret stems in
+//!    [`crate::sensitive_paths::SENSITIVE_HOME_STEMS`].
 //! 2. **Front-matter rules** parsed from `SAVVAGENT.md` YAML front-matter
 //!    (immutable for the session — project-pinned).
 //! 3. **`~/.savvagent/permissions.toml`** rules (mutable — Always/Never
