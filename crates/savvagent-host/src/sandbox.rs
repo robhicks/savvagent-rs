@@ -24,8 +24,9 @@
 //!
 //! As of v0.7 PR 15, `tool-bash` is denied network by default. The host's
 //! spawn path resolves bash network access at runtime via the permission
-//! layer (`Host::resolve_bash_network_async`) and injects a per-spawn
-//! `tool_overrides["tool-bash"].allow_net` before calling
+//! layer (see `tools::LazyBash` and the bash-net resolver closure
+//! installed by `Host::wire_self_into_resolver`) and injects a
+//! per-spawn `tool_overrides["tool-bash"].allow_net` before calling
 //! [`apply_sandbox`]. User-pinned overrides in `~/.savvagent/sandbox.toml`
 //! still win — set `[tool_overrides.tool-bash] allow_net = true` to opt
 //! out of the prompt and grant net access unconditionally.
@@ -145,7 +146,7 @@ impl SandboxConfig {
         // Built-in per-tool default: `tool-bash` is denied network by
         // default as of v0.7 PR 15. The host's spawn path injects a
         // per-spawn override based on the runtime permission decision
-        // (see `Host::resolve_bash_network_async`). User configs can also
+        // (see `tools::LazyBash`). User configs can also
         // pin allow/deny via `[tool_overrides.tool-bash] allow_net = ...`
         // in `~/.savvagent/sandbox.toml`.
         if bin_str.contains("tool-bash") {

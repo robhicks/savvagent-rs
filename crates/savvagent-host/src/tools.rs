@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use rmcp::{
@@ -92,7 +92,11 @@ struct LazyBash {
     config: BashSpawnConfig,
     /// Resolves the runtime `allow_net` for a given per-call override.
     /// Invoked once per call before we look at the cached active server.
-    resolver: BashNetResolver,
+    /// Held behind `RwLock` so the host can install a real resolver
+    /// (one that calls back into the host's permission state) after
+    /// `Host` construction completes — at `connect` time we can't yet
+    /// capture `self` into the closure.
+    resolver: Arc<RwLock<BashNetResolver>>,
     /// Currently-active spawned server, if any. Lock guards the entire
     /// (resolve → reuse-or-respawn → dispatch) sequence for one call so
     /// concurrent calls can't race to spawn two children.
@@ -215,7 +219,7 @@ impl ToolRegistry {
                                 project_root: project_root.to_path_buf(),
                                 sandbox_template: sandbox.clone(),
                             },
-                            resolver: bash_net_resolver.clone(),
+                            resolver: Arc::new(RwLock::new(bash_net_resolver.clone())),
                             active: Mutex::new(None),
                         });
                     } else {
@@ -335,6 +339,18 @@ impl ToolRegistry {
         }
     }
 
+    /// Replace the bash network resolver. Used by [`crate::session::Host`]
+    /// after construction so the resolver can capture `Arc`-shared
+    /// handles to the host's permission state and emit
+    /// [`crate::session::TurnEvent::BashNetworkRequested`].
+    ///
+    /// No-op when no `tool-bash` endpoint is configured.
+    pub(crate) fn install_bash_net_resolver(&self, resolver: BashNetResolver) {
+        if let Some(lazy) = self.lazy_bash.as_ref() {
+            *lazy.resolver.write().expect("resolver lock poisoned") = resolver;
+        }
+    }
+
     /// Cancel each tool server session, draining its child process.
     pub async fn shutdown(self) {
         for s in self.eager_servers {
@@ -365,8 +381,10 @@ impl LazyBash {
         // Step 1: resolve the per-call allow_net via the host-supplied
         // resolver. This may emit a prompt and block until the user
         // answers — hence why we run it before taking the active-server
-        // lock.
-        let resolver = self.resolver.clone();
+        // lock. We snapshot the current resolver under a brief read lock,
+        // then drop the lock before awaiting so the host can swap the
+        // resolver freely.
+        let resolver = self.resolver.read().expect("resolver lock poisoned").clone();
         let allow_net = (resolver)(net_override).await;
 
         // Step 2: lock the active server slot so we get a single
