@@ -917,12 +917,8 @@ mod tests {
         ];
         let extra_binds: Vec<&std::path::Path> = vec![];
 
-        let profile = build_macos_profile_with(
-            root,
-            /* allow_net = */ false,
-            &extra_binds,
-            &sensitive,
-        );
+        let profile =
+            build_macos_profile_with(root, /* allow_net = */ false, &extra_binds, &sensitive);
 
         assert!(
             profile.contains(r#"(deny file-read* (subpath "/Users/alice/.ssh"))"#),
