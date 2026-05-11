@@ -45,10 +45,22 @@ const SENSITIVE_HOME_STEMS: &[&str] = &[
 /// the current user's home directory. Paths that do not exist on disk are
 /// silently filtered out — there is nothing to overlay.
 pub fn sensitive_paths_for_user() -> Vec<PathBuf> {
-    match home_dir() {
-        Some(h) => sensitive_paths_under(&h),
-        None => Vec::new(),
+    let Some(home) = home_dir() else {
+        tracing::warn!(
+            "sandbox deny-floor: $HOME is unset; tool spawns will have NO sensitive-path overlays. \
+             Set $HOME explicitly to enable home-directory secret hiding."
+        );
+        return Vec::new();
+    };
+    let paths = sensitive_paths_under(&home);
+    if paths.is_empty() {
+        tracing::warn!(
+            "sandbox deny-floor: no sensitive paths exist under HOME={}; \
+             the deny floor for this user is effectively empty",
+            home.display()
+        );
     }
+    paths
 }
 
 fn sensitive_paths_under(home: &Path) -> Vec<PathBuf> {
@@ -103,7 +115,11 @@ fn sensitive_segment_match(path: &str) -> bool {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    let raw = std::env::var_os("HOME")?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
 }
 
 #[cfg(test)]

@@ -531,11 +531,26 @@ fn overlay_args_for_paths(paths: &[PathBuf]) -> Vec<OsString> {
 fn hide_mount_args(path: &Path) -> Vec<String> {
     let resolved = match std::fs::canonicalize(path) {
         Ok(p) => p,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            tracing::error!(
+                "sandbox deny-floor: cannot canonicalize sensitive path {} ({e}); \
+                 it will NOT be hidden from the tool spawn",
+                path.display()
+            );
+            return Vec::new();
+        }
     };
     let meta = match std::fs::metadata(&resolved) {
         Ok(m) => m,
-        Err(_) => return Vec::new(),
+        Err(e) => {
+            tracing::error!(
+                "sandbox deny-floor: cannot stat sensitive path {} ({e}); \
+                 it will NOT be hidden from the tool spawn",
+                path.display()
+            );
+            return Vec::new();
+        }
     };
     let target = path.display().to_string();
     if meta.is_dir() {

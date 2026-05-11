@@ -536,6 +536,32 @@ mod tests {
     }
 
     #[test]
+    fn widened_floor_denies_even_with_allow_rule() {
+        // Each of these paths matches a SENSITIVE_HOME_STEMS entry. The floor
+        // must deny them even when a front-matter allow rule names the exact
+        // path.
+        let cases = [
+            ".aws/credentials",
+            ".gnupg/private-keys-v1.d/foo.key",
+            ".config/gh/hosts.yml",
+            ".netrc",
+        ];
+        for path in cases {
+            let mut p = empty();
+            p.front_matter_rules = Arc::new(vec![Rule {
+                tool_name: "read_file".into(),
+                pattern: ArgPattern::Path(path.into()),
+                decision: PermissionDecision::Allow,
+            }]);
+            let verdict = p.evaluate("read_file", &json!({ "path": path }));
+            assert!(
+                matches!(verdict, Verdict::Deny { .. }),
+                "floor must deny `{path}` even with allow rule; got {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
     fn front_matter_overrides_default() {
         let mut p = empty();
         p.front_matter_rules = Arc::new(vec![Rule {
