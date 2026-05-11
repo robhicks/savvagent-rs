@@ -23,6 +23,7 @@ mod permissions;
 mod project;
 mod provider;
 mod sandbox;
+pub mod sensitive_paths;
 mod session;
 mod tools;
 
@@ -31,7 +32,7 @@ pub use permissions::{
     ArgPattern, FrontMatterPermissions, PermissionDecision, PermissionPolicy, PermissionsToml,
     Rule, SerializableRule, Verdict,
 };
-pub use sandbox::{SandboxConfig, SandboxWrapper, ToolSandboxOverride};
+pub use sandbox::{SandboxConfig, SandboxWrapper, ToolSandboxOverride, apply_sandbox};
 pub use savvagent_protocol::{ListModelsResponse, ModelInfo, ToolDef};
 pub use session::{
     Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError,

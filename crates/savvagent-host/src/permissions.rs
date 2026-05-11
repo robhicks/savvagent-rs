@@ -16,9 +16,11 @@
 //! `evaluate` walks rule sources in this order, returning the verdict from
 //! the first match:
 //!
-//! 1. **Sensitive-path floor.** `.env*` files and anything under `.ssh/`
-//!    are *always* `Deny`, regardless of any other rule. This is the
-//!    inviolable security floor.
+//! 1. **Sensitive-path floor.** Anything matching
+//!    [`crate::sensitive_paths::is_sensitive_path`] is *always* `Deny`,
+//!    regardless of any other rule. As of v0.7 the floor covers `.env*`
+//!    files plus the home-directory secret stems in
+//!    [`crate::sensitive_paths::SENSITIVE_HOME_STEMS`].
 //! 2. **Front-matter rules** parsed from `SAVVAGENT.md` YAML front-matter
 //!    (immutable for the session — project-pinned).
 //! 3. **`~/.savvagent/permissions.toml`** rules (mutable — Always/Never
@@ -38,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::project;
+use crate::sensitive_paths::is_sensitive_path;
 
 /// Outcome of evaluating a tool call against the policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,7 +287,9 @@ impl PermissionPolicy {
         if let Some(p) = path_arg(args) {
             if is_sensitive_path(&p) {
                 return Verdict::Deny {
-                    reason: format!("path `{p}` is policy-protected (.env / .ssh)"),
+                    reason: format!(
+                        "path `{p}` is policy-protected (matches sensitive-path deny list)"
+                    ),
                 };
             }
         }
@@ -447,15 +452,6 @@ fn short_args(args: &Value) -> String {
     }
 }
 
-fn is_sensitive_path(p: &str) -> bool {
-    let s = p.replace('\\', "/");
-    let last = s.rsplit('/').next().unwrap_or("");
-    if last == ".env" || last.starts_with(".env.") {
-        return true;
-    }
-    s == ".ssh" || s.starts_with(".ssh/") || s.contains("/.ssh/") || s.ends_with("/.ssh")
-}
-
 fn is_under(p: &str, root: &Path) -> bool {
     let path = Path::new(p);
     if path.is_absolute() {
@@ -539,6 +535,32 @@ mod tests {
             p.evaluate("read_file", &json!({"path": ".env"})),
             Verdict::Deny { .. }
         ));
+    }
+
+    #[test]
+    fn widened_floor_denies_even_with_allow_rule() {
+        // Each of these paths matches a SENSITIVE_HOME_STEMS entry. The floor
+        // must deny them even when a front-matter allow rule names the exact
+        // path.
+        let cases = [
+            ".aws/credentials",
+            ".gnupg/private-keys-v1.d/foo.key",
+            ".config/gh/hosts.yml",
+            ".netrc",
+        ];
+        for path in cases {
+            let mut p = empty();
+            p.front_matter_rules = Arc::new(vec![Rule {
+                tool_name: "read_file".into(),
+                pattern: ArgPattern::Path(path.into()),
+                decision: PermissionDecision::Allow,
+            }]);
+            let verdict = p.evaluate("read_file", &json!({ "path": path }));
+            assert!(
+                matches!(verdict, Verdict::Deny { .. }),
+                "floor must deny `{path}` even with allow rule; got {verdict:?}"
+            );
+        }
     }
 
     #[test]

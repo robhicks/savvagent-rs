@@ -32,7 +32,6 @@
 //! `/sandbox` command.
 
 use std::collections::HashMap;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -304,6 +303,13 @@ fn apply_linux(
     // New session to prevent the tool from sending signals to the terminal.
     wrapper_args.push("--new-session".into());
 
+    // Read-side deny floor: hide $HOME secrets from the spawn. The set of
+    // paths is the single source of truth declared by
+    // `sensitive_paths::sensitive_paths_for_user`.
+    wrapper_args.extend(overlay_args_for_paths(
+        &crate::sensitive_paths::sensitive_paths_for_user(),
+    ));
+
     // Separator and then the original command.
     wrapper_args.push("--".into());
     wrapper_args.push(orig_program);
@@ -418,14 +424,29 @@ fn scheme_quote(s: &str) -> String {
     out
 }
 
-/// Build the TinyScheme profile passed to `sandbox-exec -p`. Pure string
-/// composition — separated out so it can be unit-tested on any platform.
+/// Build the TinyScheme profile passed to `sandbox-exec -p`. Reads the real
+/// sensitive-path list from `sensitive_paths::sensitive_paths_for_user`.
+/// Thin shim around [`build_macos_profile_with`] for testability.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn build_macos_profile(project_root: &Path, allow_net: bool, extra_binds: &[&Path]) -> String {
+    let sensitive = crate::sensitive_paths::sensitive_paths_for_user();
+    build_macos_profile_with(project_root, allow_net, extra_binds, &sensitive)
+}
+
+/// Build the TinyScheme profile from explicit inputs. Pure string composition —
+/// does not read `$HOME` or any other process state. Tests pass a synthetic
+/// sensitive list.
 ///
 /// Path strings are escaped via [`scheme_quote`] so that paths containing
 /// `"`, `\`, or newlines cannot break out of the string literal and corrupt
 /// the profile.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn build_macos_profile(project_root: &Path, allow_net: bool, extra_binds: &[&Path]) -> String {
+fn build_macos_profile_with(
+    project_root: &Path,
+    allow_net: bool,
+    extra_binds: &[&Path],
+    sensitive: &[PathBuf],
+) -> String {
     let project_root_str = scheme_quote(&project_root.to_string_lossy());
 
     let mut profile = String::from("(version 1)\n");
@@ -440,6 +461,14 @@ fn build_macos_profile(project_root: &Path, allow_net: bool, extra_binds: &[&Pat
     for bind in extra_binds {
         let bind_str = scheme_quote(&bind.to_string_lossy());
         profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", bind_str));
+    }
+
+    // Read-side deny floor: forbid reads of sensitive paths even though the
+    // base policy allows file-read* by default. Sensitive list is the single
+    // source of truth from `sensitive_paths::sensitive_paths_for_user`.
+    for path in sensitive {
+        let q = scheme_quote(&path.to_string_lossy());
+        profile.push_str(&format!("(deny file-read* (subpath \"{}\"))\n", q));
     }
 
     // Deny network unless allowed.
@@ -473,6 +502,62 @@ fn canonical_or_original(p: &Path) -> Option<PathBuf> {
         return None;
     }
     Some(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+}
+
+/// Build the full deny-floor arg sequence for a list of sensitive paths.
+/// Each path contributes whatever `hide_mount_args` returns (tmpfs for
+/// dirs, ro-bind /dev/null for files, nothing for missing entries).
+/// Pure — does not read the env.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn overlay_args_for_paths(paths: &[PathBuf]) -> Vec<OsString> {
+    let mut out = Vec::new();
+    for sensitive in paths {
+        for arg in hide_mount_args(sensitive) {
+            out.push(arg.into());
+        }
+    }
+    out
+}
+
+/// Build `bwrap` arguments that hide the contents of `path` from a tool
+/// spawn. Returns the empty vector if `path` does not exist.
+///
+/// - Directories are masked with `--tmpfs <path>` (empty in-memory mount).
+/// - Regular files are masked with `--ro-bind /dev/null <path>`
+///   (read returns 0 bytes; writes fail with EACCES).
+///
+/// Symlinks are followed before classifying — `~/.aws` → real dir works.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn hide_mount_args(path: &Path) -> Vec<String> {
+    let resolved = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            tracing::error!(
+                "sandbox deny-floor: cannot canonicalize sensitive path {} ({e}); \
+                 it will NOT be hidden from the tool spawn",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    let meta = match std::fs::metadata(&resolved) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(
+                "sandbox deny-floor: cannot stat sensitive path {} ({e}); \
+                 it will NOT be hidden from the tool spawn",
+                path.display()
+            );
+            return Vec::new();
+        }
+    };
+    let target = path.display().to_string();
+    if meta.is_dir() {
+        vec!["--tmpfs".into(), target]
+    } else {
+        vec!["--ro-bind".into(), "/dev/null".into(), target]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -839,6 +924,31 @@ mod tests {
     }
 
     #[test]
+    fn build_macos_profile_with_appends_file_read_deny_for_sensitive_paths() {
+        let root = std::path::Path::new("/Users/alice/project");
+        let sensitive: Vec<std::path::PathBuf> = vec![
+            std::path::PathBuf::from("/Users/alice/.ssh"),
+            std::path::PathBuf::from("/Users/alice/.aws"),
+        ];
+        let extra_binds: Vec<&std::path::Path> = vec![];
+
+        let profile =
+            build_macos_profile_with(root, /* allow_net = */ false, &extra_binds, &sensitive);
+
+        assert!(
+            profile.contains(r#"(deny file-read* (subpath "/Users/alice/.ssh"))"#),
+            "missing .ssh deny clause in profile:\n{profile}"
+        );
+        assert!(
+            profile.contains(r#"(deny file-read* (subpath "/Users/alice/.aws"))"#),
+            "missing .aws deny clause in profile:\n{profile}"
+        );
+        // Sanity: existing clauses still present.
+        assert!(profile.contains("(allow file-write* (subpath \"/Users/alice/project\"))"));
+        assert!(profile.contains("(deny network*)"));
+    }
+
+    #[test]
     fn macos_profile_escapes_extra_bind_paths() {
         // Both project root and extra binds are user-controlled (via
         // SandboxConfig), so both must be escaped.
@@ -848,6 +958,66 @@ mod tests {
         assert!(
             profile.contains(r#"(allow file-write* (subpath "/tmp/with\"quote"))"#),
             "extra bind not properly escaped:\n{profile}"
+        );
+    }
+
+    #[test]
+    fn hide_mount_args_for_existing_directory_use_tmpfs() {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join(".ssh");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let args = hide_mount_args(&dir);
+        assert_eq!(args, vec!["--tmpfs".into(), dir.display().to_string()]);
+    }
+
+    #[test]
+    fn hide_mount_args_for_existing_file_use_ro_bind_dev_null() {
+        let td = tempfile::TempDir::new().unwrap();
+        let file = td.path().join(".netrc");
+        std::fs::write(&file, "secret\n").unwrap();
+
+        let args = hide_mount_args(&file);
+        assert_eq!(
+            args,
+            vec![
+                "--ro-bind".into(),
+                "/dev/null".into(),
+                file.display().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hide_mount_args_for_missing_path_returns_empty() {
+        let td = tempfile::TempDir::new().unwrap();
+        let missing = td.path().join("nonexistent");
+        let args = hide_mount_args(&missing);
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn overlay_args_for_paths_emits_tmpfs_for_dirs_and_ro_bind_for_files() {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join(".ssh");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = td.path().join(".netrc");
+        std::fs::write(&file, "secret\n").unwrap();
+        let missing = td.path().join("nonexistent");
+
+        let args = overlay_args_for_paths(&[dir.clone(), file.clone(), missing]);
+        let dbg = format!("{args:?}");
+
+        assert!(dbg.contains("--tmpfs"));
+        assert!(dbg.contains(".ssh"));
+        assert!(dbg.contains("--ro-bind"));
+        assert!(dbg.contains("/dev/null"));
+        assert!(dbg.contains(".netrc"));
+        // Missing path contributes nothing — count the args.
+        let total: usize = args.len();
+        assert_eq!(
+            total, 5,
+            "expected 2 (--tmpfs, .ssh) + 3 (--ro-bind, /dev/null, .netrc) = 5 args, got {args:?}"
         );
     }
 
