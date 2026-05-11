@@ -22,6 +22,7 @@
 //! Single source of truth — both consumers import from here. Drift
 //! between layers is impossible by construction.
 
+use std::path::Path;
 use std::path::PathBuf;
 
 /// Path stems under `$HOME` whose contents must be treated as sensitive.
@@ -44,9 +45,13 @@ const SENSITIVE_HOME_STEMS: &[&str] = &[
 /// the current user's home directory. Paths that do not exist on disk are
 /// silently filtered out — there is nothing to overlay.
 pub fn sensitive_paths_for_user() -> Vec<PathBuf> {
-    let Some(home) = home_dir() else {
-        return Vec::new();
-    };
+    match home_dir() {
+        Some(h) => sensitive_paths_under(&h),
+        None => Vec::new(),
+    }
+}
+
+fn sensitive_paths_under(home: &Path) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = SENSITIVE_HOME_STEMS
         .iter()
         .map(|stem| home.join(stem))
@@ -107,48 +112,14 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    struct HomeOverride {
-        _td: TempDir,
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl HomeOverride {
-        fn new() -> Self {
-            let td = TempDir::new().unwrap();
-            let prev = std::env::var_os("HOME");
-            // SAFETY: tests in this module run single-threaded by default
-            // and never inspect HOME from another thread.
-            unsafe {
-                std::env::set_var("HOME", td.path());
-            }
-            Self { _td: td, prev }
-        }
-
-        fn home(&self) -> PathBuf {
-            std::env::var_os("HOME").map(PathBuf::from).unwrap()
-        }
-    }
-
-    impl Drop for HomeOverride {
-        fn drop(&mut self) {
-            // SAFETY: see HomeOverride::new.
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
-    }
-
     #[test]
-    fn sensitive_paths_returns_only_existing_dirs() {
-        let h = HomeOverride::new();
-        fs::create_dir_all(h.home().join(".ssh")).unwrap();
-        fs::create_dir_all(h.home().join(".aws")).unwrap();
+    fn sensitive_paths_under_returns_only_existing_dirs() {
+        let td = TempDir::new().unwrap();
+        fs::create_dir_all(td.path().join(".ssh")).unwrap();
+        fs::create_dir_all(td.path().join(".aws")).unwrap();
         // intentionally do NOT create .gnupg
 
-        let paths = sensitive_paths_for_user();
+        let paths = sensitive_paths_under(td.path());
         let names: Vec<_> = paths
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -159,20 +130,9 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_paths_returns_empty_when_no_home() {
-        let _saved = std::env::var_os("HOME");
-        // SAFETY: tests in this module run single-threaded by default
-        // and never inspect HOME from another thread.
-        unsafe {
-            std::env::remove_var("HOME");
-        }
-        let paths = sensitive_paths_for_user();
-        assert!(paths.is_empty());
-        if let Some(h) = _saved {
-            // SAFETY: see above.
-            unsafe {
-                std::env::set_var("HOME", h);
-            }
-        }
+    fn sensitive_paths_under_empty_when_no_dirs_exist() {
+        let td = TempDir::new().unwrap();
+        let paths = sensitive_paths_under(td.path());
+        assert!(paths.is_empty(), "expected empty, got {:?}", paths);
     }
 }
