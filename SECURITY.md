@@ -9,9 +9,12 @@ third-party MCP servers — without crippling normal use.
 As of v0.7, when `enabled = true` (the default on Linux and macOS):
 
 - **Writes** outside the project root are denied.
-- **Network** is denied unless the per-tool override sets `allow_net = true`.
-  As of v0.7, `tool-bash` defaults to network-denied with a permission
-  prompt; see PR 15 in the v0.7 roadmap (#17) for details.
+- **Network** is denied for tool spawns by default. `tool-bash` is the one
+  exception in v0.7.0: it currently inherits `allow_net = true` via a
+  built-in per-tool fallback so common commands (`curl`, `cargo`, `npm`)
+  work out of the box. A runtime permission prompt
+  (`Once`/`Always-this-session`/`Deny`) replaces the static fallback in a
+  follow-up release tracked under issue #17.
 - **Reads** of well-known sensitive paths under `$HOME` are denied:
   `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.config/gh`, `~/.mozilla`,
   `~/.config/google-chrome`, and (on macOS) the Firefox / Chrome profile

@@ -2,8 +2,11 @@
 //!
 //! Each tool child process can be wrapped in an OS sandbox so that it cannot
 //! access the network or write outside the project root even if the tool binary
-//! itself is compromised. Sandboxing is **opt-in** for v0.5.0 — set
-//! [`SandboxConfig::enabled`] to `true` to activate it.
+//! itself is compromised. Sandboxing is **default-on** as of v0.7.0 on Linux
+//! and macOS — set [`SandboxConfig::enabled`] to `false` (or run `/sandbox
+//! off`) to opt out. Existing configs that explicitly set `enabled = false`
+//! are preserved across upgrade via the struct-level `#[serde(default)]` on
+//! [`SandboxConfig`].
 //!
 //! # Platform support
 //!
