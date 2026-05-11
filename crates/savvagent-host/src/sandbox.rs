@@ -483,6 +483,7 @@ fn canonical_or_original(p: &Path) -> Option<PathBuf> {
 ///   (read returns 0 bytes; writes fail with EACCES).
 ///
 /// Symlinks are followed before classifying — `~/.aws` → real dir works.
+#[allow(dead_code)] // wired into apply_linux in Task 13.7
 fn hide_mount_args(path: &Path) -> Vec<String> {
     let resolved = match std::fs::canonicalize(path) {
         Ok(p) => p,
