@@ -29,14 +29,14 @@ mod tools;
 
 pub use config::{HostConfig, ProviderEndpoint, ToolEndpoint};
 pub use permissions::{
-    ArgPattern, FrontMatterPermissions, PermissionDecision, PermissionPolicy, PermissionsToml,
-    Rule, SerializableRule, Verdict,
+    ArgPattern, BashNetworkChoice, BashNetworkPolicy, FrontMatterPermissions, PermissionDecision,
+    PermissionPolicy, PermissionsToml, Rule, SerializableRule, Verdict,
 };
 pub use sandbox::{SandboxConfig, SandboxWrapper, ToolSandboxOverride, apply_sandbox};
 pub use savvagent_protocol::{ListModelsResponse, ModelInfo, ToolDef};
 pub use session::{
-    Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError,
-    TranscriptFile, TurnEvent, TurnOutcome,
+    BashNetResolveError, Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus,
+    TranscriptError, TranscriptFile, TurnEvent, TurnOutcome,
 };
 
 #[doc(hidden)]

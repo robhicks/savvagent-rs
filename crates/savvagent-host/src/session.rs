@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use savvagent_mcp::ProviderClient;
@@ -15,11 +16,13 @@ use thiserror::Error;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::config::{HostConfig, ProviderEndpoint};
-use crate::permissions::{PermissionDecision, PermissionPolicy, Verdict};
+use crate::permissions::{
+    BashNetworkChoice, BashNetworkPolicy, PermissionDecision, PermissionPolicy, Verdict,
+};
 use crate::project;
 use crate::provider::RmcpProviderClient;
 use crate::sandbox::SandboxConfig;
-use crate::tools::ToolRegistry;
+use crate::tools::{BashNetResolver, ToolRegistry};
 
 /// Current transcript file schema version.
 ///
@@ -164,6 +167,18 @@ pub enum TurnEvent {
         /// Full argument JSON, in case the UI wants to render it expanded.
         args: Value,
     },
+    /// Tool-bash is about to be spawned and the configured
+    /// [`BashNetworkPolicy`] is `Ask` with no cached decision for this
+    /// session. The host pauses the spawn until the embedder calls
+    /// [`Host::resolve_bash_network_decision`] with `id`.
+    BashNetworkRequested {
+        /// Opaque request id; pass back to
+        /// [`Host::resolve_bash_network_decision`].
+        id: u64,
+        /// Human-readable summary of the bash invocation, suitable for
+        /// display in a modal (e.g., the first ~80 chars of the command).
+        summary: String,
+    },
     /// A tool call was refused (by policy or by the user). No `ToolCallStarted`
     /// or `ToolCallFinished` is emitted for this call — only this event plus a
     /// synthetic error `tool_result` appended to the conversation.
@@ -200,8 +215,23 @@ pub struct Host {
     /// `PermissionRequested`; the matching `oneshot` is consumed by
     /// [`Host::resolve_permission`].
     pending: Mutex<HashMap<u64, oneshot::Sender<PermissionDecision>>>,
-    /// Monotonic source for permission-request ids.
-    next_request_id: AtomicU64,
+    /// Outstanding `BashNetworkRequested` prompts, keyed by event id. The
+    /// matching `oneshot` is consumed by
+    /// [`Host::resolve_bash_network_decision`]. `Arc`-shared so the
+    /// lazy bash-net resolver closure can hold a reference too.
+    pending_bash_network: Arc<Mutex<HashMap<u64, oneshot::Sender<BashNetworkChoice>>>>,
+    /// Current turn's event channel, exposed so the lazy `tool-bash`
+    /// spawn resolver (which is invoked from inside `run_turn_inner` via
+    /// `ToolRegistry::call_with_bash_net_override`) can emit
+    /// [`TurnEvent::BashNetworkRequested`] without having to take the
+    /// channel through every call layer. Set at the start of each
+    /// streaming turn and cleared at the end; the non-streaming code
+    /// path leaves it `None`. Held behind `Arc<std::sync::Mutex<_>>`
+    /// so the resolver closure can clone its handle.
+    current_turn_events: Arc<std::sync::Mutex<Option<mpsc::Sender<TurnEvent>>>>,
+    /// Monotonic source for permission-request ids. `Arc`-shared so the
+    /// resolver closure can mint ids.
+    next_request_id: Arc<AtomicU64>,
 }
 
 struct SessionState {
@@ -218,14 +248,22 @@ impl Host {
             }
         };
         let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
-        let tools = ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
+        // The real resolver — which calls back into the host's
+        // permission state — captures `&self` and so can
+        // only be installed once we own the `Host`. The bootstrap resolver
+        // here is a safe default that returns the per-call override (if
+        // any) or falls back to `false`. `wire_self_into_resolver` swaps
+        // in the real one below.
+        let resolver = bootstrap_bash_net_resolver();
+        let tools =
+            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         let policy = config
             .policy
             .clone()
             .unwrap_or_else(|| PermissionPolicy::default_for(&config.project_root));
-        Ok(Self {
+        let host = Self {
             config,
             provider,
             tools: Mutex::new(Some(tools)),
@@ -236,8 +274,12 @@ impl Host {
             policy,
             sandbox,
             pending: Mutex::new(HashMap::new()),
-            next_request_id: AtomicU64::new(1),
-        })
+            pending_bash_network: Arc::new(Mutex::new(HashMap::new())),
+            current_turn_events: Arc::new(std::sync::Mutex::new(None)),
+            next_request_id: Arc::new(AtomicU64::new(1)),
+        };
+        host.wire_self_into_resolver().await;
+        Ok(host)
     }
 
     /// Construct a host directly from a (possibly mock) [`ProviderClient`] and
@@ -249,14 +291,16 @@ impl Host {
         provider: Box<dyn ProviderClient + Send + Sync>,
     ) -> Result<Self, HostError> {
         let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
-        let tools = ToolRegistry::connect(&config.tools, &config.project_root, &sandbox).await?;
+        let resolver = bootstrap_bash_net_resolver();
+        let tools =
+            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
         let system_prompt =
             project::system_prompt(&config.project_root, config.system_prompt.as_deref());
         let policy = config
             .policy
             .clone()
             .unwrap_or_else(|| PermissionPolicy::default_for(&config.project_root));
-        Ok(Self {
+        let host = Self {
             config,
             provider,
             tools: Mutex::new(Some(tools)),
@@ -267,8 +311,12 @@ impl Host {
             policy,
             sandbox,
             pending: Mutex::new(HashMap::new()),
-            next_request_id: AtomicU64::new(1),
-        })
+            pending_bash_network: Arc::new(Mutex::new(HashMap::new())),
+            current_turn_events: Arc::new(std::sync::Mutex::new(None)),
+            next_request_id: Arc::new(AtomicU64::new(1)),
+        };
+        host.wire_self_into_resolver().await;
+        Ok(host)
     }
 
     /// Send `user_input` as a user turn and run the tool-use loop until the
@@ -306,6 +354,10 @@ impl Host {
         user_input: String,
         events: Option<mpsc::Sender<TurnEvent>>,
     ) -> Result<TurnOutcome, HostError> {
+        // Publish the events channel (if any) for the lazy bash-net
+        // resolver. Clear it via a guard on exit so an early-return path
+        // doesn't leak a stale Sender that outlives the turn.
+        let _events_guard = CurrentTurnEventsGuard::install(&self.current_turn_events, &events);
         // Snapshot existing history and append the user message. We keep a
         // local working copy and only commit it back to `state` once the loop
         // succeeds — that way a failed turn doesn't corrupt the conversation.
@@ -454,7 +506,9 @@ impl Host {
                         let outcome = {
                             let guard = self.tools.lock().await;
                             let registry = guard.as_ref().expect("tools registry present");
-                            registry.call(&name, input.clone()).await
+                            registry
+                                .call_with_bash_net_override(&name, input.clone(), None)
+                                .await
                         };
                         let status = if outcome.is_error {
                             ToolCallStatus::Errored
@@ -643,6 +697,111 @@ impl Host {
         }
     }
 
+    /// Resolve a previously-emitted
+    /// [`TurnEvent::BashNetworkRequested`]. The embedder (TUI) calls this
+    /// after the user picks Once / AlwaysThisSession / DenyOnce /
+    /// DenyAlways from the modal. The corresponding spawn resumes.
+    ///
+    /// A no-op if `id` is unknown — that handles double-resolves and
+    /// races where the spawn was cancelled before the user answered.
+    pub async fn resolve_bash_network_decision(&self, id: u64, choice: BashNetworkChoice) {
+        let tx = self.pending_bash_network.lock().await.remove(&id);
+        if let Some(tx) = tx {
+            let _ = tx.send(choice);
+        }
+    }
+
+    /// Run a single shell command via `tool-bash`. Used by the TUI's
+    /// `/bash` slash command so a user can run a shell command without
+    /// round-tripping through the provider.
+    ///
+    /// Returns `Err("tool registry unavailable")` if the host has been
+    /// shut down. If `tool-bash` is not configured on this host, returns
+    /// `Ok((true, "unknown tool: run"))` from the tool dispatch layer.
+    ///
+    /// `net_override`:
+    /// - `None` — use the configured bash-network policy (default: `Ask`).
+    /// - `Some(true)` — force `allow_net = true` for this call only.
+    /// - `Some(false)` — force `allow_net = false` for this call only.
+    ///
+    /// Per-call overrides do not mutate the session decision cache.
+    ///
+    /// `events` — channel to receive
+    /// [`TurnEvent::BashNetworkRequested`] events during the call.
+    /// Required when the policy is `Ask` and no decision is cached,
+    /// otherwise the resolver collapses to deny.
+    pub async fn run_bash_command(
+        &self,
+        command: &str,
+        net_override: Option<bool>,
+        events: Option<mpsc::Sender<TurnEvent>>,
+    ) -> Result<(bool, String), String> {
+        let _events_guard = CurrentTurnEventsGuard::install(&self.current_turn_events, &events);
+        let input = serde_json::json!({ "command": command });
+        let guard = self.tools.lock().await;
+        let registry = guard
+            .as_ref()
+            .ok_or_else(|| "tool registry unavailable".to_string())?;
+        let outcome = registry
+            .call_with_bash_net_override("run", input, net_override)
+            .await;
+        Ok((outcome.is_error, outcome.payload))
+    }
+
+    /// Install the real bash-net resolver into the tool registry. The
+    /// resolver captures `Arc`-shared handles to the permission policy,
+    /// pending-prompt map, current-turn events, and request-id counter
+    /// — exactly the state [`resolve_bash_network_with_state`] needs
+    /// — so the closure can emit `BashNetworkRequested` and await the
+    /// user's answer without holding a reference to `Host` itself.
+    ///
+    /// Idempotent — replacing the resolver multiple times is fine; the
+    /// `ToolRegistry`'s lazy-bash slot reads it under a lock.
+    async fn wire_self_into_resolver(&self) {
+        let policy = self.policy.clone();
+        let pending = self.pending_bash_network.clone();
+        let next_id = self.next_request_id.clone();
+        let current_events = self.current_turn_events.clone();
+        let resolver: crate::tools::BashNetResolver = Arc::new(move |over: Option<bool>| {
+            // Per-call override short-circuits: never touch the cache.
+            if let Some(v) = over {
+                return Box::pin(async move { v });
+            }
+            let policy = policy.clone();
+            let pending = pending.clone();
+            let next_id = next_id.clone();
+            // Snapshot the current-turn events Sender (if any) so the
+            // resolver can emit a prompt without holding a lock across
+            // the await.
+            let events = current_events
+                .lock()
+                .expect("current_turn_events poisoned")
+                .clone();
+            Box::pin(async move {
+                let summary = "tool-bash spawn requests network access".to_string();
+                match resolve_bash_network_with_state(
+                    &policy,
+                    &pending,
+                    &next_id,
+                    events.as_ref(),
+                    summary,
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("tool-bash net resolver failed: {e}. Defaulting to deny.");
+                        false
+                    }
+                }
+            })
+        });
+        let guard = self.tools.lock().await;
+        if let Some(reg) = guard.as_ref() {
+            reg.install_bash_net_resolver(resolver);
+        }
+    }
+
     /// Persist a user-recorded Always/Never decision via the policy.
     ///
     /// Builds an [`crate::permissions::ArgPattern`] from `(tool_name, args)`
@@ -746,6 +905,135 @@ const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Host>();
 };
+
+/// RAII guard that publishes the per-turn events `Sender` to
+/// `Host::current_turn_events` for the lifetime of a turn, and clears
+/// it on drop. Lets the lazy bash-net resolver closure pick up the
+/// channel without having to thread it through every call layer.
+struct CurrentTurnEventsGuard<'a> {
+    slot: &'a std::sync::Mutex<Option<mpsc::Sender<TurnEvent>>>,
+}
+
+impl<'a> CurrentTurnEventsGuard<'a> {
+    fn install(
+        slot: &'a std::sync::Mutex<Option<mpsc::Sender<TurnEvent>>>,
+        events: &Option<mpsc::Sender<TurnEvent>>,
+    ) -> Self {
+        *slot.lock().expect("current_turn_events poisoned") = events.clone();
+        Self { slot }
+    }
+}
+
+impl Drop for CurrentTurnEventsGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut g) = self.slot.lock() {
+            *g = None;
+        }
+    }
+}
+
+/// Bootstrap resolver used while the registry is being constructed —
+/// before we have an `Arc<Host>` we can capture into a closure that
+/// calls back into the host's permission state. It returns the
+/// per-call override if any, otherwise `false` (deny). The real
+/// resolver is installed in [`Host::wire_self_into_resolver`] right
+/// after `Host` construction.
+fn bootstrap_bash_net_resolver() -> BashNetResolver {
+    std::sync::Arc::new(|over: Option<bool>| {
+        let v = over.unwrap_or(false);
+        Box::pin(async move { v })
+    })
+}
+
+/// Reasons the lazy bash-network resolver can fail to produce a
+/// decision. Each variant short-circuits the lazy spawn to "deny"
+/// (via the resolver closure installed on the tool registry) and is
+/// logged so an operator can trace why the bash spawn never reached
+/// the user.
+#[derive(Debug, thiserror::Error)]
+pub enum BashNetResolveError {
+    /// `policy = Ask` and the bash spawn was triggered with no
+    /// per-turn events channel installed — there's no surface to
+    /// prompt the user on.
+    #[error("no event channel — running outside a turn")]
+    NoEvents,
+    /// The [`TurnEvent::BashNetworkRequested`] send failed because the
+    /// receiver was already dropped (turn ended / TUI shut down
+    /// between gate decision and send).
+    #[error("event channel closed before the prompt could be sent")]
+    EventChannelClosed,
+    /// The `oneshot::Sender` paired with the pending prompt id was
+    /// dropped without sending a choice — typically because the host
+    /// was shut down while the modal was up.
+    #[error("user prompt cancelled (oneshot dropped)")]
+    PromptCancelled,
+}
+
+/// Shared resolver-state logic. Pure-function over its inputs so the
+/// lazy-bash resolver closure (which can't borrow `&self`) and any
+/// future direct callers can both use it. Emits
+/// [`TurnEvent::BashNetworkRequested`] on the supplied channel when
+/// the policy is `Ask` and no cached decision exists, awaits the
+/// matching [`Host::resolve_bash_network_decision`] call, and
+/// returns the resolved `allow_net`.
+async fn resolve_bash_network_with_state(
+    policy: &PermissionPolicy,
+    pending: &Mutex<HashMap<u64, oneshot::Sender<BashNetworkChoice>>>,
+    next_request_id: &AtomicU64,
+    events: Option<&mpsc::Sender<TurnEvent>>,
+    summary: String,
+) -> Result<bool, BashNetResolveError> {
+    match policy.bash_network() {
+        BashNetworkPolicy::Always => Ok(true),
+        BashNetworkPolicy::Never => Ok(false),
+        BashNetworkPolicy::Ask => {
+            if let Some(cached) = policy.bash_network_cached() {
+                return Ok(cached);
+            }
+            // No cache — emit a prompt and await.
+            let Some(events) = events else {
+                // No interactive surface — collapse to deny so the
+                // spawn doesn't hang on a oneshot that nobody resolves.
+                tracing::warn!(
+                    "tool-bash net resolver: no event channel — running outside a turn; \
+                     defaulting to deny"
+                );
+                return Err(BashNetResolveError::NoEvents);
+            };
+            let id = next_request_id.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = oneshot::channel();
+            pending.lock().await.insert(id, tx);
+            if events
+                .send(TurnEvent::BashNetworkRequested {
+                    id,
+                    summary: summary.clone(),
+                })
+                .await
+                .is_err()
+            {
+                pending.lock().await.remove(&id);
+                tracing::warn!(
+                    id,
+                    summary = %summary,
+                    "tool-bash net resolver: event channel closed before prompt could be sent",
+                );
+                return Err(BashNetResolveError::EventChannelClosed);
+            }
+            let choice = rx.await.map_err(|_| {
+                tracing::warn!(
+                    id,
+                    summary = %summary,
+                    "tool-bash net resolver: prompt cancelled (oneshot dropped)",
+                );
+                BashNetResolveError::PromptCancelled
+            })?;
+            // Update cache via the same sync resolver — pass a closure
+            // that returns the choice we already have.
+            let allow = policy.resolve_bash_network(|| choice);
+            Ok(allow)
+        }
+    }
+}
 
 /// Convert a stream of provider [`StreamEvent`]s into [`TurnEvent::TextDelta`]s
 /// and forward them to the host caller. Non-text events are dropped (they're
@@ -973,6 +1261,206 @@ mod policy_tests {
         );
         // Allow lets the call reach the empty registry → "unknown tool".
         assert!(outcome.tool_calls[0].result.contains("unknown tool"));
+    }
+
+    /// Lazy-spawn end-to-end (no real bash binary): build the exact
+    /// resolver closure `Host::wire_self_into_resolver` builds, drive it
+    /// twice, and confirm only the first call emits a prompt — the
+    /// second hits the session cache after `AlwaysThisSession`. This is
+    /// the contract the lazy `tool-bash` spawn relies on for "prompt
+    /// once per session", and the regression is what made this PR
+    /// necessary: with the old eager spawn the question was already
+    /// settled at registry-connect time.
+    #[tokio::test]
+    async fn lazy_bash_resolver_prompts_once_then_caches_session() {
+        use std::sync::Arc;
+
+        use crate::permissions::BashNetworkPolicy;
+        use crate::tools::BashNetResolver;
+
+        // Build a transient Ask-policy host and reach into its state to
+        // construct the same resolver closure
+        // `wire_self_into_resolver` produces. We test through the
+        // resolver because the registry's lazy-bash dispatch path goes
+        // through exactly this closure on every call.
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("noop", json!({})));
+        let project_root = std::env::temp_dir().join("savvagent-lazy-bash-test");
+        let config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(project_root.clone())
+        .with_policy(
+            PermissionPolicy::transient(project_root).with_bash_network(BashNetworkPolicy::Ask),
+        );
+        let host = Arc::new(Host::with_components(config, provider).await.unwrap());
+
+        // Recreate exactly the resolver closure
+        // `Host::wire_self_into_resolver` installs into the registry's
+        // lazy slot. We can't easily reach into a real lazy slot
+        // without a working tool-bash binary in the test environment;
+        // building the resolver by hand exercises the same code path.
+        let policy = host.policy.clone();
+        let pending = host.pending_bash_network.clone();
+        let next_id = host.next_request_id.clone();
+        let current_events = host.current_turn_events.clone();
+        let resolver: BashNetResolver = Arc::new(move |over: Option<bool>| {
+            if let Some(v) = over {
+                return Box::pin(async move { v });
+            }
+            let policy = policy.clone();
+            let pending = pending.clone();
+            let next_id = next_id.clone();
+            let events = current_events
+                .lock()
+                .expect("current_turn_events poisoned")
+                .clone();
+            Box::pin(async move {
+                let summary = "tool-bash spawn requests network access".to_string();
+                super::resolve_bash_network_with_state(
+                    &policy,
+                    &pending,
+                    &next_id,
+                    events.as_ref(),
+                    summary,
+                )
+                .await
+                .unwrap_or(false)
+            })
+        });
+
+        // Publish a per-turn events channel into the host's slot — same
+        // as `CurrentTurnEventsGuard::install` would do at turn start.
+        let (events_tx, mut events_rx) = mpsc::channel::<TurnEvent>(8);
+        *host.current_turn_events.lock().unwrap() = Some(events_tx);
+
+        // Spawn the first resolve in a task so we can pump events and
+        // call resolve_bash_network_decision concurrently. Note: the
+        // resolver future is `Send + 'static` because all state is Arc.
+        let resolver_clone = resolver.clone();
+        let first = tokio::spawn(async move { (resolver_clone)(None).await });
+
+        // We expect a single BashNetworkRequested. Pluck its id, then
+        // answer AlwaysThisSession so the cache populates.
+        let id = loop {
+            match events_rx.recv().await {
+                Some(TurnEvent::BashNetworkRequested { id, .. }) => break id,
+                Some(_other) => continue,
+                None => panic!("events channel closed before BashNetworkRequested arrived"),
+            }
+        };
+        host.resolve_bash_network_decision(id, BashNetworkChoice::AlwaysThisSession)
+            .await;
+
+        let allow_first = first.await.unwrap();
+        assert!(allow_first, "AlwaysThisSession must resolve allow_net=true");
+
+        // Second resolve: should NOT emit another prompt (cache hit).
+        // Drop the existing receiver's stash by trying a non-blocking
+        // recv after the second resolve.
+        let allow_second = (resolver)(None).await;
+        assert!(
+            allow_second,
+            "second resolve must reuse the cached AlwaysThisSession decision"
+        );
+
+        // Drain any pending events with a tiny window and assert none
+        // are BashNetworkRequested. We use try_recv repeatedly with no
+        // sleep — the channel either has the message already or it
+        // never will because the resolve_bash_network_with_state path
+        // short-circuited via `policy.bash_network_cached()`.
+        loop {
+            match events_rx.try_recv() {
+                Ok(TurnEvent::BashNetworkRequested { .. }) => {
+                    panic!("second resolve must NOT emit a BashNetworkRequested");
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+
+        // Drop the resolver so the test exits cleanly.
+        drop(resolver);
+    }
+
+    /// The closure that `Host::wire_self_into_resolver` builds must
+    /// short-circuit a per-call override (`Some(true)` / `Some(false)`)
+    /// *before* it touches the session decision cache. This pins that
+    /// contract: even after running the closure with both override
+    /// values back-to-back, the policy's cached decision must stay
+    /// `None`.
+    #[tokio::test]
+    async fn per_call_override_short_circuits_without_touching_cache() {
+        use std::sync::Arc;
+
+        use crate::permissions::BashNetworkPolicy;
+        use crate::tools::BashNetResolver;
+
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("noop", json!({})));
+        let project_root = std::env::temp_dir().join("savvagent-per-call-override-test");
+        let config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(project_root.clone())
+        .with_policy(
+            PermissionPolicy::transient(project_root).with_bash_network(BashNetworkPolicy::Ask),
+        );
+        let host = Arc::new(Host::with_components(config, provider).await.unwrap());
+
+        // Rebuild the same closure shape as `wire_self_into_resolver`.
+        let policy = host.policy.clone();
+        let pending = host.pending_bash_network.clone();
+        let next_id = host.next_request_id.clone();
+        let current_events = host.current_turn_events.clone();
+        let resolver: BashNetResolver = Arc::new(move |over: Option<bool>| {
+            if let Some(v) = over {
+                return Box::pin(async move { v });
+            }
+            let policy = policy.clone();
+            let pending = pending.clone();
+            let next_id = next_id.clone();
+            let events = current_events
+                .lock()
+                .expect("current_turn_events poisoned")
+                .clone();
+            Box::pin(async move {
+                let summary = "tool-bash spawn requests network access".to_string();
+                super::resolve_bash_network_with_state(
+                    &policy,
+                    &pending,
+                    &next_id,
+                    events.as_ref(),
+                    summary,
+                )
+                .await
+                .unwrap_or(false)
+            })
+        });
+
+        // Call with Some(true) override.
+        let allow = (resolver)(Some(true)).await;
+        assert!(allow);
+        assert_eq!(
+            host.policy.bash_network_cached(),
+            None,
+            "override Some(true) must NOT update the cache"
+        );
+
+        // Call with Some(false) override.
+        let allow = (resolver)(Some(false)).await;
+        assert!(!allow);
+        assert_eq!(
+            host.policy.bash_network_cached(),
+            None,
+            "override Some(false) must NOT update the cache"
+        );
     }
 
     /// `non-streaming` `run_turn` has no event channel, so any Ask collapses

@@ -282,6 +282,57 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         }
     }
 
+    if let InputMode::BashNetworkPrompt { summary, .. } = &app.input_mode {
+        let popup = centered_rect(60, 35, area);
+        frame.render_widget(Clear, popup);
+
+        let lines: Vec<Line<'static>> = vec![
+            Line::from(Span::styled(
+                "Bash needs network access".to_string(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                summary.clone(),
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "  [O]nce              allow this invocation only".to_string(),
+                Style::default().fg(Color::Green),
+            )),
+            Line::from(Span::styled(
+                "  [A]lways            allow for the rest of this session".to_string(),
+                Style::default().fg(Color::Green),
+            )),
+            Line::from(Span::styled(
+                "  [D]eny once         deny this invocation only".to_string(),
+                Style::default().fg(Color::Red),
+            )),
+            Line::from(Span::styled(
+                "  [F]orever (Never)   deny for the rest of this session".to_string(),
+                Style::default().fg(Color::Red),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Per-call override: re-run with `/bash --net <cmd>` or `/bash --no-net <cmd>`"
+                    .to_string(),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+
+        let body = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Bash network access? ")
+                .title_bottom(
+                    Line::from(" [O]nce  [A]lways  [D]eny  [F]orever  [Esc] deny ").right_aligned(),
+                ),
+        );
+        frame.render_widget(body, popup);
+    }
+
     if matches!(app.input_mode, InputMode::EnteringApiKey) {
         let popup = centered_rect(60, 20, area);
         frame.render_widget(Clear, popup);

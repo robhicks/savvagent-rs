@@ -69,6 +69,38 @@ pub enum PermissionDecision {
     Deny,
 }
 
+/// Policy controlling whether `tool-bash` is allowed network access.
+///
+/// Evaluated once per session on the first `tool-bash` invocation. The
+/// resulting decision is cached on [`PermissionPolicy`] and reused for
+/// all subsequent bash invocations until the session ends. Per-call
+/// `/bash --net` / `/bash --no-net` flags bypass the cache without
+/// updating it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BashNetworkPolicy {
+    /// Prompt on first invocation, cache the answer for the session.
+    #[default]
+    Ask,
+    /// Network always allowed — no prompt.
+    Always,
+    /// Network always denied — no prompt.
+    Never,
+}
+
+/// User's choice in response to the [`BashNetworkPolicy::Ask`] prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BashNetworkChoice {
+    /// Allow network for this invocation only. Does NOT update the cache.
+    Once,
+    /// Allow network for the rest of the session. Updates the cache.
+    AlwaysThisSession,
+    /// Deny network for this invocation. Does NOT update the cache.
+    DenyOnce,
+    /// Deny network for the rest of the session. Updates the cache.
+    DenyAlways,
+}
+
 /// A normalized argument pattern attached to a [`Rule`].
 ///
 /// - [`ArgPattern::Any`] — matches any args for the rule's tool.
@@ -246,6 +278,19 @@ pub struct PermissionPolicy {
     /// Rules loaded from `permissions.toml`. Mutable; written through on
     /// [`PermissionPolicy::add_rule`].
     toml_rules: Arc<RwLock<Vec<Rule>>>,
+    /// Configured bash-network policy for this session.
+    ///
+    /// Currently always [`BashNetworkPolicy::default()`] (`Ask`) from
+    /// [`PermissionPolicy::default_for`]. A `permissions.toml` loader
+    /// for the `[bash_network] mode = "ask"|"always"|"never"` shape is
+    /// a v0.7+ follow-up. Tests can override via the
+    /// `#[cfg(test)] with_bash_network` setter.
+    bash_network: BashNetworkPolicy,
+    /// Session-scoped cached decision. Populated by
+    /// [`PermissionPolicy::resolve_bash_network`] when the user picks an
+    /// "always" / "deny-always" variant. `None` means "not yet decided
+    /// in this session".
+    bash_network_decision: Arc<RwLock<Option<bool>>>,
 }
 
 impl PermissionPolicy {
@@ -265,6 +310,8 @@ impl PermissionPolicy {
             front_matter_rules,
             toml_path,
             toml_rules: Arc::new(RwLock::new(toml_rules)),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -278,6 +325,68 @@ impl PermissionPolicy {
             front_matter_rules: Arc::new(Vec::new()),
             toml_path: None,
             toml_rules: Arc::new(RwLock::new(Vec::new())),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Test-only setter for the bash-network policy. Used by tests to
+    /// exercise [`PermissionPolicy::resolve_bash_network`] without going
+    /// through the (still-TBD) `permissions.toml` loader.
+    #[cfg(test)]
+    pub(crate) fn with_bash_network(mut self, policy: BashNetworkPolicy) -> Self {
+        self.bash_network = policy;
+        self
+    }
+
+    /// Returns the configured bash network policy.
+    pub fn bash_network(&self) -> BashNetworkPolicy {
+        self.bash_network
+    }
+
+    /// Returns the cached bash network decision for this session, if any.
+    /// `None` means the user has not yet picked an "always" / "deny-always"
+    /// variant in the `Ask` policy's modal — and so the next bash spawn
+    /// will prompt again.
+    pub fn bash_network_cached(&self) -> Option<bool> {
+        *self.bash_network_decision.read().unwrap()
+    }
+
+    /// Resolve `tool-bash` network access for the current invocation.
+    /// Honors the configured [`BashNetworkPolicy`] and the session
+    /// decision cache; prompts via `prompt` only when the policy is
+    /// `Ask` and the cache is empty.
+    ///
+    /// Returns the resolved `allow_net` boolean. May update
+    /// `bash_network_decision` (the session cache) if the user picks an
+    /// "always" / "deny-always" variant.
+    pub fn resolve_bash_network<F: FnOnce() -> BashNetworkChoice>(&self, prompt: F) -> bool {
+        match self.bash_network {
+            BashNetworkPolicy::Always => {
+                *self.bash_network_decision.write().unwrap() = Some(true);
+                true
+            }
+            BashNetworkPolicy::Never => {
+                *self.bash_network_decision.write().unwrap() = Some(false);
+                false
+            }
+            BashNetworkPolicy::Ask => {
+                if let Some(cached) = *self.bash_network_decision.read().unwrap() {
+                    return cached;
+                }
+                match prompt() {
+                    BashNetworkChoice::Once => true,
+                    BashNetworkChoice::AlwaysThisSession => {
+                        *self.bash_network_decision.write().unwrap() = Some(true);
+                        true
+                    }
+                    BashNetworkChoice::DenyOnce => false,
+                    BashNetworkChoice::DenyAlways => {
+                        *self.bash_network_decision.write().unwrap() = Some(false);
+                        false
+                    }
+                }
+            }
         }
     }
 
@@ -492,6 +601,8 @@ mod tests {
             front_matter_rules: Arc::new(Vec::new()),
             toml_path: None,
             toml_rules: Arc::new(RwLock::new(Vec::new())),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -684,6 +795,8 @@ mod tests {
             front_matter_rules: Arc::new(Vec::new()),
             toml_path: Some(toml_path.clone()),
             toml_rules: Arc::new(RwLock::new(Vec::new())),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
         };
 
         p.add_rule(
@@ -722,10 +835,134 @@ mod tests {
             front_matter_rules: Arc::new(Vec::new()),
             toml_path: None,
             toml_rules: Arc::new(RwLock::new(Vec::new())),
+            bash_network: BashNetworkPolicy::default(),
+            bash_network_decision: Arc::new(RwLock::new(None)),
         };
         assert_eq!(
             p.evaluate("read_file", &json!({"path": "src/lib.rs"})),
             Verdict::Allow,
         );
+    }
+
+    #[test]
+    fn bash_network_always_resolves_without_prompt() {
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Always);
+        let prompted = std::cell::Cell::new(false);
+        let allowed = p.resolve_bash_network(|| {
+            prompted.set(true);
+            BashNetworkChoice::Once
+        });
+        assert!(allowed);
+        assert!(!prompted.get(), "Always policy must not prompt");
+        assert_eq!(*p.bash_network_decision.read().unwrap(), Some(true));
+    }
+
+    #[test]
+    fn bash_network_never_resolves_false_without_prompt() {
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Never);
+        let prompted = std::cell::Cell::new(false);
+        let allowed = p.resolve_bash_network(|| {
+            prompted.set(true);
+            BashNetworkChoice::Once
+        });
+        assert!(!allowed);
+        assert!(!prompted.get(), "Never policy must not prompt");
+        assert_eq!(*p.bash_network_decision.read().unwrap(), Some(false));
+    }
+
+    #[test]
+    fn bash_network_ask_prompts_then_caches_always() {
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
+
+        // First call: prompt fires, user picks AlwaysThisSession.
+        let count = std::cell::Cell::new(0);
+        let allowed = p.resolve_bash_network(|| {
+            count.set(count.get() + 1);
+            BashNetworkChoice::AlwaysThisSession
+        });
+        assert!(allowed);
+        assert_eq!(count.get(), 1);
+        assert_eq!(*p.bash_network_decision.read().unwrap(), Some(true));
+
+        // Second call: cached, prompt must NOT fire.
+        let allowed = p.resolve_bash_network(|| {
+            panic!("must not prompt when decision is cached");
+        });
+        assert!(allowed);
+    }
+
+    #[test]
+    fn bash_network_ask_once_does_not_cache() {
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
+
+        let count = std::cell::Cell::new(0);
+        let prompt = || {
+            count.set(count.get() + 1);
+            BashNetworkChoice::Once
+        };
+        let allowed = p.resolve_bash_network(prompt);
+        assert!(allowed);
+        assert_eq!(*p.bash_network_decision.read().unwrap(), None);
+
+        // Second call: must prompt again.
+        let allowed = p.resolve_bash_network(prompt);
+        assert!(allowed);
+        assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn bash_network_ask_deny_once_does_not_cache() {
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
+        let count = std::cell::Cell::new(0);
+        let prompt = || {
+            count.set(count.get() + 1);
+            BashNetworkChoice::DenyOnce
+        };
+        assert!(!p.resolve_bash_network(prompt));
+        assert_eq!(*p.bash_network_decision.read().unwrap(), None);
+        // Second call must prompt again.
+        assert!(!p.resolve_bash_network(prompt));
+        assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn bash_network_ask_deny_always_caches() {
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
+        let count = std::cell::Cell::new(0);
+        let prompt = || {
+            count.set(count.get() + 1);
+            BashNetworkChoice::DenyAlways
+        };
+        assert!(!p.resolve_bash_network(prompt));
+        assert_eq!(*p.bash_network_decision.read().unwrap(), Some(false));
+        // Second call must NOT prompt — cached.
+        assert!(!p.resolve_bash_network(|| {
+            panic!("must not prompt when cached deny is in effect");
+        }));
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn resolve_bash_network_is_not_called_with_per_call_override() {
+        // The per-call override is handled in `session::wire_self_into_resolver`'s
+        // closure BEFORE `resolve_bash_network` runs — verified here by reading
+        // the code path. This test pins the contract at the PermissionPolicy
+        // level: resolve_bash_network has no awareness of per-call overrides
+        // because the closure intercepts them.
+        //
+        // Companion: the closure test in session.rs ensures the closure
+        // honors that contract.
+
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
+
+        // Pre-condition: cache empty.
+        assert_eq!(*p.bash_network_decision.read().unwrap(), None);
+
+        // resolve_bash_network has no `override` parameter — it can only
+        // be reached when the closure decided no override applied. So if
+        // we are here, calling it is equivalent to "no override, prompt".
+        // Sanity-check: cache stays None when Once is picked.
+        let _ = p.resolve_bash_network(|| BashNetworkChoice::Once);
+        assert_eq!(*p.bash_network_decision.read().unwrap(), None);
     }
 }

@@ -22,11 +22,14 @@
 //!
 //! # `tool-bash` and network access
 //!
-//! `tool-bash` is given `allow_net = true` by default in the per-tool override
-//! map when sandboxing is on, because many bash commands require network access
-//! (e.g. `curl`, `cargo`, package managers). If you want to sandbox bash away
-//! from the network, explicitly set `allow_net = false` for `tool-bash` in your
-//! `SandboxConfig::tool_overrides`.
+//! As of v0.7 PR 15, `tool-bash` is denied network by default. The host's
+//! spawn path resolves bash network access at runtime via the permission
+//! layer (see `tools::LazyBash` and the bash-net resolver closure
+//! installed by `Host::wire_self_into_resolver`) and injects a
+//! per-spawn `tool_overrides["tool-bash"].allow_net` before calling
+//! [`apply_sandbox`]. User-pinned overrides in `~/.savvagent/sandbox.toml`
+//! still win — set `[tool_overrides.tool-bash] allow_net = true` to opt
+//! out of the prompt and grant net access unconditionally.
 //!
 //! # Config persistence
 //!
@@ -72,10 +75,11 @@ pub struct SandboxConfig {
 
     /// Allow network access for all tools when sandboxed. Default: `false`.
     ///
-    /// `tool-bash` overrides this to `true` in the default per-tool map
-    /// because many bash commands require network (curl, cargo, etc.). To
-    /// sandbox bash off the network, set `allow_net = false` explicitly in
-    /// `tool_overrides["tool-bash"]`.
+    /// As of v0.7 PR 15 `tool-bash` is denied network by default; the
+    /// host's spawn path injects a per-spawn override based on the
+    /// runtime permission decision. To unconditionally grant net access
+    /// to bash, set `[tool_overrides.tool-bash] allow_net = true` in
+    /// `~/.savvagent/sandbox.toml` — that override bypasses the prompt.
     pub allow_net: bool,
 
     /// Per-tool override map. Key is a substring of the tool binary path
@@ -139,12 +143,14 @@ impl SandboxConfig {
             }
         }
 
-        // Built-in per-tool defaults. `tool-bash` needs network for cargo /
-        // npm / curl unless globally denied or per-user overridden.
-        // PR 15 replaces this with a runtime permission decision via the
-        // permissions layer.
+        // Built-in per-tool default: `tool-bash` is denied network by
+        // default as of v0.7 PR 15. The host's spawn path injects a
+        // per-spawn override based on the runtime permission decision
+        // (see `tools::LazyBash`). User configs can also
+        // pin allow/deny via `[tool_overrides.tool-bash] allow_net = ...`
+        // in `~/.savvagent/sandbox.toml`.
         if bin_str.contains("tool-bash") {
-            return true;
+            return false;
         }
 
         self.allow_net
@@ -636,27 +642,42 @@ mod tests {
     }
 
     #[test]
-    fn default_config_grants_tool_bash_net_via_builtin_fallback() {
+    fn default_config_denies_tool_bash_net_by_built_in_fallback() {
         let cfg = SandboxConfig::default();
         assert!(
             cfg.tool_overrides.is_empty(),
-            "default no longer populates tool_overrides — built-in fallback handles tool-bash"
+            "default still has empty tool_overrides"
         );
         assert!(
-            cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-bash")),
-            "tool-bash must still get net access via the built-in fallback"
+            !cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-bash")),
+            "v0.7 PR 15 default-deny: bash gets no net unless host injects an override"
         );
-        // Non-bash tools still inherit the global allow_net = false.
         assert!(
             !cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-fs")),
-            "non-bash tools should not get net by default"
+            "non-bash tools still inherit global allow_net = false"
         );
     }
 
     #[test]
-    fn user_tool_overrides_do_not_drop_tool_bash_net_default() {
-        // User provides an override for tool-fs only. The tool-bash net
-        // default must survive (built-in fallback, not Default impl).
+    fn explicit_user_tool_bash_override_grants_net() {
+        let toml_str = r#"
+            enabled = true
+            allow_net = false
+
+            [tool_overrides.tool-bash]
+            allow_net = true
+        "#;
+        let cfg: SandboxConfig = toml::from_str(toml_str).unwrap();
+        assert!(
+            cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-bash")),
+            "explicit user override allow_net=true must grant net for bash"
+        );
+    }
+
+    #[test]
+    fn user_tool_overrides_for_other_tools_leave_bash_default_deny() {
+        // User overrides tool-fs only. tool-bash falls through to the v0.7
+        // PR 15 built-in fallback, which now denies.
         let toml_str = r#"
             enabled = true
             allow_net = false
@@ -667,12 +688,12 @@ mod tests {
         "#;
         let cfg: SandboxConfig = toml::from_str(toml_str).unwrap();
         assert!(
-            cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-bash")),
-            "tool-bash net access must survive a user override for a different tool"
+            !cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-bash")),
+            "bash hits the built-in deny fallback when no bash-specific override"
         );
         assert!(
             !cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-fs")),
-            "tool-fs's user override must be respected"
+            "tool-fs's user override is respected"
         );
     }
 
@@ -837,10 +858,13 @@ mod tests {
         }
 
         #[test]
-        fn tool_bash_gets_no_unshare_net_by_default() {
+        fn tool_bash_unshares_net_by_default_post_pr15() {
             if !has_bwrap() {
                 return;
             }
+            // v0.7 PR 15: built-in default for tool-bash is now deny.
+            // Without a host-injected `tool_overrides[tool-bash]
+            // .allow_net = true`, bash should get --unshare-net.
             let cfg = config_on(); // allow_net = false globally
             let mut cmd = make_cmd("/usr/local/bin/savvagent-tool-bash");
             apply_sandbox(
@@ -854,10 +878,44 @@ mod tests {
                 .get_args()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect();
-            // tool-bash has allow_net=true override → no --unshare-net.
+            assert!(
+                args.contains(&"--unshare-net".to_string()),
+                "v0.7 PR 15 deny-by-default: tool-bash must get --unshare-net \
+                 absent a host override: {args:?}"
+            );
+        }
+
+        #[test]
+        fn tool_bash_with_explicit_allow_net_override_keeps_net() {
+            if !has_bwrap() {
+                return;
+            }
+            // Simulates what the host's spawn path does once
+            // `resolve_bash_network_async` returns `true`: insert a
+            // per-spawn override granting bash network access.
+            let mut cfg = config_on();
+            cfg.tool_overrides.insert(
+                "tool-bash".to_string(),
+                ToolSandboxOverride {
+                    allow_net: Some(true),
+                    extra_binds: Vec::new(),
+                },
+            );
+            let mut cmd = make_cmd("/usr/local/bin/savvagent-tool-bash");
+            apply_sandbox(
+                &mut cmd,
+                Path::new("/usr/local/bin/savvagent-tool-bash"),
+                Path::new("/tmp/project"),
+                &cfg,
+            );
+            let args: Vec<String> = cmd
+                .as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
             assert!(
                 !args.contains(&"--unshare-net".to_string()),
-                "tool-bash should NOT have --unshare-net by default: {args:?}"
+                "explicit override allow_net=true must skip --unshare-net: {args:?}"
             );
         }
 

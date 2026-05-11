@@ -30,6 +30,17 @@ pub enum InputMode {
     EnteringApiKey,
     /// Tool-permission modal up; the turn loop is paused on a `oneshot`.
     PermissionPrompt,
+    /// Bash-network prompt modal up; the lazy bash spawn is paused on
+    /// a `oneshot` keyed by `id`. The user picks Once /
+    /// AlwaysThisSession / DenyOnce / DenyAlways via a single-key
+    /// hotkey; the choice is forwarded to
+    /// [`savvagent_host::Host::resolve_bash_network_decision`].
+    BashNetworkPrompt {
+        /// Opaque host-side request id; pass back when resolving.
+        id: u64,
+        /// Human-readable summary from the policy.
+        summary: String,
+    },
     /// Transcript picker open — selecting a file for `/resume`.
     SelectingTranscript,
 }
@@ -93,6 +104,99 @@ pub struct Command {
     /// the user picks one of these from the palette we prefill the prompt
     /// instead of executing it; commands without args run on Enter.
     pub needs_arg: bool,
+}
+
+/// Parsed `/bash` slash-command suffix. The TUI uses this to thread an
+/// optional per-call network override down to
+/// [`savvagent_host::Host::run_bash_command`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BashCommand {
+    /// Per-call override of `tool-bash`'s network access. `None` means
+    /// "use the resolved permission decision".
+    pub net_override: Option<bool>,
+    /// The shell command itself, stripped of recognised flags.
+    pub command: String,
+}
+
+/// Error returned by [`parse_bash_command`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum BashCommandError {
+    /// The user typed `/bash` (or `/bash --net`) with nothing after.
+    EmptyCommand,
+    /// The user typed a dashed token at the start of the command that
+    /// wasn't `--net` or `--no-net`. We surface these as errors so a
+    /// typo can't silently fall through to being treated as a literal
+    /// shell command — important for a security-relevant opt-in flag.
+    UnknownFlag {
+        /// The exact token we couldn't recognise (e.g. `-net`, `--Net`,
+        /// `--net=true`, `--quiet`).
+        token: String,
+    },
+}
+
+impl std::fmt::Display for BashCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BashCommandError::EmptyCommand => write!(f, "bash command is empty"),
+            BashCommandError::UnknownFlag { token } => write!(
+                f,
+                "unknown bash flag `{token}` — only `--net` and `--no-net` are recognised"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BashCommandError {}
+
+/// Parse the suffix of a `/bash` slash command. Recognises a leading
+/// `--net` / `--no-net` flag and returns the rest verbatim as `command`.
+///
+/// The flag must appear *first* — `echo --net hi` is a literal command,
+/// not a flag-prefixed invocation. This keeps quoting simple: anything
+/// after the (optional) leading flag is forwarded as-is to `bash -c`.
+///
+/// Strict-flag rule: when the input starts with `-`, the first
+/// whitespace-separated token MUST be exactly `--net` or `--no-net`.
+/// Anything else (`-net`, `--Net`, `--net=true`, `--quiet`, …) is
+/// returned as [`BashCommandError::UnknownFlag`] so a typo on this
+/// security-relevant opt-in flag can never silently degrade into "run
+/// the typo as a literal command".
+pub fn parse_bash_command(input: &str) -> Result<BashCommand, BashCommandError> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return Err(BashCommandError::EmptyCommand);
+    }
+
+    // If the input starts with `-`, the first token must be exactly
+    // `--net` or `--no-net`. Any other dashed token is a typo we want
+    // to surface rather than silently treat as a shell command.
+    if trimmed.starts_with('-') {
+        let (token, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((t, r)) => (t, r.trim_start()),
+            None => (trimmed, ""),
+        };
+        let net_override = match token {
+            "--net" => Some(true),
+            "--no-net" => Some(false),
+            other => {
+                return Err(BashCommandError::UnknownFlag {
+                    token: other.to_string(),
+                });
+            }
+        };
+        if rest.is_empty() {
+            return Err(BashCommandError::EmptyCommand);
+        }
+        return Ok(BashCommand {
+            net_override,
+            command: rest.to_string(),
+        });
+    }
+
+    Ok(BashCommand {
+        net_override: None,
+        command: trimmed.to_string(),
+    })
 }
 
 /// Outcome of [`App::select_command`].
@@ -284,6 +388,13 @@ impl App {
                 });
                 self.input_mode = InputMode::PermissionPrompt;
             }
+            TurnEvent::BashNetworkRequested { id, summary } => {
+                self.flush_live_text();
+                self.entries.push(Entry::Note(format!(
+                    "bash network access requested — see modal ({summary})"
+                )));
+                self.input_mode = InputMode::BashNetworkPrompt { id, summary };
+            }
             TurnEvent::ToolCallDenied { name, reason } => {
                 self.flush_live_text();
                 self.entries
@@ -397,6 +508,12 @@ impl App {
                 description: "Show sandbox status (`/sandbox on` or `/sandbox off` to toggle)"
                     .into(),
                 needs_arg: false,
+            },
+            Command {
+                name: "/bash".into(),
+                description: "Run a shell command (use `--net` / `--no-net` to override network)"
+                    .into(),
+                needs_arg: true,
             },
             Command {
                 name: "/quit".into(),
@@ -1014,5 +1131,126 @@ mod tests {
         let req = app.pending_permission.expect("pending should be set");
         assert_eq!(req.id, 42);
         assert_eq!(req.name, "run");
+    }
+
+    #[test]
+    fn bash_command_parses_net_flag() {
+        let p = parse_bash_command("--net curl https://example.com").unwrap();
+        assert_eq!(p.net_override, Some(true));
+        assert_eq!(p.command, "curl https://example.com");
+    }
+
+    #[test]
+    fn bash_command_parses_no_net_flag() {
+        let p = parse_bash_command("--no-net ls /tmp").unwrap();
+        assert_eq!(p.net_override, Some(false));
+        assert_eq!(p.command, "ls /tmp");
+    }
+
+    #[test]
+    fn bash_command_without_flag_has_no_override() {
+        let p = parse_bash_command("ls /tmp").unwrap();
+        assert_eq!(p.net_override, None);
+        assert_eq!(p.command, "ls /tmp");
+    }
+
+    #[test]
+    fn bash_command_flag_only_recognised_at_start() {
+        // A --net mid-command is part of the command body.
+        let p = parse_bash_command("echo --net hi").unwrap();
+        assert_eq!(p.net_override, None);
+        assert_eq!(p.command, "echo --net hi");
+    }
+
+    #[test]
+    fn bash_command_empty_after_flag_is_an_error() {
+        assert!(matches!(
+            parse_bash_command("--net   ").unwrap_err(),
+            BashCommandError::EmptyCommand
+        ));
+        assert!(matches!(
+            parse_bash_command("").unwrap_err(),
+            BashCommandError::EmptyCommand
+        ));
+    }
+
+    #[test]
+    fn bash_command_leading_whitespace_trimmed() {
+        let p = parse_bash_command("   --net  echo hi").unwrap();
+        assert_eq!(p.net_override, Some(true));
+        assert_eq!(p.command, "echo hi");
+    }
+
+    #[test]
+    fn bash_command_rejects_single_dash_typo() {
+        let err = parse_bash_command("-net curl foo").unwrap_err();
+        assert!(matches!(err, BashCommandError::UnknownFlag { .. }));
+    }
+
+    #[test]
+    fn bash_command_rejects_capitalised_flag() {
+        assert!(matches!(
+            parse_bash_command("--Net curl foo").unwrap_err(),
+            BashCommandError::UnknownFlag { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_command_rejects_net_with_equals() {
+        assert!(matches!(
+            parse_bash_command("--net=true curl foo").unwrap_err(),
+            BashCommandError::UnknownFlag { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_command_rejects_unknown_dash_token() {
+        assert!(matches!(
+            parse_bash_command("--quiet ls").unwrap_err(),
+            BashCommandError::UnknownFlag { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_command_net_alone_without_command_is_an_error() {
+        // `--net` followed by only whitespace — must error EmptyCommand,
+        // not UnknownFlag.
+        assert!(matches!(
+            parse_bash_command("--net").unwrap_err(),
+            BashCommandError::EmptyCommand
+        ));
+    }
+
+    #[test]
+    fn bash_network_request_enters_modal_with_id_and_summary() {
+        let mut app = fresh_app();
+        app.apply_turn_event(TurnEvent::BashNetworkRequested {
+            id: 7,
+            summary: "tool-bash spawn requests network access".into(),
+        });
+        match &app.input_mode {
+            InputMode::BashNetworkPrompt { id, summary } => {
+                assert_eq!(*id, 7);
+                assert!(summary.contains("tool-bash"), "summary: {summary}");
+            }
+            other => panic!(
+                "expected BashNetworkPrompt, got {:?}",
+                input_mode_label(other)
+            ),
+        }
+    }
+
+    fn input_mode_label(m: &InputMode) -> &'static str {
+        match m {
+            InputMode::Editing => "Editing",
+            InputMode::ViewingFile => "ViewingFile",
+            InputMode::EditingFile => "EditingFile",
+            InputMode::CommandPalette => "CommandPalette",
+            InputMode::SelectingProvider => "SelectingProvider",
+            InputMode::EnteringApiKey => "EnteringApiKey",
+            InputMode::PermissionPrompt => "PermissionPrompt",
+            InputMode::BashNetworkPrompt { .. } => "BashNetworkPrompt",
+            InputMode::SelectingTranscript => "SelectingTranscript",
+        }
     }
 }
