@@ -10,6 +10,7 @@ use ratatui::{
 use savvagent_host::ToolCallStatus;
 
 use crate::app::{App, Entry, InputMode, TranscriptEntry};
+use crate::palette::Palette;
 use crate::providers::PROVIDERS;
 use crate::splash;
 
@@ -20,6 +21,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         splash::render(frame, area);
         return;
     }
+
+    let palette = Palette::for_theme(app.active_theme);
+
+    // Paint the active theme's base style across the whole frame so any
+    // widget that doesn't set its own bg picks up the theme background.
+    frame.buffer_mut().set_style(area, palette.base_style());
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -48,37 +55,52 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         "Savvagent — disconnected · type /connect".to_string()
     };
     let header_color = if app.connected {
-        Color::Blue
+        palette.accent
     } else {
-        Color::Magenta
+        palette.warning
     };
     let header = Paragraph::new(header_text)
         .style(
-            Style::default()
+            palette
+                .base_style()
                 .fg(header_color)
                 .add_modifier(Modifier::BOLD),
         )
-        .block(Block::default().borders(Borders::ALL));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border).bg(palette.bg)),
+        );
     frame.render_widget(header, chunks[0]);
 
-    render_log(app, frame, chunks[1]);
+    render_log(app, frame, chunks[1], palette);
 
     let status = if app.is_loading {
         Paragraph::new(" ● thinking…").style(
-            Style::default()
-                .fg(Color::Yellow)
+            palette
+                .base_style()
+                .fg(palette.warning)
                 .add_modifier(Modifier::ITALIC),
         )
     } else {
-        Paragraph::new(" ○ ready").style(Style::default().fg(Color::Blue))
+        Paragraph::new(" ○ ready").style(palette.base_style().fg(palette.accent))
     };
     frame.render_widget(
-        status.block(Block::default().borders(Borders::BOTTOM)),
+        status.block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(palette.border).bg(palette.bg)),
+        ),
         chunks[2],
     );
 
     let mut textarea = app.input_textarea.clone();
-    textarea.set_block(Block::default().borders(Borders::ALL));
+    textarea.set_block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.border).bg(palette.bg)),
+    );
+    textarea.set_style(palette.base_style());
     frame.render_widget(&textarea, chunks[3]);
 
     let transcript_label = match &app.last_transcript {
@@ -99,10 +121,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         app.entries.len(),
         transcript_label
     ))
-    .style(Style::default().fg(Color::Blue));
+    .style(palette.base_style().fg(palette.accent));
     frame.render_widget(metrics, metrics_chunks[0]);
     let version = Paragraph::new(Line::from(version_text).right_aligned())
-        .style(Style::default().fg(Color::Blue));
+        .style(palette.base_style().fg(palette.accent));
     frame.render_widget(version, metrics_chunks[1]);
 
     if app.is_file_picker_active {
@@ -159,15 +181,16 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             .map(|(visible_idx, &cmd_idx)| {
                 let cmd = &app.commands[cmd_idx];
                 let style = if visible_idx == app.command_index {
-                    Style::default()
-                        .fg(Color::Yellow)
+                    palette
+                        .base_style()
+                        .fg(palette.accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default()
+                    palette.base_style()
                 };
                 ListItem::new(Line::from(vec![
                     Span::styled(format!("{:<10} ", cmd.name), style),
-                    Span::styled(&cmd.description, Style::default().fg(Color::DarkGray)),
+                    Span::styled(&cmd.description, palette.base_style().fg(palette.muted)),
                 ]))
             })
             .collect();
@@ -180,11 +203,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.border).bg(palette.bg))
                     .title(title)
                     .title_bottom(
                         Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ").right_aligned(),
                     ),
             )
+            .style(palette.base_style())
             .highlight_symbol("> ");
         frame.render_widget(list, popup);
     }
@@ -210,11 +235,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             .enumerate()
             .map(|(i, spec)| {
                 let style = if i == app.provider_index {
-                    Style::default()
-                        .fg(Color::Yellow)
+                    palette
+                        .base_style()
+                        .fg(palette.accent)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default()
+                    palette.base_style()
                 };
                 let active_marker = if Some(spec.id) == app.active_provider_id {
                     " (active)"
@@ -225,7 +251,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                     Span::styled(format!("{:<22}", spec.display_name), style),
                     Span::styled(
                         format!(" {}{}", spec.id, active_marker),
-                        Style::default().fg(Color::DarkGray),
+                        palette.base_style().fg(palette.muted),
                     ),
                 ]))
             })
@@ -234,11 +260,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.border).bg(palette.bg))
                     .title(" Connect to provider ")
                     .title_bottom(
                         Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ").right_aligned(),
                     ),
             )
+            .style(palette.base_style())
             .highlight_symbol("> ");
         frame.render_widget(list, popup);
     }
@@ -253,31 +281,36 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             let mut lines: Vec<Line<'static>> = Vec::new();
             lines.push(Line::from(Span::styled(
                 format!("Tool: {}", req.name),
-                Style::default()
-                    .fg(Color::Yellow)
+                palette
+                    .base_style()
+                    .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(Span::styled(
                 req.summary.clone(),
-                Style::default().fg(Color::White),
+                palette.base_style().fg(palette.fg),
             )));
             lines.push(Line::from(""));
             for line in args_pretty.lines() {
                 lines.push(Line::from(Span::styled(
                     line.to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    palette.base_style().fg(palette.muted),
                 )));
             }
 
-            let body = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Permission requested ")
-                    .title_bottom(
-                        Line::from(" [y] allow  [n] deny  [a] always  [N] never  [Esc] deny ")
-                            .right_aligned(),
-                    ),
-            );
+            let body = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .style(palette.base_style())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(palette.border).bg(palette.bg))
+                        .title(" Permission requested ")
+                        .title_bottom(
+                            Line::from(" [y] allow  [n] deny  [a] always  [N] never  [Esc] deny ")
+                                .right_aligned(),
+                        ),
+                );
             frame.render_widget(body, popup);
         }
     }
@@ -289,47 +322,53 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         let lines: Vec<Line<'static>> = vec![
             Line::from(Span::styled(
                 "Bash needs network access".to_string(),
-                Style::default()
-                    .fg(Color::Yellow)
+                palette
+                    .base_style()
+                    .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
                 summary.clone(),
-                Style::default().fg(Color::White),
+                palette.base_style().fg(palette.fg),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "  [O]nce              allow this invocation only".to_string(),
-                Style::default().fg(Color::Green),
+                palette.base_style().fg(palette.success),
             )),
             Line::from(Span::styled(
                 "  [A]lways            allow for the rest of this session".to_string(),
-                Style::default().fg(Color::Green),
+                palette.base_style().fg(palette.success),
             )),
             Line::from(Span::styled(
                 "  [D]eny once         deny this invocation only".to_string(),
-                Style::default().fg(Color::Red),
+                palette.base_style().fg(palette.error),
             )),
             Line::from(Span::styled(
                 "  [F]orever (Never)   deny for the rest of this session".to_string(),
-                Style::default().fg(Color::Red),
+                palette.base_style().fg(palette.error),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "Per-call override: re-run with `/bash --net <cmd>` or `/bash --no-net <cmd>`"
                     .to_string(),
-                Style::default().fg(Color::DarkGray),
+                palette.base_style().fg(palette.muted),
             )),
         ];
 
-        let body = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Bash network access? ")
-                .title_bottom(
-                    Line::from(" [O]nce  [A]lways  [D]eny  [F]orever  [Esc] deny ").right_aligned(),
-                ),
-        );
+        let body = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(palette.base_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.border).bg(palette.bg))
+                    .title(" Bash network access? ")
+                    .title_bottom(
+                        Line::from(" [O]nce  [A]lways  [D]eny  [F]orever  [Esc] deny ")
+                            .right_aligned(),
+                    ),
+            );
         frame.render_widget(body, popup);
     }
 
@@ -342,6 +381,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         };
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.border).bg(palette.bg))
+            .style(palette.base_style())
             .title(title)
             .title_bottom(Line::from(" [Enter] connect  [Esc] cancel ").right_aligned());
         let inner = popup.inner(Margin {
@@ -351,25 +392,29 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         frame.render_widget(block, popup);
         let mut ta = app.api_key_textarea.clone();
         ta.set_block(Block::default());
+        ta.set_style(palette.base_style());
         frame.render_widget(&ta, inner);
     }
 
     if matches!(app.input_mode, InputMode::SelectingTranscript) {
-        render_transcript_picker(app, frame, area);
+        render_transcript_picker(app, frame, area, palette);
     }
 }
 
-fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect) {
+fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
     let popup = centered_rect(70, 50, area);
     frame.render_widget(Clear, popup);
 
     if app.transcript_entries.is_empty() {
-        let body = Paragraph::new("No transcripts found in ~/.savvagent/transcripts/").block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Resume transcript ")
-                .title_bottom(Line::from(" [Esc] cancel ").right_aligned()),
-        );
+        let body = Paragraph::new("No transcripts found in ~/.savvagent/transcripts/")
+            .style(palette.base_style())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.border).bg(palette.bg))
+                    .title(" Resume transcript ")
+                    .title_bottom(Line::from(" [Esc] cancel ").right_aligned()),
+            );
         frame.render_widget(body, popup);
         return;
     }
@@ -378,44 +423,50 @@ fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect) {
         .transcript_entries
         .iter()
         .enumerate()
-        .map(|(i, entry)| render_transcript_item(entry, i == app.transcript_index))
+        .map(|(i, entry)| render_transcript_item(entry, i == app.transcript_index, palette))
         .collect();
 
-    let list = List::new(items).block(
+    let list = List::new(items).style(palette.base_style()).block(
         Block::default()
             .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.border).bg(palette.bg))
             .title(" Resume transcript ")
             .title_bottom(Line::from(" [↑/↓] move  [Enter] resume  [Esc] cancel ").right_aligned()),
     );
     frame.render_widget(list, popup);
 }
 
-fn render_transcript_item(entry: &TranscriptEntry, selected: bool) -> ListItem<'static> {
+fn render_transcript_item(
+    entry: &TranscriptEntry,
+    selected: bool,
+    palette: Palette,
+) -> ListItem<'static> {
     let style = if selected {
-        Style::default()
-            .fg(Color::Yellow)
+        palette
+            .base_style()
+            .fg(palette.accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
+        palette.base_style()
     };
-    let meta_style = Style::default().fg(Color::DarkGray);
+    let meta_style = palette.base_style().fg(palette.muted);
     let line = Line::from(vec![
         Span::styled(format!("{:<22}", entry.timestamp), style),
         Span::styled(format!(" {:>3} msgs  ", entry.message_count), meta_style),
-        Span::styled(entry.preview.clone(), Style::default().fg(Color::White)),
+        Span::styled(entry.preview.clone(), palette.base_style().fg(palette.fg)),
     ]);
     ListItem::new(line)
 }
 
-fn render_log(app: &App, frame: &mut Frame, area: Rect) {
+fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(app.entries.len() * 2 + 1);
     for entry in &app.entries {
         match entry {
             Entry::User(text) => {
-                lines.push(line_block("You: ", text, Color::Green));
+                lines.push(line_block("You: ", text, palette.success, palette));
             }
             Entry::Assistant(text) => {
-                lines.push(line_block("Agent: ", text, Color::Cyan));
+                lines.push(line_block("Agent: ", text, palette.secondary, palette));
             }
             Entry::Tool {
                 name,
@@ -429,31 +480,33 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
                     Some(ToolCallStatus::Errored) => "✗",
                 };
                 let color = match status {
-                    None => Color::Yellow,
-                    Some(ToolCallStatus::Ok) => Color::Green,
-                    Some(ToolCallStatus::Errored) => Color::Red,
+                    None => palette.warning,
+                    Some(ToolCallStatus::Ok) => palette.success,
+                    Some(ToolCallStatus::Errored) => palette.error,
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  {badge} "), Style::default().fg(color)),
+                    Span::styled(format!("  {badge} "), palette.base_style().fg(color)),
                     Span::styled(
                         format!("{name}({arguments})"),
-                        Style::default()
-                            .fg(Color::Yellow)
+                        palette
+                            .base_style()
+                            .fg(palette.warning)
                             .add_modifier(Modifier::DIM),
                     ),
                 ]));
                 if let Some(preview) = result_preview {
                     lines.push(Line::from(Span::styled(
                         format!("    → {preview}"),
-                        Style::default().fg(Color::DarkGray),
+                        palette.base_style().fg(palette.muted),
                     )));
                 }
             }
             Entry::Note(text) => {
                 lines.push(Line::from(Span::styled(
                     format!("· {text}"),
-                    Style::default()
-                        .fg(Color::DarkGray)
+                    palette
+                        .base_style()
+                        .fg(palette.muted)
                         .add_modifier(Modifier::ITALIC),
                 )));
             }
@@ -461,19 +514,28 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     if !app.live_text.is_empty() {
-        lines.push(line_block("Agent: ", &app.live_text, Color::Cyan));
+        lines.push(line_block(
+            "Agent: ",
+            &app.live_text,
+            palette.secondary,
+            palette,
+        ));
     }
 
-    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Conversation "),
-    );
+    let para = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .style(palette.base_style())
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border).bg(palette.bg))
+                .title(" Conversation "),
+        );
     frame.render_widget(para, area);
 }
 
-fn line_block(prefix: &str, text: &str, color: Color) -> Line<'static> {
-    let style = Style::default().fg(color);
+fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<'static> {
+    let style = palette.base_style().fg(color);
     Line::from(vec![
         Span::styled(prefix.to_string(), style.add_modifier(Modifier::BOLD)),
         Span::styled(text.to_string(), style),

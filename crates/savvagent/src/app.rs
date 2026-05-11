@@ -273,6 +273,11 @@ pub struct App {
     /// When the current session was resumed from a saved transcript, this
     /// holds a human-readable timestamp string shown in the header.
     pub resumed_at: Option<String>,
+
+    /// Theme applied to the render path. Loaded from
+    /// `~/.savvagent/theme.toml` at startup, mutated by `/theme <name>`,
+    /// and persisted on every successful set.
+    pub active_theme: crate::theme::Theme,
 }
 
 impl App {
@@ -331,6 +336,7 @@ impl App {
             transcript_entries: Vec::new(),
             transcript_index: 0,
             resumed_at: None,
+            active_theme: crate::theme::load(),
         };
         app.refresh_commands();
         app
@@ -507,6 +513,11 @@ impl App {
                 name: "/sandbox".into(),
                 description: "Show sandbox status (`/sandbox on` or `/sandbox off` to toggle)"
                     .into(),
+                needs_arg: false,
+            },
+            Command {
+                name: "/theme".into(),
+                description: "List themes or set one (`/theme list` or `/theme <name>`)".into(),
                 needs_arg: false,
             },
             Command {
