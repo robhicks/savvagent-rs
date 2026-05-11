@@ -23,6 +23,7 @@ mod permissions;
 mod project;
 mod provider;
 mod sandbox;
+pub mod sensitive_paths;
 mod session;
 mod tools;
 
