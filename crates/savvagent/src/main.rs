@@ -1028,6 +1028,7 @@ async fn run_app(
         }
 
         if app.should_quit {
+            drain_pending_bash_net(app, &host_slot).await;
             return Ok(());
         }
 
@@ -1044,6 +1045,7 @@ async fn run_app(
             continue;
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            drain_pending_bash_net(app, &host_slot).await;
             return Ok(());
         }
 
@@ -1358,6 +1360,23 @@ async fn run_app(
                 }
                 _ => {}
             },
+        }
+    }
+}
+
+/// On graceful exit, if the user is mid-modal on a bash-network prompt,
+/// resolve it as [`BashNetworkChoice::DenyOnce`] so any worker awaiting
+/// the corresponding `oneshot` doesn't hang while the runtime tears
+/// down. Without this, the worker would only unblock once the `Host`
+/// (and the Sender inside `pending_bash_network`) is finally dropped —
+/// which happens *after* `run_app` returns. That gap is small but real,
+/// and on shutdown we want the worker to finish promptly and let
+/// `Host::shutdown` drain cleanly.
+async fn drain_pending_bash_net(app: &App, host_slot: &HostSlot) {
+    if let InputMode::BashNetworkPrompt { id, .. } = app.input_mode {
+        if let Some(host) = current_host(host_slot).await {
+            host.resolve_bash_network_decision(id, BashNetworkChoice::DenyOnce)
+                .await;
         }
     }
 }

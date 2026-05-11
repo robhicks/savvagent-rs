@@ -387,22 +387,23 @@ impl LazyBash {
         // Step 2: lock the active server slot so we get a single
         // ordering for the (reuse-or-respawn → dispatch) sequence.
         let mut guard = self.active.lock().await;
-        let must_respawn = match guard.as_ref() {
+        let cached_allow_net = guard.as_ref().map(|a| a.allow_net);
+        let must_respawn = match cached_allow_net {
             None => true,
-            Some(active) => active.allow_net != allow_net,
+            Some(prev) => prev != allow_net,
         };
 
         if must_respawn {
-            // Kill the existing process (if any) before spawning a new one.
-            if let Some(prev) = guard.take()
-                && let Err(e) = prev.service.cancel().await
-            {
-                tracing::warn!(
-                    "lazy tool-bash respawn: error cancelling previous server {}: {e}",
-                    prev.label
+            if let Some(prev) = cached_allow_net {
+                tracing::info!(
+                    "tool-bash: allow_net change detected ({prev} -> {allow_net}); respawning"
                 );
             }
 
+            // Blue-green respawn: spawn the new server FIRST. If it
+            // fails we keep the old one — the alternative (kill first,
+            // then fail to spawn) would leave the slot empty and force
+            // every subsequent call to attempt a fresh spawn from cold.
             let cmd = build_bash_command(
                 &self.config.command,
                 &self.config.args,
@@ -419,7 +420,7 @@ impl LazyBash {
                     ));
                 }
             };
-            let service = match ().serve(transport).await {
+            let new_service = match ().serve(transport).await {
                 Ok(s) => s,
                 Err(e) => {
                     return ToolCallOutcome::error(format!(
@@ -427,9 +428,22 @@ impl LazyBash {
                     ));
                 }
             };
+
+            // New server is up. Now we can safely retire the old one.
+            if let Some(prev) = guard.take()
+                && let Err(e) = prev.service.cancel().await
+            {
+                tracing::warn!(
+                    "lazy tool-bash respawn: error cancelling previous server {} \
+                     (allow_net={}): {e} (ignored — new server already up)",
+                    prev.label,
+                    prev.allow_net,
+                );
+            }
+
             *guard = Some(ActiveBashServer {
                 label,
-                service,
+                service: new_service,
                 allow_net,
             });
             tracing::debug!("lazy tool-bash: (re)spawned with allow_net={allow_net}");

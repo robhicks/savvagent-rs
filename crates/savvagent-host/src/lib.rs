@@ -35,8 +35,8 @@ pub use permissions::{
 pub use sandbox::{SandboxConfig, SandboxWrapper, ToolSandboxOverride, apply_sandbox};
 pub use savvagent_protocol::{ListModelsResponse, ModelInfo, ToolDef};
 pub use session::{
-    Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError,
-    TranscriptFile, TurnEvent, TurnOutcome,
+    BashNetResolveError, Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus,
+    TranscriptError, TranscriptFile, TurnEvent, TurnOutcome,
 };
 
 #[doc(hidden)]

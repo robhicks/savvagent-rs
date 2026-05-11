@@ -777,7 +777,7 @@ impl Host {
                 .clone();
             Box::pin(async move {
                 let summary = "tool-bash spawn requests network access".to_string();
-                resolve_bash_network_with_state(
+                match resolve_bash_network_with_state(
                     &policy,
                     &pending,
                     &next_id,
@@ -785,7 +785,13 @@ impl Host {
                     summary,
                 )
                 .await
-                .unwrap_or(false)
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("tool-bash net resolver failed: {e}. Defaulting to deny.");
+                        false
+                    }
+                }
             })
         });
         let guard = self.tools.lock().await;
@@ -937,6 +943,29 @@ fn bootstrap_bash_net_resolver() -> BashNetResolver {
     })
 }
 
+/// Reasons [`resolve_bash_network_with_state`] can fail to produce a
+/// decision. Each variant short-circuits the lazy spawn to "deny" via
+/// the resolver closure's `unwrap_or(false)` and is logged so an
+/// operator can trace why the bash spawn never reached the user.
+#[derive(Debug, thiserror::Error)]
+pub enum BashNetResolveError {
+    /// `policy = Ask` and the bash spawn was triggered with no
+    /// per-turn events channel installed — there's no surface to
+    /// prompt the user on.
+    #[error("no event channel — running outside a turn")]
+    NoEvents,
+    /// The [`TurnEvent::BashNetworkRequested`] send failed because the
+    /// receiver was already dropped (turn ended / TUI shut down
+    /// between gate decision and send).
+    #[error("event channel closed before the prompt could be sent")]
+    EventChannelClosed,
+    /// The `oneshot::Sender` paired with the pending prompt id was
+    /// dropped without sending a choice — typically because the host
+    /// was shut down while the modal was up.
+    #[error("user prompt cancelled (oneshot dropped)")]
+    PromptCancelled,
+}
+
 /// Shared resolver-state logic. Pure-function over its inputs so the
 /// lazy-bash resolver closure (which can't borrow `&self`) and any
 /// future direct callers can both use it. Emits
@@ -950,7 +979,7 @@ async fn resolve_bash_network_with_state(
     next_request_id: &AtomicU64,
     events: Option<&mpsc::Sender<TurnEvent>>,
     summary: String,
-) -> Result<bool, ()> {
+) -> Result<bool, BashNetResolveError> {
     match policy.bash_network() {
         BashNetworkPolicy::Always => Ok(true),
         BashNetworkPolicy::Never => Ok(false),
@@ -962,20 +991,39 @@ async fn resolve_bash_network_with_state(
             let Some(events) = events else {
                 // No interactive surface — collapse to deny so the
                 // spawn doesn't hang on a oneshot that nobody resolves.
-                return Ok(false);
+                tracing::warn!(
+                    "tool-bash net resolver: no event channel — running outside a turn; \
+                     defaulting to deny"
+                );
+                return Err(BashNetResolveError::NoEvents);
             };
             let id = next_request_id.fetch_add(1, Ordering::Relaxed);
             let (tx, rx) = oneshot::channel();
             pending.lock().await.insert(id, tx);
             if events
-                .send(TurnEvent::BashNetworkRequested { id, summary })
+                .send(TurnEvent::BashNetworkRequested {
+                    id,
+                    summary: summary.clone(),
+                })
                 .await
                 .is_err()
             {
                 pending.lock().await.remove(&id);
-                return Err(());
+                tracing::warn!(
+                    id,
+                    summary = %summary,
+                    "tool-bash net resolver: event channel closed before prompt could be sent",
+                );
+                return Err(BashNetResolveError::EventChannelClosed);
             }
-            let choice = rx.await.map_err(|_| ())?;
+            let choice = rx.await.map_err(|_| {
+                tracing::warn!(
+                    id,
+                    summary = %summary,
+                    "tool-bash net resolver: prompt cancelled (oneshot dropped)",
+                );
+                BashNetResolveError::PromptCancelled
+            })?;
             // Update cache via the same sync resolver — pass a closure
             // that returns the choice we already have.
             let allow = policy.resolve_bash_network(|| choice);
