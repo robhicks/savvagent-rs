@@ -146,4 +146,37 @@ mod tests {
         assert!(!is_sensitive_path(".envrc"));
         assert!(!is_sensitive_path("env"));
     }
+
+    #[test]
+    fn ssh_segments_are_sensitive() {
+        assert!(is_sensitive_path(".ssh"));
+        assert!(is_sensitive_path(".ssh/id_rsa"));
+        assert!(is_sensitive_path("/home/alice/.ssh/id_rsa"));
+        assert!(is_sensitive_path("subdir/.ssh"));
+    }
+
+    #[test]
+    fn aws_credentials_are_sensitive() {
+        assert!(is_sensitive_path(".aws"));
+        assert!(is_sensitive_path(".aws/credentials"));
+        assert!(is_sensitive_path("/home/alice/.aws/config"));
+    }
+
+    #[test]
+    fn gh_config_is_sensitive() {
+        assert!(is_sensitive_path(".config/gh"));
+        assert!(is_sensitive_path(".config/gh/hosts.yml"));
+        assert!(is_sensitive_path("/home/alice/.config/gh/hosts.yml"));
+        // Bare "gh" must NOT match — it's too short to disambiguate.
+        assert!(!is_sensitive_path("gh"));
+        assert!(!is_sensitive_path("path/to/gh"));
+    }
+
+    #[test]
+    fn unrelated_paths_are_not_sensitive() {
+        assert!(!is_sensitive_path("src/main.rs"));
+        assert!(!is_sensitive_path("Cargo.toml"));
+        assert!(!is_sensitive_path(".gitignore"));
+        assert!(!is_sensitive_path("notes.txt"));
+    }
 }
