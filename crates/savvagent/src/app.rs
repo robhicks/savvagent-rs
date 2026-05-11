@@ -123,12 +123,25 @@ pub struct BashCommand {
 pub enum BashCommandError {
     /// The user typed `/bash` (or `/bash --net`) with nothing after.
     EmptyCommand,
+    /// The user typed a dashed token at the start of the command that
+    /// wasn't `--net` or `--no-net`. We surface these as errors so a
+    /// typo can't silently fall through to being treated as a literal
+    /// shell command — important for a security-relevant opt-in flag.
+    UnknownFlag {
+        /// The exact token we couldn't recognise (e.g. `-net`, `--Net`,
+        /// `--net=true`, `--quiet`).
+        token: String,
+    },
 }
 
 impl std::fmt::Display for BashCommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BashCommandError::EmptyCommand => write!(f, "bash command is empty"),
+            BashCommandError::UnknownFlag { token } => write!(
+                f,
+                "unknown bash flag `{token}` — only `--net` and `--no-net` are recognised"
+            ),
         }
     }
 }
@@ -141,21 +154,48 @@ impl std::error::Error for BashCommandError {}
 /// The flag must appear *first* — `echo --net hi` is a literal command,
 /// not a flag-prefixed invocation. This keeps quoting simple: anything
 /// after the (optional) leading flag is forwarded as-is to `bash -c`.
+///
+/// Strict-flag rule: when the input starts with `-`, the first
+/// whitespace-separated token MUST be exactly `--net` or `--no-net`.
+/// Anything else (`-net`, `--Net`, `--net=true`, `--quiet`, …) is
+/// returned as [`BashCommandError::UnknownFlag`] so a typo on this
+/// security-relevant opt-in flag can never silently degrade into "run
+/// the typo as a literal command".
 pub fn parse_bash_command(input: &str) -> Result<BashCommand, BashCommandError> {
     let trimmed = input.trim_start();
-    let (net_override, rest) = if let Some(stripped) = trimmed.strip_prefix("--net ") {
-        (Some(true), stripped.trim_start())
-    } else if let Some(stripped) = trimmed.strip_prefix("--no-net ") {
-        (Some(false), stripped.trim_start())
-    } else {
-        (None, trimmed)
-    };
-    if rest.is_empty() {
+    if trimmed.is_empty() {
         return Err(BashCommandError::EmptyCommand);
     }
+
+    // If the input starts with `-`, the first token must be exactly
+    // `--net` or `--no-net`. Any other dashed token is a typo we want
+    // to surface rather than silently treat as a shell command.
+    if trimmed.starts_with('-') {
+        let (token, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((t, r)) => (t, r.trim_start()),
+            None => (trimmed, ""),
+        };
+        let net_override = match token {
+            "--net" => Some(true),
+            "--no-net" => Some(false),
+            other => {
+                return Err(BashCommandError::UnknownFlag {
+                    token: other.to_string(),
+                });
+            }
+        };
+        if rest.is_empty() {
+            return Err(BashCommandError::EmptyCommand);
+        }
+        return Ok(BashCommand {
+            net_override,
+            command: rest.to_string(),
+        });
+    }
+
     Ok(BashCommand {
-        net_override,
-        command: rest.to_string(),
+        net_override: None,
+        command: trimmed.to_string(),
     })
 }
 
@@ -1124,8 +1164,14 @@ mod tests {
 
     #[test]
     fn bash_command_empty_after_flag_is_an_error() {
-        assert!(parse_bash_command("--net   ").is_err());
-        assert!(parse_bash_command("").is_err());
+        assert!(matches!(
+            parse_bash_command("--net   ").unwrap_err(),
+            BashCommandError::EmptyCommand
+        ));
+        assert!(matches!(
+            parse_bash_command("").unwrap_err(),
+            BashCommandError::EmptyCommand
+        ));
     }
 
     #[test]
@@ -1133,6 +1179,46 @@ mod tests {
         let p = parse_bash_command("   --net  echo hi").unwrap();
         assert_eq!(p.net_override, Some(true));
         assert_eq!(p.command, "echo hi");
+    }
+
+    #[test]
+    fn bash_command_rejects_single_dash_typo() {
+        let err = parse_bash_command("-net curl foo").unwrap_err();
+        assert!(matches!(err, BashCommandError::UnknownFlag { .. }));
+    }
+
+    #[test]
+    fn bash_command_rejects_capitalised_flag() {
+        assert!(matches!(
+            parse_bash_command("--Net curl foo").unwrap_err(),
+            BashCommandError::UnknownFlag { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_command_rejects_net_with_equals() {
+        assert!(matches!(
+            parse_bash_command("--net=true curl foo").unwrap_err(),
+            BashCommandError::UnknownFlag { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_command_rejects_unknown_dash_token() {
+        assert!(matches!(
+            parse_bash_command("--quiet ls").unwrap_err(),
+            BashCommandError::UnknownFlag { .. }
+        ));
+    }
+
+    #[test]
+    fn bash_command_net_alone_without_command_is_an_error() {
+        // `--net` followed by only whitespace — must error EmptyCommand,
+        // not UnknownFlag.
+        assert!(matches!(
+            parse_bash_command("--net").unwrap_err(),
+            BashCommandError::EmptyCommand
+        ));
     }
 
     #[test]

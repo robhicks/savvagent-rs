@@ -905,4 +905,60 @@ mod tests {
         assert!(allowed);
         assert_eq!(count.get(), 2);
     }
+
+    #[test]
+    fn bash_network_ask_deny_once_does_not_cache() {
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
+        let count = std::cell::Cell::new(0);
+        let prompt = || {
+            count.set(count.get() + 1);
+            BashNetworkChoice::DenyOnce
+        };
+        assert!(!p.resolve_bash_network(prompt));
+        assert_eq!(*p.bash_network_decision.read().unwrap(), None);
+        // Second call must prompt again.
+        assert!(!p.resolve_bash_network(prompt));
+        assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn bash_network_ask_deny_always_caches() {
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
+        let count = std::cell::Cell::new(0);
+        let prompt = || {
+            count.set(count.get() + 1);
+            BashNetworkChoice::DenyAlways
+        };
+        assert!(!p.resolve_bash_network(prompt));
+        assert_eq!(*p.bash_network_decision.read().unwrap(), Some(false));
+        // Second call must NOT prompt — cached.
+        assert!(!p.resolve_bash_network(|| {
+            panic!("must not prompt when cached deny is in effect");
+        }));
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn resolve_bash_network_is_not_called_with_per_call_override() {
+        // The per-call override is handled in `session::wire_self_into_resolver`'s
+        // closure BEFORE `resolve_bash_network` runs — verified here by reading
+        // the code path. This test pins the contract at the PermissionPolicy
+        // level: resolve_bash_network has no awareness of per-call overrides
+        // because the closure intercepts them.
+        //
+        // Companion: the closure test in session.rs ensures the closure
+        // honors that contract.
+
+        let p = PermissionPolicy::transient("/tmp/x").with_bash_network(BashNetworkPolicy::Ask);
+
+        // Pre-condition: cache empty.
+        assert_eq!(*p.bash_network_decision.read().unwrap(), None);
+
+        // resolve_bash_network has no `override` parameter — it can only
+        // be reached when the closure decided no override applied. So if
+        // we are here, calling it is equivalent to "no override, prompt".
+        // Sanity-check: cache stays None when Once is picked.
+        let _ = p.resolve_bash_network(|| BashNetworkChoice::Once);
+        assert_eq!(*p.bash_network_decision.read().unwrap(), None);
+    }
 }

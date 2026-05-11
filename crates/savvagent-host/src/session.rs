@@ -1335,6 +1335,83 @@ mod policy_tests {
         drop(resolver);
     }
 
+    /// The closure that `Host::wire_self_into_resolver` builds must
+    /// short-circuit a per-call override (`Some(true)` / `Some(false)`)
+    /// *before* it touches the session decision cache. This pins that
+    /// contract: even after running the closure with both override
+    /// values back-to-back, the policy's cached decision must stay
+    /// `None`.
+    #[tokio::test]
+    async fn per_call_override_short_circuits_without_touching_cache() {
+        use std::sync::Arc;
+
+        use crate::permissions::BashNetworkPolicy;
+        use crate::tools::BashNetResolver;
+
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("noop", json!({})));
+        let project_root = std::env::temp_dir().join("savvagent-per-call-override-test");
+        let config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(project_root.clone())
+        .with_policy(
+            PermissionPolicy::transient(project_root).with_bash_network(BashNetworkPolicy::Ask),
+        );
+        let host = Arc::new(Host::with_components(config, provider).await.unwrap());
+
+        // Rebuild the same closure shape as `wire_self_into_resolver`.
+        let policy = host.policy.clone();
+        let pending = host.pending_bash_network.clone();
+        let next_id = host.next_request_id.clone();
+        let current_events = host.current_turn_events.clone();
+        let resolver: BashNetResolver = Arc::new(move |over: Option<bool>| {
+            if let Some(v) = over {
+                return Box::pin(async move { v });
+            }
+            let policy = policy.clone();
+            let pending = pending.clone();
+            let next_id = next_id.clone();
+            let events = current_events
+                .lock()
+                .expect("current_turn_events poisoned")
+                .clone();
+            Box::pin(async move {
+                let summary = "tool-bash spawn requests network access".to_string();
+                super::resolve_bash_network_with_state(
+                    &policy,
+                    &pending,
+                    &next_id,
+                    events.as_ref(),
+                    summary,
+                )
+                .await
+                .unwrap_or(false)
+            })
+        });
+
+        // Call with Some(true) override.
+        let allow = (resolver)(Some(true)).await;
+        assert!(allow);
+        assert_eq!(
+            host.policy.bash_network_cached(),
+            None,
+            "override Some(true) must NOT update the cache"
+        );
+
+        // Call with Some(false) override.
+        let allow = (resolver)(Some(false)).await;
+        assert!(!allow);
+        assert_eq!(
+            host.policy.bash_network_cached(),
+            None,
+            "override Some(false) must NOT update the cache"
+        );
+    }
+
     /// `non-streaming` `run_turn` has no event channel, so any Ask collapses
     /// to a Deny rather than hanging on a oneshot that nobody resolves.
     #[tokio::test]

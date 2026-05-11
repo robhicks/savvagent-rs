@@ -33,7 +33,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use app::{
-    App, CommandSelection, Entry, InputMode, collect_transcript_entries, parse_bash_command,
+    App, BashCommandError, CommandSelection, Entry, InputMode, collect_transcript_entries,
+    parse_bash_command,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
@@ -826,6 +827,14 @@ async fn handle_bash_slash_command(
 ) {
     let parsed = match parse_bash_command(rest_raw) {
         Ok(p) => p,
+        Err(BashCommandError::UnknownFlag { token }) => {
+            app.push_note(format!(
+                "Unknown bash flag `{token}` — only `--net` and `--no-net` are recognised. \
+                 Usage: /bash [--net|--no-net] <command>. \
+                 Example: /bash --net curl https://example.com"
+            ));
+            return;
+        }
         Err(_) => {
             app.push_note(
                 "Usage: /bash [--net|--no-net] <command>. Example: /bash --net curl https://example.com",
