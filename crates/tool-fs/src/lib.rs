@@ -520,8 +520,7 @@ impl FsTools {
                             _ => continue,
                         }
                     }
-                    let rel = rel_path.to_string_lossy().into_owned();
-                    out.push(rel);
+                    out.push(to_forward_slashes(rel_path));
                 }
                 Ok((out, truncated))
             })
@@ -783,6 +782,20 @@ fn is_within(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
+/// Render a path as a string using `/` as the component separator regardless
+/// of host OS. Used at SPP wire boundaries (e.g. `glob` match strings, `list_dir`
+/// entries) so cross-platform consumers see one canonical shape. On Unix the
+/// backslash is a legal filename character, so we only rewrite when running on
+/// Windows.
+fn to_forward_slashes(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    if cfg!(windows) {
+        s.replace('\\', "/")
+    } else {
+        s.into_owned()
+    }
+}
+
 fn walk_dir(
     root: &Path,
     recursive: bool,
@@ -888,6 +901,19 @@ fn build_tools_from_env() -> FsTools {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn to_forward_slashes_emits_posix_separators() {
+        // PathBuf::from_iter uses the host's native separator, so on Windows
+        // this yields `a\b\c.rs`. The helper must collapse both shapes to
+        // a single canonical forward-slash form.
+        let p: PathBuf = ["a", "b", "c.rs"].iter().collect();
+        assert_eq!(to_forward_slashes(&p), "a/b/c.rs");
+
+        // A single-component path has no separator and is returned as-is.
+        let p: PathBuf = ["solo.rs"].iter().collect();
+        assert_eq!(to_forward_slashes(&p), "solo.rs");
+    }
 
     #[tokio::test]
     async fn read_file_round_trips_utf8() {
