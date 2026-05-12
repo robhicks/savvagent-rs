@@ -9,6 +9,11 @@ pub mod registry;
 #[allow(dead_code)] // consumed by the router/dispatcher in later PRs
 pub mod manifests;
 
+/// Slot routing: resolves a slot_id to its priority-ordered contributor list
+/// and concatenates each contributor's rendered lines.
+#[allow(dead_code)] // wired into ui.rs for the segmented footer + tips line in a later PR
+pub mod slots;
+
 /// Returns the set of built-in plugin instances. Empty in PR 1.
 ///
 /// PR 2 adds: home-footer, home-tips.
