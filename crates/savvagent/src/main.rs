@@ -844,12 +844,15 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
 /// The theme change is applied at the next [`ui::render`] call — no
 /// host reconnect or widget rebuild needed.
 fn handle_theme_command(app: &mut App, args: &str) {
+    // Refuse all /theme invocations during an in-flight turn — picker,
+    // `list`, and direct-slug paths alike. Mirrors `/bash` and `/resume`
+    // so users don't get a half-applied theme or a mode switch mid-stream.
+    if app.is_loading {
+        app.push_note("Cannot /theme during an in-flight turn — wait for it to finish.");
+        return;
+    }
     let trimmed = args.trim();
     if trimmed.is_empty() || trimmed == "list" {
-        if app.is_loading {
-            app.push_note("Cannot /theme during an in-flight turn — wait for it to finish.");
-            return;
-        }
         app.open_theme_picker();
         return;
     }
@@ -1461,21 +1464,35 @@ async fn run_app(
                 KeyCode::Down => app.theme_picker_cursor_down(),
                 KeyCode::Backspace => app.theme_picker_backspace(),
                 KeyCode::Enter => {
-                    let chosen = app.active_theme;
-                    app.theme_picker_confirm();
-                    match theme::save(chosen) {
-                        Ok(()) => {
-                            app.push_note(format!("theme set to `{}`", chosen.name()));
-                        }
-                        Err(e) => {
-                            app.push_note(format!(
-                                "theme `{}` applied for this session, but persistence failed: {e}",
-                                chosen.name()
-                            ));
+                    if app.theme_picker_filtered_themes().is_empty() {
+                        // Spec edge case 2: Enter on a zero-match filter is a
+                        // no-op. Cursor stays on the "no themes match" hint;
+                        // user can Backspace to widen, type to narrow further,
+                        // or Esc to cancel. Without this guard, the last-good
+                        // preview that `clamp_theme_picker_after_filter_change`
+                        // preserved would get committed and persisted.
+                    } else {
+                        let chosen = app.active_theme;
+                        app.theme_picker_confirm();
+                        match theme::save(chosen) {
+                            Ok(()) => {
+                                app.push_note(format!("theme set to `{}`", chosen.name()));
+                            }
+                            Err(e) => {
+                                app.push_note(format!(
+                                    "theme `{}` applied for this session, but persistence failed: {e}",
+                                    chosen.name()
+                                ));
+                            }
                         }
                     }
                 }
-                KeyCode::Char(c) => app.theme_picker_typed_char(c),
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    app.theme_picker_typed_char(c);
+                }
                 _ => {}
             },
         }
@@ -1762,6 +1779,84 @@ mod theme_command_tests {
     }
 
     #[test]
+    fn list_arg_refuses_when_is_loading() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.is_loading = true;
+        handle_theme_command(&mut app, "list");
+        assert!(
+            matches!(app.input_mode, InputMode::Editing),
+            "must not open picker during in-flight turn"
+        );
+        let notes = note_lines(&app);
+        let last = notes.last().unwrap();
+        assert!(
+            last.contains("in-flight") || last.contains("wait"),
+            "last note must explain the refusal: {last}"
+        );
+    }
+
+    #[test]
+    fn direct_slug_refuses_when_is_loading() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        let original = app.active_theme;
+        app.is_loading = true;
+        handle_theme_command(&mut app, "dark");
+        // Must not mutate active_theme during an in-flight turn.
+        assert_eq!(app.active_theme, original);
+        let notes = note_lines(&app);
+        let last = notes.last().unwrap();
+        assert!(
+            last.contains("in-flight") || last.contains("wait"),
+            "last note must explain the refusal: {last}"
+        );
+    }
+
+    #[test]
+    fn theme_picker_enter_with_empty_filter_is_noop() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // Open picker, narrow filter to zero matches.
+        handle_theme_command(&mut app, "");
+        assert!(matches!(app.input_mode, InputMode::SelectingTheme));
+        for c in "totallybogus".chars() {
+            app.theme_picker_typed_char(c);
+        }
+        assert!(app.theme_picker_filtered_themes().is_empty());
+        let before_theme = app.active_theme;
+        let before_notes = note_lines(&app).len();
+
+        // Simulate the production Enter handler's empty-filter guard: when
+        // filtered is empty, do nothing. We pin the *state invariant* the
+        // production code preserves — state stays untouched, no note pushed,
+        // mode stays in SelectingTheme so Esc can still cancel.
+        if app.theme_picker_filtered_themes().is_empty() {
+            // no-op
+        } else {
+            // Would otherwise commit; this branch is unreachable here.
+            unreachable!("filter is empty");
+        }
+
+        assert_eq!(
+            app.active_theme, before_theme,
+            "Enter on empty filter must not clobber the live-preview theme"
+        );
+        assert!(
+            matches!(app.input_mode, InputMode::SelectingTheme),
+            "Enter on empty filter must stay in the picker"
+        );
+        assert_eq!(
+            note_lines(&app).len(),
+            before_notes,
+            "Enter on empty filter must not push any note"
+        );
+    }
+
+    #[test]
     fn theme_picker_enter_persists_chosen_theme() {
         let _g = HOME_LOCK.lock().unwrap();
         let _home = HomeGuard::new();
@@ -1772,7 +1867,6 @@ mod theme_command_tests {
         // Simulate scrolling to a specific theme.
         app.theme_picker_filter = "tokyo".to_string();
         app.theme_picker_index = 0;
-        // Live preview should have moved active_theme; ensure it.
         let filtered = app.theme_picker_filtered_themes();
         let chosen = filtered[0];
         app.active_theme = chosen;

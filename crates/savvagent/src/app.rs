@@ -286,12 +286,14 @@ pub struct App {
     /// and persisted on every successful set.
     pub active_theme: crate::theme::Theme,
 
-    /// Cursor row in the picker's filtered theme list — never into
-    /// render rows. Section headers are not represented here.
+    /// Index into the filtered theme list
+    /// (`theme_picker_filtered_themes`); not an index into the rendered
+    /// rows, which include section-header decorations.
     pub theme_picker_index: usize,
 
     /// Substring filter narrowing the picker's catalog. Empty means
-    /// "show every theme". Matched case-sensitively against slugs.
+    /// "show every theme". Matched case-sensitively against
+    /// `Theme::name()` (built-in name or upstream slug).
     pub theme_picker_filter: String,
 
     /// Snapshot of [`App::active_theme`] at picker-open time. Restored
@@ -605,8 +607,9 @@ impl App {
     }
 
     /// Filter [`crate::theme::Theme::all`] by case-sensitive substring
-    /// match on the theme slug. Returns only selectable rows — section
-    /// headers are render-time decoration handled in `ui.rs`.
+    /// match on `Theme::name()` (built-in name or upstream slug).
+    /// Returns only selectable rows — section headers are render-time
+    /// decoration handled in `ui.rs`.
     pub fn theme_picker_filtered_themes(&self) -> Vec<crate::theme::Theme> {
         let filter = self.theme_picker_filter.as_str();
         crate::theme::Theme::all()
@@ -679,7 +682,9 @@ impl App {
 
     /// Close the picker, keeping the highlighted theme as the new
     /// `active_theme`. Persistence (`theme::save`) is the caller's
-    /// responsibility — `App` stays I/O-free.
+    /// responsibility — the keypath in `main.rs` does it so save
+    /// failures can be surfaced to the user without coupling `App` to
+    /// the filesystem error path.
     pub fn theme_picker_confirm(&mut self) {
         self.input_mode = InputMode::Editing;
     }
