@@ -561,7 +561,7 @@ impl App {
             },
             Command {
                 name: "/theme".into(),
-                description: "List themes or set one (`/theme list` or `/theme <name>`)".into(),
+                description: "Pick a theme (opens picker, or /theme <name>)".into(),
                 needs_arg: false,
             },
             Command {

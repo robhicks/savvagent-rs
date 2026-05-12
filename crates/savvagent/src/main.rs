@@ -1622,7 +1622,7 @@ mod model_validation_tests {
 
 #[cfg(test)]
 mod theme_command_tests {
-    use super::{App, Entry, InputMode, handle_theme_command, theme};
+    use super::{App, CommandSelection, Entry, InputMode, handle_theme_command, theme};
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -1773,5 +1773,38 @@ mod theme_command_tests {
             last.contains("in-flight") || last.contains("wait"),
             "last note must explain the refusal: {last}"
         );
+    }
+
+    #[test]
+    fn command_palette_selecting_theme_opens_picker_not_prefill() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // Find the /theme command index in app.commands.
+        let theme_idx = app
+            .commands
+            .iter()
+            .position(|c| c.name == "/theme")
+            .expect("/theme must be registered");
+        // Simulate command-palette selection of /theme by setting palette
+        // state and calling select_command. The contract: /theme should
+        // resolve as Execute(...) (not Prefill) so the keypath runs
+        // handle_theme_command immediately and opens the picker.
+        app.input_mode = InputMode::CommandPalette;
+        app.command_index = theme_idx;
+        let outcome = app.select_command();
+        match outcome {
+            Some(CommandSelection::Execute(cmd)) => {
+                assert_eq!(cmd.trim(), "/theme");
+                // Now run handle_theme_command on empty args, which is
+                // what the main.rs keypath dispatches to for "/theme".
+                handle_theme_command(&mut app, "");
+                assert!(matches!(app.input_mode, InputMode::SelectingTheme));
+            }
+            Some(CommandSelection::Prefill(_)) => {
+                panic!("/theme should be Execute now that needs_arg is false");
+            }
+            None => panic!("/theme command must be selectable"),
+        }
     }
 }
