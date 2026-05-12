@@ -18,7 +18,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
 
     if app.show_splash {
-        splash::render(frame, area);
+        splash::render(frame, area, &app.splash_sandbox);
         return;
     }
 
