@@ -39,7 +39,11 @@ impl Plugin for ViewFilePlugin {
         }];
         contributions.screens = vec![ScreenSpec {
             id: "view-file".into(),
-            layout: ScreenLayout::Fullscreen { hide_chrome: false },
+            layout: ScreenLayout::CenteredModal {
+                width_pct: 90,
+                height_pct: 85,
+                title: Some("View file".into()),
+            },
         }];
 
         Manifest {

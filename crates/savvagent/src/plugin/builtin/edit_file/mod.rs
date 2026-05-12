@@ -39,7 +39,11 @@ impl Plugin for EditFilePlugin {
         }];
         contributions.screens = vec![ScreenSpec {
             id: "edit-file".into(),
-            layout: ScreenLayout::Fullscreen { hide_chrome: false },
+            layout: ScreenLayout::CenteredModal {
+                width_pct: 90,
+                height_pct: 85,
+                title: Some("Edit file".into()),
+            },
         }];
 
         Manifest {
