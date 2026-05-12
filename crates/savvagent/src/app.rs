@@ -1188,41 +1188,8 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::{HOME_LOCK, HomeGuard};
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    // `theme::save` writes to `$HOME/.savvagent/theme.toml`, and `App::new`
-    // reads it. We point `$HOME` at a per-test temp dir to avoid touching
-    // the developer's real theme. Env vars are process-global, so any test
-    // that constructs `App::new` runs under this mutex.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
-
-    struct HomeGuard {
-        _td: tempfile::TempDir,
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl HomeGuard {
-        fn new() -> Self {
-            let td = tempfile::TempDir::new().expect("tempdir");
-            let prev = std::env::var_os("HOME");
-            // SAFETY: env mutation guarded by HOME_LOCK across this module's tests.
-            unsafe { std::env::set_var("HOME", td.path()) };
-            Self { _td: td, prev }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: env mutation guarded by HOME_LOCK across this module's tests.
-            unsafe {
-                match &self.prev {
-                    Some(p) => std::env::set_var("HOME", p),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
-    }
 
     fn fresh_app() -> App {
         App::new("test-model".into(), PathBuf::from("/tmp"))
