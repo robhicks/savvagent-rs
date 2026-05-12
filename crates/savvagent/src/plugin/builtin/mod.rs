@@ -31,5 +31,25 @@ pub mod save;
 /// Startup HUD screen with connect status; responds to HostStarting + Connect.
 pub mod splash;
 
+/// Theme catalog + `/theme` slash + theme picker modal.
+pub mod themes;
+
 /// Fullscreen read-only file viewer; opened via `/view <path>`.
 pub mod view_file;
+
+/// Savvagent-internal [`provider_common::BuiltinProviderPlugin`] trait —
+/// the explicit non-WIT-portable seam where `Box<dyn ProviderClient>` is
+/// handed off from a provider plugin to the runtime.
+pub mod provider_common;
+
+/// Anthropic provider shim: keyring-backed `internal:provider-anthropic`.
+pub mod provider_anthropic;
+
+/// OpenAI provider shim: keyring-backed `internal:provider-openai`.
+pub mod provider_openai;
+
+/// Google Gemini provider shim: keyring-backed `internal:provider-gemini`.
+pub mod provider_gemini;
+
+/// Local (Ollama) provider shim: keyless `internal:provider-local`.
+pub mod provider_local;

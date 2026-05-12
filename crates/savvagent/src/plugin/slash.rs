@@ -113,7 +113,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_routes_to_the_plugin() {
-        let reg = PluginRegistry::new(vec![Box::new(Echo("test:p".into()))]);
+        let reg = PluginRegistry::from_plugins(vec![Box::new(Echo("test:p".into()))]);
         let idx = Indexes::build(&reg).await.unwrap();
         let r = SlashRouter::new(&idx, &reg);
         let out = r.dispatch("echo", vec!["hi".into()]).await.unwrap();
@@ -122,7 +122,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_slash_yields_unknown_error() {
-        let reg = PluginRegistry::new(vec![Box::new(Echo("test:p".into()))]);
+        let reg = PluginRegistry::from_plugins(vec![Box::new(Echo("test:p".into()))]);
         let idx = Indexes::build(&reg).await.unwrap();
         let r = SlashRouter::new(&idx, &reg);
         let err = r.dispatch("nope", vec![]).await.unwrap_err();

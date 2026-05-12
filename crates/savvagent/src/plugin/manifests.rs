@@ -225,7 +225,7 @@ mod tests {
 
     #[tokio::test]
     async fn slash_conflict_is_hard_error() {
-        let reg = PluginRegistry::new(vec![
+        let reg = PluginRegistry::from_plugins(vec![
             Box::new(WithSlash("test:a".into(), "theme".into())),
             Box::new(WithSlash("test:b".into(), "theme".into())),
         ]);
@@ -282,7 +282,7 @@ mod tests {
 
     #[tokio::test]
     async fn screen_conflict_is_hard_error() {
-        let reg = PluginRegistry::new(vec![
+        let reg = PluginRegistry::from_plugins(vec![
             Box::new(WithScreen("test:a".into(), "themes.picker".into())),
             Box::new(WithScreen("test:b".into(), "themes.picker".into())),
         ]);
@@ -327,7 +327,7 @@ mod tests {
             chord: chord.clone(),
             action: BoundAction::EmitEffect(Effect::Quit),
         };
-        let reg = PluginRegistry::new(vec![
+        let reg = PluginRegistry::from_plugins(vec![
             Box::new(WithBinding("test:a".into(), spec.clone())),
             Box::new(WithBinding("test:b".into(), spec)),
         ]);
@@ -337,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn slots_sort_by_priority() {
-        let reg = PluginRegistry::new(vec![
+        let reg = PluginRegistry::from_plugins(vec![
             Box::new(WithSlots("test:a".into(), vec![("home.tips".into(), 200)])),
             Box::new(WithSlots("test:b".into(), vec![("home.tips".into(), 100)])),
         ]);

@@ -39,16 +39,38 @@ pub mod screen_stack;
 #[allow(dead_code)]
 pub mod effects;
 
-/// Returns the set of built-in plugin instances.
+/// Re-export so callers don't have to reach into the registry submodule
+/// for the type returned from [`register_builtins`].
+pub(crate) use registry::BuiltinSet;
+
+/// Returns the set of built-in plugin instances and provider-plugin shims.
 ///
 /// PR 2 adds: home-footer, home-tips.
 /// PR 3 adds: splash, command-palette.
 /// PR 4 adds: view-file, edit-file.
 /// PR 5 adds: connect, resume, model, save, clear.
-/// PR 6 adds: themes + 4 providers.
+/// PR 6 adds: themes + 4 providers (anthropic / openai / gemini / local).
 /// PR 8 adds: plugins-manager.
-pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
-    vec![
+///
+/// Provider plugins are stored exactly once per plugin in
+/// [`crate::plugin::builtin::provider_common::ProviderEntry`], which exposes
+/// the same instance via two trait-object Arcs (`dyn Plugin` and
+/// `dyn BuiltinProviderPlugin`). The registry inserts the plugin-view
+/// into the slash/render/hook dispatch map and the provider-view into the
+/// `take_client` map, so both code paths mutate the same state — the
+/// dual-instance bug that previously broke `/connect <provider>` is now
+/// architecturally impossible.
+pub(crate) fn register_builtins() -> BuiltinSet {
+    use builtin::provider_common::ProviderEntry;
+
+    let providers: Vec<ProviderEntry> = vec![
+        ProviderEntry::new(builtin::provider_anthropic::ProviderAnthropicPlugin::new()),
+        ProviderEntry::new(builtin::provider_openai::ProviderOpenAiPlugin::new()),
+        ProviderEntry::new(builtin::provider_gemini::ProviderGeminiPlugin::new()),
+        ProviderEntry::new(builtin::provider_local::ProviderLocalPlugin::new()),
+    ];
+
+    let plugins: Vec<Box<dyn savvagent_plugin::Plugin>> = vec![
         Box::new(builtin::clear::ClearPlugin::new()),
         Box::new(builtin::command_palette::CommandPalettePlugin::new()),
         Box::new(builtin::connect::ConnectPlugin::new()),
@@ -59,32 +81,102 @@ pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
         Box::new(builtin::resume::ResumePlugin::new()),
         Box::new(builtin::save::SavePlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
+        Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
-    ]
+    ];
+
+    BuiltinSet { plugins, providers }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::registry::PluginRegistry;
+    use savvagent_plugin::PluginId;
 
     #[tokio::test]
-    async fn register_builtins_pr5_complete() {
-        let plugins = register_builtins();
-        let ids: Vec<_> = plugins
+    async fn register_builtins_pr6_complete() {
+        let set = register_builtins();
+        // Non-provider plugins from PR 1..PR 5 + themes.
+        let plugin_ids: Vec<_> = set
+            .plugins
             .iter()
             .map(|p| p.manifest().id.as_str().to_string())
             .collect();
-        assert!(ids.contains(&"internal:clear".to_string()));
-        assert!(ids.contains(&"internal:command-palette".to_string()));
-        assert!(ids.contains(&"internal:connect".to_string()));
-        assert!(ids.contains(&"internal:edit-file".to_string()));
-        assert!(ids.contains(&"internal:home-footer".to_string()));
-        assert!(ids.contains(&"internal:home-tips".to_string()));
-        assert!(ids.contains(&"internal:model".to_string()));
-        assert!(ids.contains(&"internal:resume".to_string()));
-        assert!(ids.contains(&"internal:save".to_string()));
-        assert!(ids.contains(&"internal:splash".to_string()));
-        assert!(ids.contains(&"internal:view-file".to_string()));
-        assert_eq!(plugins.len(), 11);
+        for expected in [
+            "internal:clear",
+            "internal:command-palette",
+            "internal:connect",
+            "internal:edit-file",
+            "internal:home-footer",
+            "internal:home-tips",
+            "internal:model",
+            "internal:resume",
+            "internal:save",
+            "internal:splash",
+            "internal:themes",
+            "internal:view-file",
+        ] {
+            assert!(
+                plugin_ids.contains(&expected.to_string()),
+                "missing non-provider plugin id: {expected}"
+            );
+        }
+        assert_eq!(set.plugins.len(), 12);
+
+        // PR 6 adds the 4 provider shims — exactly once each.
+        let provider_ids: Vec<_> = {
+            let mut ids = Vec::new();
+            for entry in &set.providers {
+                let guard = entry.as_provider.try_lock().unwrap();
+                ids.push(guard.manifest().id.as_str().to_string());
+            }
+            ids
+        };
+        for expected in [
+            "internal:provider-anthropic",
+            "internal:provider-openai",
+            "internal:provider-gemini",
+            "internal:provider-local",
+        ] {
+            assert!(
+                provider_ids.contains(&expected.to_string()),
+                "missing provider id: {expected}"
+            );
+        }
+        assert_eq!(set.providers.len(), 4);
+
+        // Registry shape: the post-fix invariant is that the registry's
+        // plugins HashMap has one entry per non-provider plugin PLUS one
+        // entry per provider plugin (same underlying Arc as the providers
+        // map). That's 12 + 4 = 16 unique ids in `plugins` and 4 in
+        // `providers`. The dual-instance bug would have produced either
+        // a HashMap collision (silent overwrite) or 20 entries — neither
+        // matches the assertion below.
+        let reg = PluginRegistry::new(set);
+        assert_eq!(
+            reg.len(),
+            16,
+            "registry should have 12 non-provider + 4 provider plugins"
+        );
+        assert_eq!(
+            reg.provider_count(),
+            4,
+            "registry should have 4 provider plugins"
+        );
+        // And every provider id resolves through `get` (proves the
+        // Plugin-view side of the ProviderEntry is wired in).
+        for pid_str in [
+            "internal:provider-anthropic",
+            "internal:provider-openai",
+            "internal:provider-gemini",
+            "internal:provider-local",
+        ] {
+            let pid = PluginId::new(pid_str).unwrap();
+            assert!(
+                reg.get(&pid).is_some(),
+                "provider {pid_str} missing from plugins map"
+            );
+        }
     }
 }

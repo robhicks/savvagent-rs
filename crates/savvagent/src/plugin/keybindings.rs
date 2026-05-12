@@ -87,7 +87,7 @@ mod tests {
 
     #[tokio::test]
     async fn slash_chord_on_home_opens_palette() {
-        let reg = PluginRegistry::new(vec![Box::new(WithBinding(
+        let reg = PluginRegistry::from_plugins(vec![Box::new(WithBinding(
             "internal:command-palette".into(),
             KeybindingSpec {
                 chord: chord('/'),

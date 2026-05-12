@@ -10,7 +10,7 @@
 //! today. Add new slots as new widgets need them; default to the closest
 //! existing slot when extending.
 
-use crate::theme::Theme;
+use crate::plugin::builtin::themes::catalog::Theme;
 use ratatui::style::{Color, Style};
 use ratatui_themes::ThemePalette;
 

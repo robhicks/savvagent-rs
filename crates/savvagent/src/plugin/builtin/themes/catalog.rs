@@ -24,9 +24,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use ratatui_themes::ThemeName;
+use savvagent_plugin::{ThemeColor, ThemeEntry, ThemePalette};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-pub mod picker;
 
 /// One of the TUI's selectable themes.
 ///
@@ -111,6 +110,63 @@ impl Theme {
     #[allow(dead_code)]
     pub fn catalog() -> impl Iterator<Item = Theme> {
         ThemeName::all().iter().copied().map(Theme::Upstream)
+    }
+
+    /// Human-friendly label shown in the picker UI. Built-ins use the
+    /// canonical capitalised forms; upstream themes delegate to
+    /// [`ThemeName::display_name`] (e.g. `"Tokyo Night"`,
+    /// `"Catppuccin Mocha"`).
+    #[must_use]
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Theme::Dark => "Dark",
+            Theme::Light => "Light",
+            Theme::HighContrast => "High Contrast",
+            Theme::Upstream(t) => t.display_name(),
+        }
+    }
+
+    /// Adapt this theme into the WIT-portable [`ThemeEntry`] returned by
+    /// `Plugin::themes` / `Contributions::themes`. The palette is a
+    /// coarse approximation (the rich render-path palette lives in
+    /// [`crate::palette`]) — enough for picker UIs that only need
+    /// representative colors without dragging `ratatui::style::Color`
+    /// across the plugin boundary.
+    #[must_use]
+    pub fn to_theme_entry(self) -> ThemeEntry {
+        let dark = !matches!(self, Theme::Light);
+        let palette = match self {
+            Theme::Dark => ThemePalette::new(
+                ThemeColor::Black,
+                ThemeColor::White,
+                ThemeColor::Blue,
+                ThemeColor::Gray,
+            ),
+            Theme::Light => ThemePalette::new(
+                ThemeColor::White,
+                ThemeColor::Black,
+                ThemeColor::Blue,
+                ThemeColor::Gray,
+            ),
+            Theme::HighContrast => ThemePalette::new(
+                ThemeColor::Black,
+                ThemeColor::White,
+                ThemeColor::Yellow,
+                ThemeColor::Gray,
+            ),
+            Theme::Upstream(_) => ThemePalette::new(
+                ThemeColor::Black,
+                ThemeColor::White,
+                ThemeColor::Cyan,
+                ThemeColor::Gray,
+            ),
+        };
+        ThemeEntry {
+            slug: self.name().to_string(),
+            label: self.display_name().to_string(),
+            dark,
+            palette,
+        }
     }
 }
 

@@ -8,7 +8,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::Theme;
+use super::catalog::Theme;
 
 /// Self-contained state for the `/theme` picker modal.
 ///
