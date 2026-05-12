@@ -658,6 +658,37 @@ impl App {
         self.active_theme = filtered[self.theme_picker_index];
     }
 
+    /// Append `c` to the picker filter, clamp the cursor index to the
+    /// new filtered length, and update [`Self::active_theme`] to the
+    /// clamped row. If the new filter matches zero themes,
+    /// `active_theme` is left unchanged (preserves the last good live
+    /// preview).
+    pub fn theme_picker_typed_char(&mut self, c: char) {
+        self.theme_picker_filter.push(c);
+        self.clamp_theme_picker_after_filter_change();
+    }
+
+    /// Pop one char from the picker filter (no-op on empty), clamp the
+    /// cursor, and update live preview.
+    pub fn theme_picker_backspace(&mut self) {
+        if self.theme_picker_filter.pop().is_none() {
+            return;
+        }
+        self.clamp_theme_picker_after_filter_change();
+    }
+
+    fn clamp_theme_picker_after_filter_change(&mut self) {
+        let filtered = self.theme_picker_filtered_themes();
+        if filtered.is_empty() {
+            // Leave active_theme alone — keeps the last good preview.
+            return;
+        }
+        if self.theme_picker_index >= filtered.len() {
+            self.theme_picker_index = filtered.len() - 1;
+        }
+        self.active_theme = filtered[self.theme_picker_index];
+    }
+
     /// Append a char to the palette filter and reset the cursor.
     pub fn palette_push_char(&mut self, c: char) {
         self.palette_filter.push(c);
@@ -1375,6 +1406,112 @@ mod tests {
         app.theme_picker_cursor_down();
         app.theme_picker_cursor_up();
         assert_eq!(app.active_theme, active_before);
+    }
+
+    #[test]
+    fn theme_picker_typed_char_appends_and_narrows() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        app.theme_picker_typed_char('d');
+        app.theme_picker_typed_char('r');
+        app.theme_picker_typed_char('a');
+        assert_eq!(app.theme_picker_filter, "dra");
+        let filtered = app.theme_picker_filtered_themes();
+        assert!(
+            filtered.iter().all(|t| t.name().contains("dra")),
+            "filter must restrict to themes containing 'dra': {filtered:?}"
+        );
+    }
+
+    #[test]
+    fn theme_picker_typed_char_clamps_index_when_list_shrinks() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        // Move cursor to an index that won't survive narrowing.
+        let last = app.theme_picker_filtered_themes().len() - 1;
+        app.theme_picker_index = last;
+        // Type "drac" — list shrinks to 1 item (dracula).
+        for c in "drac".chars() {
+            app.theme_picker_typed_char(c);
+        }
+        assert_eq!(app.theme_picker_filtered_themes().len(), 1);
+        assert_eq!(
+            app.theme_picker_index, 0,
+            "index must clamp when filter shrinks the list"
+        );
+    }
+
+    #[test]
+    fn theme_picker_typed_char_live_previews_clamped_theme() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        let last = app.theme_picker_filtered_themes().len() - 1;
+        app.theme_picker_index = last;
+        for c in "drac".chars() {
+            app.theme_picker_typed_char(c);
+        }
+        // After narrowing to [Dracula], live preview points there.
+        match app.active_theme {
+            crate::theme::Theme::Upstream(t) => assert_eq!(t.slug(), "dracula"),
+            other => panic!("expected Upstream(Dracula), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn theme_picker_typed_char_to_zero_matches_preserves_preview() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        app.theme_picker_cursor_down(); // active_theme = filtered[1]
+        // Type chars one at a time; snapshot the live preview at the
+        // moment the filter first narrows to zero matches. After that
+        // point further typing must NOT clobber `active_theme`.
+        let mut preview: Option<crate::theme::Theme> = None;
+        for c in "totallybogus".chars() {
+            let before = app.active_theme;
+            app.theme_picker_typed_char(c);
+            if preview.is_none() && app.theme_picker_filtered_themes().is_empty() {
+                preview = Some(before);
+            }
+        }
+        let preview = preview.expect("filter should have reached zero matches");
+        assert!(app.theme_picker_filtered_themes().is_empty());
+        assert_eq!(
+            app.active_theme, preview,
+            "preview must hold the last good theme when filter narrows to zero"
+        );
+    }
+
+    #[test]
+    fn theme_picker_backspace_pops_and_widens() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        for c in "drac".chars() {
+            app.theme_picker_typed_char(c);
+        }
+        assert_eq!(app.theme_picker_filter, "drac");
+        app.theme_picker_backspace();
+        assert_eq!(app.theme_picker_filter, "dra");
+    }
+
+    #[test]
+    fn theme_picker_backspace_on_empty_filter_is_noop() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        assert_eq!(app.theme_picker_filter, "");
+        app.theme_picker_backspace();
+        assert_eq!(app.theme_picker_filter, "");
     }
 
     #[test]
