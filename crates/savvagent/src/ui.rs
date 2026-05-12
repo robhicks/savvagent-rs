@@ -455,12 +455,6 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     if matches!(app.input_mode, InputMode::SelectingTranscript) {
         render_transcript_picker(app, frame, area, palette);
     }
-
-    if matches!(app.input_mode, InputMode::SelectingTheme) {
-        if let Some(p) = &app.theme_picker {
-            render_theme_picker_with(p, frame, area, palette);
-        }
-    }
 }
 
 fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
@@ -496,100 +490,6 @@ fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect, palette: P
             .title_bottom(Line::from(" [↑/↓] move  [Enter] resume  [Esc] cancel ").right_aligned()),
     );
     frame.render_widget(list, popup);
-}
-
-fn render_theme_picker_with(
-    picker: &crate::theme::picker::ThemePicker,
-    frame: &mut Frame,
-    area: Rect,
-    palette: Palette,
-) {
-    let popup = centered_rect(60, 50, area);
-    frame.render_widget(Clear, popup);
-
-    let filtered = picker.filtered_themes();
-    let mut lines: Vec<Line<'static>> = Vec::with_capacity(filtered.len() + 4);
-
-    if filtered.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(
-            Line::from(Span::styled(
-                format!("no themes match `{}`", picker.filter),
-                palette.base_style().fg(palette.muted),
-            ))
-            .centered(),
-        );
-    } else {
-        let builtins: Vec<&crate::theme::Theme> =
-            filtered.iter().filter(|t| t.is_builtin()).collect();
-        let catalog: Vec<&crate::theme::Theme> =
-            filtered.iter().filter(|t| !t.is_builtin()).collect();
-
-        if !builtins.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  built-in:".to_string(),
-                palette.base_style().fg(palette.muted),
-            )));
-            for t in &builtins {
-                let filtered_idx = filtered.iter().position(|x| x == *t).unwrap();
-                lines.push(render_theme_picker_row(picker, palette, t, filtered_idx));
-            }
-        }
-        if !catalog.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "  catalog (ratatui-themes):".to_string(),
-                palette.base_style().fg(palette.muted),
-            )));
-            for t in &catalog {
-                let filtered_idx = filtered.iter().position(|x| x == *t).unwrap();
-                lines.push(render_theme_picker_row(picker, palette, t, filtered_idx));
-            }
-        }
-    }
-
-    let title = if picker.filter.is_empty() {
-        " Pick a theme ".to_string()
-    } else {
-        format!(" Pick a theme · /{} ", picker.filter)
-    };
-    let body = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .style(palette.base_style())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                .title(title)
-                .title_bottom(
-                    Line::from(" [↑/↓] move  [type to filter]  [Enter] select  [Esc] cancel ")
-                        .right_aligned(),
-                ),
-        );
-    frame.render_widget(body, popup);
-}
-
-fn render_theme_picker_row(
-    picker: &crate::theme::picker::ThemePicker,
-    palette: Palette,
-    theme: &crate::theme::Theme,
-    filtered_index: usize,
-) -> Line<'static> {
-    let is_cursor = filtered_index == picker.cursor;
-    let is_active = *theme == picker.pre_open_theme;
-    let prefix = if is_cursor { "    > " } else { "      " };
-    let active_marker = if is_active { "  (active)" } else { "" };
-    let style = if is_cursor {
-        palette
-            .base_style()
-            .fg(palette.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        palette.base_style()
-    };
-    Line::from(vec![Span::styled(
-        format!("{prefix}{}{active_marker}", theme.name()),
-        style,
-    )])
 }
 
 fn render_transcript_item(

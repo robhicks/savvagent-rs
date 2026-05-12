@@ -96,6 +96,17 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
 }
 
 async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), String> {
+    // Per-screen open arguments may need values that only `App` knows
+    // (active theme slug, registered provider list, etc.). Plugins emit
+    // a placeholder; apply_effects patches it in here so plugin code
+    // doesn't need read access to App state.
+    let args = match (id, args) {
+        ("themes.picker", _) => ScreenArgs::ThemePicker {
+            current_slug: app.active_theme.name().to_string(),
+        },
+        ("connect.picker", _) => ScreenArgs::ConnectPicker,
+        (_, other) => other,
+    };
     let (reg, idx) = match (&app.plugin_registry, &app.plugin_indexes) {
         (Some(r), Some(i)) => (r.clone(), i.clone()),
         _ => return Err("plugin runtime not installed".into()),

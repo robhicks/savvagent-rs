@@ -31,5 +31,8 @@ pub mod save;
 /// Startup HUD screen with connect status; responds to HostStarting + Connect.
 pub mod splash;
 
+/// Theme catalog + `/theme` slash + theme picker modal.
+pub mod themes;
+
 /// Fullscreen read-only file viewer; opened via `/view <path>`.
 pub mod view_file;
