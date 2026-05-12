@@ -44,17 +44,33 @@ impl Plugin for CommandPalettePlugin {
                 title: Some("Commands".into()),
             },
         }];
-        contributions.keybindings = vec![KeybindingSpec {
-            chord: ChordPortable::new(KeyEventPortable {
-                code: KeyCodePortable::Char('/'),
-                modifiers: KeyMods::default(),
-            }),
-            scope: KeyScope::OnHome,
-            action: BoundAction::EmitEffect(Effect::OpenScreen {
-                id: "palette".into(),
-                args: ScreenArgs::None,
-            }),
-        }];
+        let open_palette = BoundAction::EmitEffect(Effect::OpenScreen {
+            id: "palette".into(),
+            args: ScreenArgs::None,
+        });
+        contributions.keybindings = vec![
+            KeybindingSpec {
+                chord: ChordPortable::new(KeyEventPortable {
+                    code: KeyCodePortable::Char('/'),
+                    modifiers: KeyMods::default(),
+                }),
+                scope: KeyScope::OnHome,
+                action: open_palette.clone(),
+            },
+            // Ctrl-P is the v0.8 muscle-memory shortcut for the palette.
+            // The empty-state splash message advertises it.
+            KeybindingSpec {
+                chord: ChordPortable::new(KeyEventPortable {
+                    code: KeyCodePortable::Char('p'),
+                    modifiers: KeyMods {
+                        ctrl: true,
+                        ..KeyMods::default()
+                    },
+                }),
+                scope: KeyScope::OnHome,
+                action: open_palette,
+            },
+        ];
         contributions.slots = vec![SlotSpec {
             slot_id: "home.tips".into(),
             priority: 200,
