@@ -92,7 +92,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_returns_contributors_in_priority_order() {
-        let reg = PluginRegistry::new(vec![
+        let reg = PluginRegistry::from_plugins(vec![
             Box::new(Stub {
                 id: "test:z".into(),
                 slot: "home.tips".into(),

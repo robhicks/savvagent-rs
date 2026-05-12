@@ -39,16 +39,31 @@ pub mod screen_stack;
 #[allow(dead_code)]
 pub mod effects;
 
-/// Returns the set of built-in plugin instances.
+/// Re-export so callers don't have to reach into the registry submodule
+/// for the type returned from [`register_builtins`].
+pub use registry::BuiltinSet;
+
+/// Returns the set of built-in plugin instances and provider-plugin shims.
 ///
 /// PR 2 adds: home-footer, home-tips.
 /// PR 3 adds: splash, command-palette.
 /// PR 4 adds: view-file, edit-file.
 /// PR 5 adds: connect, resume, model, save, clear.
-/// PR 6 adds: themes + 4 providers.
+/// PR 6 adds: themes + provider shims (task 6.2 ships anthropic; task 6.3
+/// follows with openai/gemini/local).
 /// PR 8 adds: plugins-manager.
-pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
-    vec![
+///
+/// Provider plugins are double-registered: once as `Box<dyn Plugin>` so
+/// their manifest/slash/slot/event contributions flow through the normal
+/// dispatch paths, and once as `Box<dyn BuiltinProviderPlugin>` so
+/// `apply_effects` can call `take_client()` after seeing
+/// [`savvagent_plugin::Effect::RegisterProvider`].
+pub fn register_builtins() -> BuiltinSet {
+    let providers: Vec<Box<dyn builtin::provider_common::BuiltinProviderPlugin>> = vec![Box::new(
+        builtin::provider_anthropic::ProviderAnthropicPlugin::new(),
+    )];
+
+    let plugins: Vec<Box<dyn savvagent_plugin::Plugin>> = vec![
         Box::new(builtin::clear::ClearPlugin::new()),
         Box::new(builtin::command_palette::CommandPalettePlugin::new()),
         Box::new(builtin::connect::ConnectPlugin::new()),
@@ -61,7 +76,13 @@ pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
-    ]
+        // Provider plugins also live in the regular plugin registry — see
+        // doc-comment above. The `providers` vec holds a separate set of
+        // instances; each `Plugin`-side instance is independent state.
+        Box::new(builtin::provider_anthropic::ProviderAnthropicPlugin::new()),
+    ];
+
+    BuiltinSet { plugins, providers }
 }
 
 #[cfg(test)]
@@ -70,11 +91,13 @@ mod tests {
 
     #[tokio::test]
     async fn register_builtins_pr6_complete() {
-        let plugins = register_builtins();
-        let ids: Vec<_> = plugins
+        let set = register_builtins();
+        let ids: Vec<_> = set
+            .plugins
             .iter()
             .map(|p| p.manifest().id.as_str().to_string())
             .collect();
+        // Original 12 PR-1..PR-5 + themes built-ins.
         assert!(ids.contains(&"internal:clear".to_string()));
         assert!(ids.contains(&"internal:command-palette".to_string()));
         assert!(ids.contains(&"internal:connect".to_string()));
@@ -87,6 +110,18 @@ mod tests {
         assert!(ids.contains(&"internal:splash".to_string()));
         assert!(ids.contains(&"internal:themes".to_string()));
         assert!(ids.contains(&"internal:view-file".to_string()));
-        assert_eq!(plugins.len(), 12);
+        // PR 6 task 6.2 ships the anthropic provider shim.
+        assert!(ids.contains(&"internal:provider-anthropic".to_string()));
+        assert_eq!(set.plugins.len(), 13);
+
+        // Provider shims are also indexed in the parallel provider vec so
+        // `apply_effects` can call `take_client` on them.
+        let provider_ids: Vec<_> = set
+            .providers
+            .iter()
+            .map(|p| p.manifest().id.as_str().to_string())
+            .collect();
+        assert!(provider_ids.contains(&"internal:provider-anthropic".to_string()));
+        assert_eq!(set.providers.len(), 1);
     }
 }

@@ -3,7 +3,7 @@
 //! recurses for Stack). Slash re-entrancy depth is enforced here so that
 //! the depth cap cannot be bypassed by constructing a fresh SlashRouter.
 
-use savvagent_plugin::{Effect, ScreenArgs};
+use savvagent_plugin::{Effect, HostEvent, PluginId, ScreenArgs};
 
 use crate::app::App;
 use crate::plugin::slash::SlashRouter;
@@ -53,7 +53,43 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             }
         }
         Effect::RegisterProvider { id, display_name } => {
-            app.register_provider(id, display_name);
+            // Map ProviderId → owning PluginId by convention. Every built-in
+            // provider plugin uses the id pattern `internal:provider-<provider>`.
+            let plugin_id = match PluginId::new(format!("internal:provider-{}", id.as_str())) {
+                Ok(pid) => pid,
+                Err(e) => {
+                    tracing::warn!(error = %e, provider_id = %id.as_str(),
+                        "RegisterProvider with invalid provider id; skipping");
+                    return Ok(());
+                }
+            };
+            let registry = match &app.plugin_registry {
+                Some(r) => r.clone(),
+                None => {
+                    tracing::error!("RegisterProvider before plugin runtime installed");
+                    return Ok(());
+                }
+            };
+            let client = {
+                let reg = registry.read().await;
+                reg.take_provider_client(&plugin_id).await
+            };
+            if let Some(client) = client {
+                app.register_provider(id.clone(), display_name.clone(), client);
+                // Notify subscribers via HostEvent::ProviderRegistered so e.g.
+                // internal:connect can refresh its candidate list.
+                Box::pin(dispatch_host_event(
+                    app,
+                    HostEvent::ProviderRegistered { id, display_name },
+                    depth,
+                ))
+                .await?;
+            } else {
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "provider `{}` announced but no client was constructed",
+                    id.as_str()
+                )));
+            }
         }
         Effect::SaveTranscript { path } => match app.save_transcript_to(path.clone()) {
             Ok(()) => {
@@ -143,6 +179,47 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
     };
 
     app.screen_stack.push(screen, layout);
+    Ok(())
+}
+
+/// Deliver a [`HostEvent`] to every plugin that subscribed to its
+/// [`savvagent_plugin::HookKind`], applying each plugin's returned effects
+/// in order. `depth` is forwarded so [`Effect::RunSlash`] re-entries from
+/// hook handlers cannot bypass the depth cap. PR 7 will replace this with
+/// the full Host-side dispatcher.
+pub(crate) async fn dispatch_host_event(
+    app: &mut App,
+    event: HostEvent,
+    depth: u8,
+) -> Result<(), String> {
+    let (reg, idx) = match (&app.plugin_registry, &app.plugin_indexes) {
+        (Some(r), Some(i)) => (r.clone(), i.clone()),
+        _ => return Ok(()),
+    };
+    let kind = event.kind();
+    let subscriber_ids = {
+        let idx_guard = idx.read().await;
+        idx_guard.hooks.get(&kind).cloned().unwrap_or_default()
+    };
+    for pid in subscriber_ids {
+        let handle = {
+            let reg_guard = reg.read().await;
+            reg_guard.get(&pid)
+        };
+        let Some(handle) = handle else { continue };
+        let effects = {
+            let mut plugin = handle.lock().await;
+            match plugin.on_event(event.clone()).await {
+                Ok(effs) => effs,
+                Err(e) => {
+                    tracing::warn!(plugin_id = %pid.as_str(), error = %e,
+                        "plugin on_event returned an error; skipping");
+                    continue;
+                }
+            }
+        };
+        Box::pin(apply_effects_with_depth(app, effects, depth)).await?;
+    }
     Ok(())
 }
 

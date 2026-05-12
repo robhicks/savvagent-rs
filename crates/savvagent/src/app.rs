@@ -304,6 +304,15 @@ pub struct App {
     /// LIFO stack of active plugin-provided screens. Driven by
     /// `Effect::OpenScreen` / `Effect::CloseScreen` via `apply_effects`.
     pub screen_stack: crate::plugin::screen_stack::ScreenStack,
+
+    /// Provider clients announced by provider plugins via
+    /// [`savvagent_plugin::Effect::RegisterProvider`], keyed by stable
+    /// provider id. PR 6 only stores the clients here; PR 7 wires them
+    /// into [`savvagent_host::Host`] so the tool loop can talk through
+    /// them. Boxed-trait-object so the same map can hold the
+    /// per-provider client implementations side by side.
+    pub registered_providers:
+        std::collections::HashMap<String, Box<dyn savvagent_mcp::ProviderClient>>,
 }
 
 impl App {
@@ -370,6 +379,7 @@ impl App {
             plugin_registry: None,
             plugin_indexes: None,
             screen_stack: crate::plugin::screen_stack::ScreenStack::new(),
+            registered_providers: std::collections::HashMap::new(),
         };
         app.refresh_commands();
         app
@@ -1010,10 +1020,25 @@ impl App {
         tracing::debug!("set_active_provider effect ignored in PR 3");
     }
 
-    /// Register a provider announced by a plugin. Stub — full wiring in PR 5.
-    #[allow(unused_variables)]
-    pub fn register_provider(&mut self, id: savvagent_plugin::ProviderId, display_name: String) {
-        tracing::debug!("register_provider effect ignored in PR 3");
+    /// Register a provider announced by a plugin. v0.9 stores the constructed
+    /// [`savvagent_mcp::ProviderClient`] in a per-id map and surfaces a note;
+    /// PR 7 wires this client into the [`savvagent_host::Host`] tool-loop.
+    pub fn register_provider(
+        &mut self,
+        id: savvagent_plugin::ProviderId,
+        display_name: String,
+        client: Box<dyn savvagent_mcp::ProviderClient>,
+    ) {
+        tracing::info!(
+            provider_id = %id.as_str(),
+            display_name = %display_name,
+            "provider registered"
+        );
+        self.registered_providers
+            .insert(id.as_str().to_string(), client);
+        self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+            "Connected to {display_name}."
+        )));
     }
 
     /// Save transcript to the given path. Serializes `entries` to a JSON array

@@ -36,3 +36,11 @@ pub mod themes;
 
 /// Fullscreen read-only file viewer; opened via `/view <path>`.
 pub mod view_file;
+
+/// Savvagent-internal [`provider_common::BuiltinProviderPlugin`] trait —
+/// the explicit non-WIT-portable seam where `Box<dyn ProviderClient>` is
+/// handed off from a provider plugin to the runtime.
+pub mod provider_common;
+
+/// Anthropic provider shim: keyring-backed `internal:provider-anthropic`.
+pub mod provider_anthropic;

@@ -130,8 +130,8 @@ async fn main() -> Result<()> {
         use crate::plugin::manifests::Indexes;
         use crate::plugin::registry::PluginRegistry;
 
-        let plugins = plugin::register_builtins();
-        let registry = PluginRegistry::new(plugins);
+        let set = plugin::register_builtins();
+        let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry)
             .await
             .unwrap_or_else(|e| panic!("plugin manifest conflict at startup: {e}"));

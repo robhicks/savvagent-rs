@@ -3,21 +3,58 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use savvagent_mcp::ProviderClient;
 use savvagent_plugin::{Plugin, PluginId};
 use tokio::sync::Mutex;
 
+use crate::plugin::builtin::provider_common::BuiltinProviderPlugin;
+
+/// Plugin instances + provider-plugin parallel map handed to
+/// [`PluginRegistry::new`].
+///
+/// Returned by [`crate::plugin::register_builtins`]. The two vectors are
+/// parallel rather than merged because [`BuiltinProviderPlugin`] is *not*
+/// part of `savvagent-plugin` — see `provider_common.rs` for the rationale.
+#[derive(Default)]
+pub struct BuiltinSet {
+    /// Every plugin (including provider plugins, double-allocated) that
+    /// should appear in the runtime's `dyn Plugin` registry.
+    pub plugins: Vec<Box<dyn Plugin>>,
+    /// Provider plugins, indexed separately so the runtime can call
+    /// [`BuiltinProviderPlugin::take_client`] on them after observing
+    /// [`savvagent_plugin::Effect::RegisterProvider`].
+    pub providers: Vec<Box<dyn BuiltinProviderPlugin>>,
+}
+
 /// Stores plugin instances behind `Arc<Mutex<Box<dyn Plugin>>>` keyed by
-/// `PluginId`; tracks an enabled-set.
+/// `PluginId`; tracks an enabled-set. Provider plugins are additionally
+/// stored in a parallel map keyed by [`PluginId`] so the runtime can call
+/// [`BuiltinProviderPlugin::take_client`] without trait-object downcasting.
 pub struct PluginRegistry {
     plugins: HashMap<PluginId, Arc<Mutex<Box<dyn Plugin>>>>,
+    providers: HashMap<PluginId, Arc<Mutex<Box<dyn BuiltinProviderPlugin>>>>,
     enabled: HashSet<PluginId>,
 }
 
 impl PluginRegistry {
-    /// Construct from an ordered vector of plugin instances. Every plugin is
-    /// inserted into the registry and added to the enabled set. The enabled
+    /// Test-only convenience: construct from a vector of plugins (no
+    /// provider-plugin parallel map). Production code uses
+    /// [`PluginRegistry::new`] with the [`BuiltinSet`] returned by
+    /// [`crate::plugin::register_builtins`].
+    #[cfg(test)]
+    pub fn from_plugins(plugins: Vec<Box<dyn Plugin>>) -> Self {
+        Self::new(BuiltinSet {
+            plugins,
+            providers: vec![],
+        })
+    }
+
+    /// Construct from a [`BuiltinSet`]. Every plugin is inserted into the
+    /// registry and added to the enabled set; every provider plugin is
+    /// additionally indexed in the parallel provider map. The enabled
     /// set is rewound at startup by reading `plugins.toml` (PR 8).
-    pub fn new(plugins: Vec<Box<dyn Plugin>>) -> Self {
+    pub fn new(set: BuiltinSet) -> Self {
+        let BuiltinSet { plugins, providers } = set;
         let mut map = HashMap::with_capacity(plugins.len());
         let mut enabled = HashSet::with_capacity(plugins.len());
         for p in plugins {
@@ -25,8 +62,14 @@ impl PluginRegistry {
             enabled.insert(id.clone());
             map.insert(id, Arc::new(Mutex::new(p)));
         }
+        let mut provider_map = HashMap::with_capacity(providers.len());
+        for p in providers {
+            let id = p.manifest().id.clone();
+            provider_map.insert(id, Arc::new(Mutex::new(p)));
+        }
         Self {
             plugins: map,
+            providers: provider_map,
             enabled,
         }
     }
@@ -70,6 +113,17 @@ impl PluginRegistry {
             self.enabled.remove(id);
         }
     }
+
+    /// Take the constructed provider client out of the provider plugin
+    /// associated with `id`, leaving the plugin's slot empty. Returns
+    /// `None` if `id` is unknown or the plugin doesn't currently hold a
+    /// client. Called by [`crate::plugin::effects::apply_effects`] after
+    /// observing [`savvagent_plugin::Effect::RegisterProvider`].
+    pub async fn take_provider_client(&self, id: &PluginId) -> Option<Box<dyn ProviderClient>> {
+        let handle = self.providers.get(id)?.clone();
+        let mut guard = handle.lock().await;
+        guard.take_client()
+    }
 }
 
 #[cfg(test)]
@@ -98,7 +152,7 @@ mod tests {
 
     #[test]
     fn registry_indexes_by_id() {
-        let reg = PluginRegistry::new(vec![
+        let reg = PluginRegistry::from_plugins(vec![
             Box::new(Empty("test:a".into())),
             Box::new(Empty("test:b".into())),
         ]);
@@ -111,7 +165,7 @@ mod tests {
 
     #[test]
     fn disable_removes_from_enabled_set() {
-        let mut reg = PluginRegistry::new(vec![Box::new(Empty("test:x".into()))]);
+        let mut reg = PluginRegistry::from_plugins(vec![Box::new(Empty("test:x".into()))]);
         let id = PluginId::new("test:x").unwrap();
         assert!(reg.is_enabled(&id));
         reg.set_enabled(&id, false);

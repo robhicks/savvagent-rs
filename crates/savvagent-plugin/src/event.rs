@@ -27,6 +27,11 @@ pub enum HookKind {
     PromptSubmitted,
     /// Emitted after a conversation transcript has been persisted to disk.
     TranscriptSaved,
+    /// Emitted after a provider plugin announces a constructed client via
+    /// [`crate::effect::Effect::RegisterProvider`] and the runtime has wired
+    /// it into the provider table. Subscribers (notably `internal:connect`)
+    /// use this to keep their UI in sync.
+    ProviderRegistered,
 }
 
 /// Typed host-lifecycle events that the runtime fires into the plugin bus.
@@ -86,6 +91,15 @@ pub enum HostEvent {
         /// Absolute path to the saved transcript file.
         path: String,
     },
+    /// A provider plugin's constructed client has been wired into the
+    /// runtime's provider table. Fired immediately after the
+    /// `Effect::RegisterProvider` handler runs.
+    ProviderRegistered {
+        /// Stable identifier of the provider that just registered.
+        id: ProviderId,
+        /// Human-readable display name (forwarded from the plugin).
+        display_name: String,
+    },
 }
 
 impl HostEvent {
@@ -104,6 +118,7 @@ impl HostEvent {
             HostEvent::ToolCallEnd { .. } => HookKind::ToolCallEnd,
             HostEvent::PromptSubmitted { .. } => HookKind::PromptSubmitted,
             HostEvent::TranscriptSaved { .. } => HookKind::TranscriptSaved,
+            HostEvent::ProviderRegistered { .. } => HookKind::ProviderRegistered,
         }
     }
 }
@@ -179,6 +194,13 @@ mod tests {
                     path: "/tmp/t.json".into(),
                 },
                 HookKind::TranscriptSaved,
+            ),
+            (
+                HostEvent::ProviderRegistered {
+                    id: pid.clone(),
+                    display_name: "Provider".into(),
+                },
+                HookKind::ProviderRegistered,
             ),
         ];
         for (event, expected) in cases {
