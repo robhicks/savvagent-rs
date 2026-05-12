@@ -81,7 +81,7 @@ impl Plugin for HomeFooterPlugin {
                 vec![StyledLine {
                     spans: vec![StyledSpan {
                         text: turn,
-                        fg: Some(ThemeColor::Cyan),
+                        fg: Some(ThemeColor::Accent),
                         bg: None,
                         modifiers: TextMods::default(),
                     }],
@@ -92,13 +92,13 @@ impl Plugin for HomeFooterPlugin {
                     spans: vec![
                         StyledSpan {
                             text: self.working_dir.clone(),
-                            fg: Some(ThemeColor::Gray),
+                            fg: Some(ThemeColor::Muted),
                             bg: None,
                             modifiers: TextMods::default(),
                         },
                         StyledSpan {
                             text: "  ? for help".into(),
-                            fg: Some(ThemeColor::DarkGray),
+                            fg: Some(ThemeColor::Muted),
                             bg: None,
                             modifiers: TextMods::default(),
                         },

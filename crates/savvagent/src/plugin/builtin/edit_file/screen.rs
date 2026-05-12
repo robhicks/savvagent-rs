@@ -93,7 +93,7 @@ impl Screen for EditFileScreen {
         let mut out = vec![StyledLine {
             spans: vec![StyledSpan {
                 text: format!("{}{}", self.path, dirty_marker),
-                fg: Some(ThemeColor::Cyan),
+                fg: Some(ThemeColor::Accent),
                 bg: None,
                 modifiers: TextMods {
                     bold: true,
@@ -106,7 +106,7 @@ impl Screen for EditFileScreen {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
                     text: format!("Save failed: {err}"),
-                    fg: Some(ThemeColor::Red),
+                    fg: Some(ThemeColor::Error),
                     bg: None,
                     modifiers: TextMods {
                         bold: true,

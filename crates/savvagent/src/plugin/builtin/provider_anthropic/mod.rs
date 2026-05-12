@@ -166,7 +166,7 @@ impl Plugin for ProviderAnthropicPlugin {
             vec![StyledLine {
                 spans: vec![StyledSpan {
                     text: DISPLAY_NAME.into(),
-                    fg: Some(ThemeColor::Green),
+                    fg: Some(ThemeColor::Success),
                     bg: None,
                     modifiers: mods,
                 }],

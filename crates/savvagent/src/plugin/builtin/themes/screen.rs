@@ -44,7 +44,7 @@ impl Screen for ThemePickerScreen {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
                     text: format!("no themes match `{}`", self.inner.filter),
-                    fg: Some(ThemeColor::Yellow),
+                    fg: Some(ThemeColor::Warning),
                     bg: None,
                     modifiers: TextMods::default(),
                 }],
@@ -72,7 +72,7 @@ impl Screen for ThemePickerScreen {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
                     text: "  built-in:".to_string(),
-                    fg: Some(ThemeColor::Gray),
+                    fg: Some(ThemeColor::Muted),
                     bg: None,
                     modifiers: TextMods::default(),
                 }],
@@ -85,7 +85,7 @@ impl Screen for ThemePickerScreen {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
                     text: "  catalog (ratatui-themes):".to_string(),
-                    fg: Some(ThemeColor::Gray),
+                    fg: Some(ThemeColor::Muted),
                     bg: None,
                     modifiers: TextMods::default(),
                 }],
@@ -165,9 +165,9 @@ impl ThemePickerScreen {
                 StyledSpan {
                     text: format!("{prefix}{:<24}", theme.name()),
                     fg: Some(if is_cursor {
-                        ThemeColor::Cyan
+                        ThemeColor::Accent
                     } else {
-                        ThemeColor::White
+                        ThemeColor::Fg
                     }),
                     bg: None,
                     modifiers: TextMods {
@@ -177,7 +177,7 @@ impl ThemePickerScreen {
                 },
                 StyledSpan {
                     text: format!("{}{active_marker}", theme.display_name()),
-                    fg: Some(ThemeColor::Gray),
+                    fg: Some(ThemeColor::Muted),
                     bg: None,
                     modifiers: TextMods::default(),
                 },

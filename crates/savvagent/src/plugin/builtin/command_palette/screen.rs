@@ -83,9 +83,9 @@ impl Screen for PaletteScreen {
                     StyledSpan {
                         text: format!("{marker}/{name:<12}"),
                         fg: Some(if i == self.cursor {
-                            ThemeColor::Cyan
+                            ThemeColor::Accent
                         } else {
-                            ThemeColor::White
+                            ThemeColor::Fg
                         }),
                         bg: None,
                         modifiers: TextMods {
@@ -95,7 +95,7 @@ impl Screen for PaletteScreen {
                     },
                     StyledSpan {
                         text: desc.to_string(),
-                        fg: Some(ThemeColor::Gray),
+                        fg: Some(ThemeColor::Muted),
                         bg: None,
                         modifiers: TextMods::default(),
                     },
