@@ -677,6 +677,20 @@ impl App {
         self.clamp_theme_picker_after_filter_change();
     }
 
+    /// Close the picker, keeping the highlighted theme as the new
+    /// `active_theme`. Persistence (`theme::save`) is the caller's
+    /// responsibility — `App` stays I/O-free.
+    pub fn theme_picker_confirm(&mut self) {
+        self.input_mode = InputMode::Editing;
+    }
+
+    /// Close the picker, reverting [`Self::active_theme`] to the
+    /// snapshot taken at open time.
+    pub fn theme_picker_cancel(&mut self) {
+        self.active_theme = self.theme_picker_pre_theme;
+        self.input_mode = InputMode::Editing;
+    }
+
     fn clamp_theme_picker_after_filter_change(&mut self) {
         let filtered = self.theme_picker_filtered_themes();
         if filtered.is_empty() {
@@ -1512,6 +1526,43 @@ mod tests {
         assert_eq!(app.theme_picker_filter, "");
         app.theme_picker_backspace();
         assert_eq!(app.theme_picker_filter, "");
+    }
+
+    #[test]
+    fn theme_picker_confirm_keeps_active_and_returns_to_editing() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        app.theme_picker_cursor_down();
+        let chosen = app.active_theme;
+
+        app.theme_picker_confirm();
+        assert_eq!(
+            app.active_theme, chosen,
+            "confirm must NOT revert to pre_theme"
+        );
+        assert!(matches!(app.input_mode, InputMode::Editing));
+    }
+
+    #[test]
+    fn theme_picker_cancel_restores_pre_theme() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.active_theme = crate::theme::Theme::Light;
+        app.open_theme_picker();
+        app.theme_picker_cursor_down();
+        // Live preview moved active_theme away from Light.
+        assert_ne!(app.active_theme, crate::theme::Theme::Light);
+
+        app.theme_picker_cancel();
+        assert_eq!(
+            app.active_theme,
+            crate::theme::Theme::Light,
+            "cancel must restore pre_theme"
+        );
+        assert!(matches!(app.input_mode, InputMode::Editing));
     }
 
     #[test]
