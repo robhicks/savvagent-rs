@@ -974,6 +974,25 @@ impl App {
         self.should_quit = true;
     }
 
+    /// Replace the prompt textarea contents with `text` and put the cursor at
+    /// the very end. Called by `apply_effects` in response to
+    /// [`savvagent_plugin::Effect::PrefillInput`]. The command palette emits
+    /// `PrefillInput { text: "/cmd " }` for slashes that need a path arg
+    /// (e.g. `/view`, `/edit`) so the user can complete the line via the
+    /// `@` file picker instead of executing the command with no args.
+    pub fn prefill_input(&mut self, text: String) {
+        self.input_textarea = TextArea::from(vec![text]);
+        let row = self.input_textarea.lines().len().saturating_sub(1) as u16;
+        let col = self
+            .input_textarea
+            .lines()
+            .last()
+            .map(|l| l.len())
+            .unwrap_or(0) as u16;
+        self.input_textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(row, col));
+    }
+
     /// Set the active theme by slug. Unknown slugs are surfaced as a
     /// styled note; the in-memory selection is left unchanged.
     ///

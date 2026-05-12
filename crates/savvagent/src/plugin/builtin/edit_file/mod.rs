@@ -61,6 +61,11 @@ impl Plugin for EditFilePlugin {
             .into_iter()
             .next()
             .ok_or_else(|| PluginError::InvalidArgs("usage: /edit <path>".into()))?;
+        // The TUI's `@` file picker inserts paths with a leading `@`
+        // (e.g. `/edit @src/main.rs`). Strip it before handing to the
+        // screen so the underlying open() call sees a real filesystem
+        // path. v0.8's legacy `/edit` handler stripped `@` the same way.
+        let path = path.strip_prefix('@').unwrap_or(&path).to_string();
         Ok(vec![Effect::OpenScreen {
             id: "edit-file".into(),
             args: ScreenArgs::EditFile { path },
@@ -73,6 +78,50 @@ impl Plugin for EditFilePlugin {
                 Ok(Box::new(EditFileScreen::open(path)?))
             }
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the post-v0.9 hotfix: `/edit @src/foo.rs`
+    /// produced by the `@` file picker must strip the `@` before reaching
+    /// `EditFileScreen::open`, which doesn't understand the prefix.
+    #[tokio::test]
+    async fn handle_slash_strips_at_prefix_from_path() {
+        let mut p = EditFilePlugin::new();
+        let effs = p
+            .handle_slash("edit", vec!["@src/foo.rs".into()])
+            .await
+            .expect("handle_slash must succeed");
+        match effs.first() {
+            Some(Effect::OpenScreen {
+                id,
+                args: ScreenArgs::EditFile { path },
+            }) => {
+                assert_eq!(id, "edit-file");
+                assert_eq!(path, "src/foo.rs", "leading '@' must be stripped");
+            }
+            other => panic!("expected OpenScreen::EditFile, got {other:?}"),
+        }
+    }
+
+    /// Bare paths (no `@`) pass through unchanged.
+    #[tokio::test]
+    async fn handle_slash_leaves_bare_path_alone() {
+        let mut p = EditFilePlugin::new();
+        let effs = p
+            .handle_slash("edit", vec!["src/foo.rs".into()])
+            .await
+            .expect("handle_slash must succeed");
+        match effs.first() {
+            Some(Effect::OpenScreen {
+                args: ScreenArgs::EditFile { path },
+                ..
+            }) => assert_eq!(path, "src/foo.rs"),
+            other => panic!("expected OpenScreen::EditFile, got {other:?}"),
         }
     }
 }

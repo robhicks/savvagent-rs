@@ -173,6 +173,7 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             run_slash(app, name, args, depth + 1).await?;
         }
         Effect::ClearLog => app.clear_log(),
+        Effect::PrefillInput { text } => app.prefill_input(text),
         Effect::Quit => app.request_quit(),
         Effect::TogglePlugin { id, enabled } => {
             apply_toggle_plugin(app, id, enabled).await?;
@@ -592,6 +593,57 @@ mod tests {
         assert!(
             msg.contains("depth limit"),
             "error message should mention depth limit, got: {msg}"
+        );
+    }
+
+    /// Regression test for the post-v0.9 hotfix that wired `Effect::Quit`
+    /// (emitted by the new `internal:quit` plugin) into `App::request_quit`.
+    /// Before the fix, `/quit` from the palette landed on the `_ => warn`
+    /// arm and silently dropped the request.
+    #[tokio::test]
+    async fn quit_effect_sets_should_quit() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        assert!(!app.should_quit, "precondition: app starts not-quitting");
+
+        apply_effects(&mut app, vec![Effect::Quit])
+            .await
+            .expect("apply_effects must succeed");
+
+        assert!(
+            app.should_quit,
+            "Effect::Quit must flip should_quit so the event loop exits"
+        );
+    }
+
+    /// Regression test for the post-v0.9 hotfix that added
+    /// `Effect::PrefillInput`. Applying it must replace the textarea
+    /// contents with the literal text (no leading slash stripped, no
+    /// extra newline).
+    #[tokio::test]
+    async fn prefill_input_replaces_textarea_contents() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+
+        apply_effects(
+            &mut app,
+            vec![Effect::PrefillInput {
+                text: "/view ".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        assert_eq!(
+            app.input_textarea.lines(),
+            &["/view ".to_string()],
+            "PrefillInput must install the literal text as a single line"
         );
     }
 

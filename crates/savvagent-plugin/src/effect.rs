@@ -65,6 +65,14 @@ pub enum Effect {
     },
     /// Erase all entries from the conversation log display.
     ClearLog,
+    /// Replace the prompt textarea contents with `text` and position the
+    /// cursor at the end. Used by the command palette to seed an in-progress
+    /// slash command (e.g. `"/view "`) so the user can complete it via the
+    /// `@` file picker rather than have it fire immediately with no args.
+    PrefillInput {
+        /// The literal text to install in the textarea (no trailing newline).
+        text: String,
+    },
     /// Shut down the application cleanly.
     Quit,
     /// Enable or disable a registered plugin by id. The runtime updates its
@@ -131,6 +139,17 @@ mod tests {
             name: "theme".into(),
             args: vec![],
         };
+    }
+
+    #[test]
+    fn prefill_input_carries_text() {
+        let eff = Effect::PrefillInput {
+            text: "/view ".into(),
+        };
+        match eff {
+            Effect::PrefillInput { text } => assert_eq!(text, "/view "),
+            _ => panic!("expected PrefillInput"),
+        }
     }
 
     #[test]
