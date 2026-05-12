@@ -1,5 +1,5 @@
 //! Effect enum — the closed vocabulary plugins use to request host actions.
-//! See spec section "Contribution kinds" and section "Runtime / Effects applier".
+//! See `docs/superpowers/specs/2026-05-12-v0.9.0-plugin-system-design.md`.
 
 use crate::styled::StyledLine;
 use crate::types::{ProviderId, ScreenArgs};
@@ -67,12 +67,14 @@ pub enum Effect {
     ClearLog,
     /// Shut down the application cleanly.
     Quit,
-    /// Compound: apply children in order as a single transaction. Allows
-    /// returns like `Stack(vec![SetActiveTheme{..}, CloseScreen])`.
+    /// Compound: apply children in order. Not atomic — partial application is
+    /// observable if a later child fails or has user-visible side effects.
+    /// Useful for `vec![SetActiveTheme{..}, CloseScreen]`-style sequences from
+    /// a single handler.
     Stack(Vec<Effect>),
 }
 
-/// The right-hand side of a [`crate::types::KeybindingSpec`]: either invoke a
+/// The right-hand side of a [`crate::manifest::KeybindingSpec`]: either invoke a
 /// slash command or emit a typed effect directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

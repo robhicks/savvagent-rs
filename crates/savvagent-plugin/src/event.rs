@@ -129,4 +129,60 @@ mod tests {
         let e = HostEvent::HostStarting;
         assert_eq!(e.kind(), HookKind::HostStarting);
     }
+
+    #[test]
+    fn kind_maps_every_variant_correctly() {
+        let pid = ProviderId("p".into());
+        let cases: Vec<(HostEvent, HookKind)> = vec![
+            (HostEvent::HostStarting, HookKind::HostStarting),
+            (
+                HostEvent::Connect {
+                    provider_id: pid.clone(),
+                },
+                HookKind::Connect,
+            ),
+            (
+                HostEvent::Disconnect {
+                    provider_id: pid.clone(),
+                    reason: "x".into(),
+                },
+                HookKind::Disconnect,
+            ),
+            (HostEvent::TurnStart { turn_id: 1 }, HookKind::TurnStart),
+            (
+                HostEvent::TurnEnd {
+                    turn_id: 1,
+                    success: true,
+                },
+                HookKind::TurnEnd,
+            ),
+            (
+                HostEvent::ToolCallStart {
+                    call_id: "c".into(),
+                    tool: "t".into(),
+                },
+                HookKind::ToolCallStart,
+            ),
+            (
+                HostEvent::ToolCallEnd {
+                    call_id: "c".into(),
+                    success: true,
+                },
+                HookKind::ToolCallEnd,
+            ),
+            (
+                HostEvent::PromptSubmitted { text: "hi".into() },
+                HookKind::PromptSubmitted,
+            ),
+            (
+                HostEvent::TranscriptSaved {
+                    path: "/tmp/t.json".into(),
+                },
+                HookKind::TranscriptSaved,
+            ),
+        ];
+        for (event, expected) in cases {
+            assert_eq!(event.kind(), expected, "kind() mismatch for {:?}", event);
+        }
+    }
 }

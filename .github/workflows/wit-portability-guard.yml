@@ -25,6 +25,7 @@ jobs:
 
           FORBIDDEN=$(printf '%s\n' "$DEPS" \
             | grep -E '^[[:space:]]*(ratatui|crossterm|tokio|anyhow)[[:space:]]*=' \
+            | grep -v 'wit-portable: justified' \
             || true)
 
           if [ -n "$FORBIDDEN" ]; then

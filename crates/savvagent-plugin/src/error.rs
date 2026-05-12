@@ -1,5 +1,6 @@
 //! Concrete plugin error type. Closed `#[non_exhaustive]` enum — no
-//! `anyhow::Error`, no `Box<dyn Error>`. See spec §9 rule 3.
+//! `anyhow::Error`, no `Box<dyn Error>`.
+//! See `docs/superpowers/specs/2026-05-12-v0.9.0-plugin-system-design.md`.
 
 use std::fmt;
 
@@ -47,5 +48,17 @@ mod tests {
     fn slash_not_handled_renders() {
         let e = PluginError::SlashNotHandled("theme".to_string());
         assert_eq!(format!("{e}"), "slash not handled: /theme");
+    }
+
+    #[test]
+    fn invalid_args_renders() {
+        let e = PluginError::InvalidArgs("usage: /view <path>".to_string());
+        assert_eq!(format!("{e}"), "invalid args: usage: /view <path>");
+    }
+
+    #[test]
+    fn internal_renders() {
+        let e = PluginError::Internal("io: permission denied".to_string());
+        assert_eq!(format!("{e}"), "internal: io: permission denied");
     }
 }

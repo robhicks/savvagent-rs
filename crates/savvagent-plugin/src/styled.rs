@@ -76,10 +76,11 @@ pub enum ThemeColor {
     },
 }
 
-/// Plain-bool text attribute flags for WIT portability (rule 9.7).
+/// Plain-bool text attribute flags for WIT portability.
 ///
 /// Using individual booleans instead of ratatui's `Modifier` bitflags
 /// keeps this type serialisable over WIT without a ratatui dependency.
+/// See `docs/superpowers/specs/2026-05-12-v0.9.0-plugin-system-design.md`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct TextMods {
     /// Bold text.

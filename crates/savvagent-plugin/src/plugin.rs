@@ -15,11 +15,12 @@ use crate::types::{Region, ScreenArgs, ThemeEntry};
 /// and dispatched into by the slash/screen/event/slot/keybinding routers
 /// according to its manifest.
 ///
-/// Methods that take `&mut self` (`handle_slash`, `on_event`) run while the
-/// runtime holds an exclusive lock on this plugin. Methods that take `&self`
-/// (`manifest`, `create_screen`, `render_slot`, `themes`) may be called from
-/// the render path or other read-only paths without the lock, so their
-/// implementations should not assume serialization with `&mut self` callers.
+/// Methods that take `&self` (`manifest`, `create_screen`, `render_slot`, `themes`)
+/// are called from read-only paths and must be cheap, idempotent, and free of
+/// internal mutation that requires `&mut`. The runtime may call them at any time,
+/// including the render hot path. Methods that take `&mut self` (`handle_slash`,
+/// `on_event`) are state-mutating; their concurrency discipline is enforced by
+/// the runtime (see the runtime crate's PluginRegistry once PR 2/3 lands).
 #[async_trait]
 pub trait Plugin: Send + Sync {
     /// Returns this plugin's static metadata. Called once at registration time
