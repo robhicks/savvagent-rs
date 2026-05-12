@@ -108,10 +108,21 @@ impl Plugin for ResumePlugin {
 /// Future versions will scan the user's configured transcript directory.
 fn load_recent_transcripts() -> Vec<TranscriptHandle> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(".") else {
-        return out;
+    let rd = match std::fs::read_dir(".") {
+        Ok(rd) => rd,
+        Err(e) => {
+            tracing::warn!(error = %e, dir = ".", "load_recent_transcripts: read_dir failed");
+            return out;
+        }
     };
-    for entry in rd.flatten() {
+    for entry in rd {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "load_recent_transcripts: entry iter error");
+                continue;
+            }
+        };
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;

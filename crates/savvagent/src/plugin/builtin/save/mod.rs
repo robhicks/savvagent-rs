@@ -3,15 +3,14 @@
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, SlashSpec,
-    StyledLine,
 };
 
 /// Plugin that registers the `/save` slash command.
 ///
-/// `/save [path]` emits a [`Effect::Stack`] containing
-/// [`Effect::SaveTranscript`] followed by a [`Effect::PushNote`] confirming
-/// the path. When no path argument is given, [`default_transcript_path`]
-/// generates a timestamped filename in the current directory.
+/// `/save [path]` emits [`Effect::SaveTranscript`]. The success or failure
+/// note is owned by `apply_effects` based on the Result of the actual write.
+/// When no path argument is given, [`default_transcript_path`] generates a
+/// nanosecond-timestamped filename in the current directory.
 pub struct SavePlugin;
 
 impl SavePlugin {
@@ -55,24 +54,25 @@ impl Plugin for SavePlugin {
             .into_iter()
             .next()
             .unwrap_or_else(default_transcript_path);
-        Ok(vec![Effect::Stack(vec![
-            Effect::SaveTranscript { path: path.clone() },
-            Effect::PushNote {
-                line: StyledLine::plain(format!("Transcript saved to {path}")),
-            },
-        ])])
+        Ok(vec![Effect::SaveTranscript { path }])
     }
 }
 
-/// Returns a timestamped default transcript filename in the current directory.
+/// Returns a nanosecond-timestamped default transcript filename in the current
+/// directory. Using both seconds and nanoseconds prevents same-second
+/// collisions when `/save` is called multiple times in quick succession.
 ///
-/// Falls back to `./transcript-0.json` if the system clock is unavailable.
+/// Falls back to `./transcript-0-000000000.json` if the system clock is
+/// unavailable.
 fn default_transcript_path() -> String {
-    let secs = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("./transcript-{secs}.json")
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0));
+    format!(
+        "./transcript-{}-{:09}.json",
+        now.as_secs(),
+        now.subsec_nanos()
+    )
 }
 
 #[cfg(test)]
@@ -86,13 +86,11 @@ mod tests {
             .handle_slash("save", vec!["/tmp/x.json".into()])
             .await
             .unwrap();
-        match &effs[0] {
-            Effect::Stack(children) => {
-                assert!(
-                    matches!(&children[0], Effect::SaveTranscript { path } if path == "/tmp/x.json")
-                );
-            }
-            _ => panic!(),
-        }
+        assert_eq!(effs.len(), 1);
+        assert!(
+            matches!(&effs[0], Effect::SaveTranscript { path } if path == "/tmp/x.json"),
+            "expected SaveTranscript {{ path: /tmp/x.json }}, got {:?}",
+            &effs[0]
+        );
     }
 }

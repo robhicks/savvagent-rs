@@ -65,6 +65,17 @@ impl Plugin for ConnectPlugin {
         args: Vec<String>,
     ) -> Result<Vec<Effect>, PluginError> {
         if let Some(provider) = args.into_iter().next() {
+            // Validate provider id format: lowercase alphanumeric with optional
+            // dashes/underscores. Reject anything with spaces or special chars
+            // before constructing a slash name we can't route.
+            if !provider
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+            {
+                return Err(PluginError::InvalidArgs(format!(
+                    "invalid provider id: {provider:?}; expected lowercase ASCII with optional - or _"
+                )));
+            }
             // Direct route: /connect anthropic -> internal:provider-anthropic's connect slash.
             Ok(vec![Effect::RunSlash {
                 name: format!("connect {provider}"),
@@ -84,6 +95,46 @@ impl Plugin for ConnectPlugin {
                 Ok(Box::new(ConnectPickerScreen::new()))
             }
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn handle_slash_rejects_provider_with_spaces() {
+        let mut p = ConnectPlugin::new();
+        let err = p
+            .handle_slash("connect", vec!["bad provider".into()])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PluginError::InvalidArgs(_)),
+            "expected InvalidArgs, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_slash_rejects_provider_with_uppercase() {
+        let mut p = ConnectPlugin::new();
+        let err = p
+            .handle_slash("connect", vec!["Anthropic".into()])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PluginError::InvalidArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_slash_accepts_valid_provider_ids() {
+        let mut p = ConnectPlugin::new();
+        for id in ["anthropic", "gemini-pro", "my_provider", "provider2"] {
+            let effs = p.handle_slash("connect", vec![id.into()]).await.unwrap();
+            assert!(
+                matches!(&effs[0], Effect::RunSlash { name, .. } if name == &format!("connect {id}")),
+                "unexpected effects for id={id}: {effs:?}"
+            );
         }
     }
 }

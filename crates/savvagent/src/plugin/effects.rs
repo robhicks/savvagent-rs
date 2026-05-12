@@ -55,7 +55,19 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         Effect::RegisterProvider { id, display_name } => {
             app.register_provider(id, display_name);
         }
-        Effect::SaveTranscript { path } => app.save_transcript_to(path),
+        Effect::SaveTranscript { path } => match app.save_transcript_to(path.clone()) {
+            Ok(()) => {
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "Transcript saved to {path}"
+                )));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, path = %path, "save_transcript failed");
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "Save failed ({path}): {e}"
+                )));
+            }
+        },
         Effect::PromptSend { text } => app.submit_prompt(text),
         Effect::RunSlash { name, args } => {
             if depth >= MAX_RUNSLASH_DEPTH {
