@@ -49,6 +49,7 @@ pub mod effects;
 /// PR 8 adds: plugins-manager.
 pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
     vec![
+        Box::new(builtin::command_palette::CommandPalettePlugin::new()),
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
@@ -66,10 +67,10 @@ mod tests {
             .iter()
             .map(|p| p.manifest().id.as_str().to_string())
             .collect();
+        assert!(ids.contains(&"internal:command-palette".to_string()));
         assert!(ids.contains(&"internal:home-footer".to_string()));
         assert!(ids.contains(&"internal:home-tips".to_string()));
         assert!(ids.contains(&"internal:splash".to_string()));
-        // command-palette lands in Task 3.6; not yet in this commit.
-        assert_eq!(plugins.len(), 3);
+        assert_eq!(plugins.len(), 4);
     }
 }
