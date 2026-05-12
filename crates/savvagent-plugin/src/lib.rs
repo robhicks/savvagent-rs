@@ -21,6 +21,10 @@ pub mod types;
 /// Owned styled-text types returned by plugin render methods.
 pub mod styled;
 
+/// Host-lifecycle event payloads and their [`HookKind`] discriminants.
+pub mod event;
+pub use event::{HookKind, HostEvent};
+
 pub use types::{
     ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, PluginId,
     ProviderId, Region, ScreenArgs, ScreenInstanceId, ThemeEntry,
