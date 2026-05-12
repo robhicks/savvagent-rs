@@ -26,6 +26,8 @@ use std::str::FromStr;
 use ratatui_themes::ThemeName;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub mod picker;
+
 /// One of the TUI's selectable themes.
 ///
 /// The three built-ins ([`Theme::Dark`], [`Theme::Light`],

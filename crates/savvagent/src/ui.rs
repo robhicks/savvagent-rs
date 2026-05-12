@@ -457,7 +457,9 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     }
 
     if matches!(app.input_mode, InputMode::SelectingTheme) {
-        render_theme_picker(app, frame, area, palette);
+        if let Some(p) = &app.theme_picker {
+            render_theme_picker_with(p, frame, area, palette);
+        }
     }
 }
 
@@ -496,18 +498,23 @@ fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect, palette: P
     frame.render_widget(list, popup);
 }
 
-fn render_theme_picker(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
+fn render_theme_picker_with(
+    picker: &crate::theme::picker::ThemePicker,
+    frame: &mut Frame,
+    area: Rect,
+    palette: Palette,
+) {
     let popup = centered_rect(60, 50, area);
     frame.render_widget(Clear, popup);
 
-    let filtered = app.theme_picker_filtered_themes();
+    let filtered = picker.filtered_themes();
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(filtered.len() + 4);
 
     if filtered.is_empty() {
         lines.push(Line::from(""));
         lines.push(
             Line::from(Span::styled(
-                format!("no themes match `{}`", app.theme_picker_filter),
+                format!("no themes match `{}`", picker.filter),
                 palette.base_style().fg(palette.muted),
             ))
             .centered(),
@@ -525,7 +532,7 @@ fn render_theme_picker(app: &App, frame: &mut Frame, area: Rect, palette: Palett
             )));
             for t in &builtins {
                 let filtered_idx = filtered.iter().position(|x| x == *t).unwrap();
-                lines.push(render_theme_picker_row(app, palette, t, filtered_idx));
+                lines.push(render_theme_picker_row(picker, palette, t, filtered_idx));
             }
         }
         if !catalog.is_empty() {
@@ -535,15 +542,15 @@ fn render_theme_picker(app: &App, frame: &mut Frame, area: Rect, palette: Palett
             )));
             for t in &catalog {
                 let filtered_idx = filtered.iter().position(|x| x == *t).unwrap();
-                lines.push(render_theme_picker_row(app, palette, t, filtered_idx));
+                lines.push(render_theme_picker_row(picker, palette, t, filtered_idx));
             }
         }
     }
 
-    let title = if app.theme_picker_filter.is_empty() {
+    let title = if picker.filter.is_empty() {
         " Pick a theme ".to_string()
     } else {
-        format!(" Pick a theme · /{} ", app.theme_picker_filter)
+        format!(" Pick a theme · /{} ", picker.filter)
     };
     let body = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -562,13 +569,13 @@ fn render_theme_picker(app: &App, frame: &mut Frame, area: Rect, palette: Palett
 }
 
 fn render_theme_picker_row(
-    app: &App,
+    picker: &crate::theme::picker::ThemePicker,
     palette: Palette,
     theme: &crate::theme::Theme,
     filtered_index: usize,
 ) -> Line<'static> {
-    let is_cursor = filtered_index == app.theme_picker_index;
-    let is_active = *theme == app.theme_picker_pre_theme;
+    let is_cursor = filtered_index == picker.cursor;
+    let is_active = *theme == picker.pre_open_theme;
     let prefix = if is_cursor { "    > " } else { "      " };
     let active_marker = if is_active { "  (active)" } else { "" };
     let style = if is_cursor {
