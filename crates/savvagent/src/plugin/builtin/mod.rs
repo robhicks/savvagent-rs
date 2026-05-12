@@ -15,6 +15,9 @@ pub mod home_footer;
 /// Tips widget: one-line hint above the prompt; switches text after Connect.
 pub mod home_tips;
 
+/// Saves the active transcript to disk; registered as `/save [path]`.
+pub mod save;
+
 /// Startup HUD screen with connect status; responds to HostStarting + Connect.
 pub mod splash;
 
