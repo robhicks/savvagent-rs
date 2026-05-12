@@ -51,16 +51,16 @@ pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
     vec![
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
+        Box::new(builtin::splash::SplashPlugin::new()),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use savvagent_plugin::PluginKind;
 
     #[tokio::test]
-    async fn register_builtins_returns_pr2_pair() {
+    async fn register_builtins_pr3_partial() {
         let plugins = register_builtins();
         let ids: Vec<_> = plugins
             .iter()
@@ -68,11 +68,8 @@ mod tests {
             .collect();
         assert!(ids.contains(&"internal:home-footer".to_string()));
         assert!(ids.contains(&"internal:home-tips".to_string()));
-        assert_eq!(plugins.len(), 2);
-
-        // Both must be Core in PR 2.
-        for p in &plugins {
-            assert_eq!(p.manifest().kind, PluginKind::Core);
-        }
+        assert!(ids.contains(&"internal:splash".to_string()));
+        // command-palette lands in Task 3.6; not yet in this commit.
+        assert_eq!(plugins.len(), 3);
     }
 }
