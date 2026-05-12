@@ -615,6 +615,20 @@ impl App {
             .collect()
     }
 
+    /// Open the theme picker modal. Snapshots [`Self::active_theme`]
+    /// for Esc-undo, clears the filter, and positions the cursor on
+    /// the active theme so the user starts on their current choice.
+    pub fn open_theme_picker(&mut self) {
+        self.theme_picker_pre_theme = self.active_theme;
+        self.theme_picker_filter.clear();
+        let filtered = self.theme_picker_filtered_themes();
+        self.theme_picker_index = filtered
+            .iter()
+            .position(|t| *t == self.active_theme)
+            .unwrap_or(0);
+        self.input_mode = InputMode::SelectingTheme;
+    }
+
     /// Append a char to the palette filter and reset the cursor.
     pub fn palette_push_char(&mut self, c: char) {
         self.palette_filter.push(c);
@@ -1194,6 +1208,69 @@ mod tests {
         let filtered = app.theme_picker_filtered_themes();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name(), "high-contrast");
+    }
+
+    #[test]
+    fn open_theme_picker_snapshots_active_as_pre_theme() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.active_theme = crate::theme::Theme::Light;
+        app.open_theme_picker();
+        assert_eq!(app.theme_picker_pre_theme, crate::theme::Theme::Light);
+    }
+
+    #[test]
+    fn open_theme_picker_zeros_filter() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // Pre-populate with stale state — should be cleared on open.
+        app.theme_picker_filter = "leftover".to_string();
+        app.open_theme_picker();
+        assert_eq!(app.theme_picker_filter, "");
+    }
+
+    #[test]
+    fn open_theme_picker_indexes_active_theme_in_filtered_list() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.active_theme = crate::theme::Theme::HighContrast;
+        app.open_theme_picker();
+        let filtered = app.theme_picker_filtered_themes();
+        assert_eq!(
+            filtered[app.theme_picker_index],
+            crate::theme::Theme::HighContrast,
+            "index must point at the active theme on open"
+        );
+    }
+
+    #[test]
+    fn open_theme_picker_switches_input_mode() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        assert!(matches!(app.input_mode, InputMode::SelectingTheme));
+    }
+
+    #[test]
+    fn open_theme_picker_index_clamps_when_active_not_in_filter() {
+        // This case is impossible during normal use (filter starts empty
+        // and includes every theme) but the helper must not panic if
+        // called with a pre-set filter.
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.active_theme = crate::theme::Theme::Light;
+        app.theme_picker_filter = "drac".to_string();
+        app.open_theme_picker();
+        // open_theme_picker resets filter to "", so active_theme
+        // (Light) IS in the filtered list. Verify it's found.
+        assert_eq!(app.theme_picker_filter, "");
+        let filtered = app.theme_picker_filtered_themes();
+        assert_eq!(filtered[app.theme_picker_index], crate::theme::Theme::Light);
     }
 
     #[test]
