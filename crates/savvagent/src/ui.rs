@@ -1,5 +1,9 @@
 //! Render pass: paint the current [`App`] state into the frame.
 
+use crate::app::{App, Entry, InputMode, TranscriptEntry};
+use crate::palette::Palette;
+use crate::providers::PROVIDERS;
+use crate::splash;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
@@ -9,12 +13,88 @@ use ratatui::{
 };
 use savvagent_host::ToolCallStatus;
 
-use crate::app::{App, Entry, InputMode, TranscriptEntry};
-use crate::palette::Palette;
-use crate::providers::PROVIDERS;
-use crate::splash;
+/// Pre-computed plugin slot output for one render frame. Built async from
+/// `compute_home_frame_data` before `terminal.draw` runs so the draw closure
+/// stays synchronous and never touches plugin mutexes.
+pub struct HomeFrameData {
+    pub tips: Vec<savvagent_plugin::StyledLine>,
+    pub footer_left: Vec<savvagent_plugin::StyledLine>,
+    pub footer_center: Vec<savvagent_plugin::StyledLine>,
+    pub footer_right: Vec<savvagent_plugin::StyledLine>,
+}
 
-pub fn render(app: &mut App, frame: &mut Frame) {
+impl HomeFrameData {
+    /// Empty fallback used when plugins are not installed yet.
+    pub fn empty() -> Self {
+        Self {
+            tips: vec![],
+            footer_left: vec![],
+            footer_center: vec![],
+            footer_right: vec![],
+        }
+    }
+}
+
+/// Resolve every slot's lines for the current frame. Locks plugin mutexes
+/// briefly per contributor.
+pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeFrameData {
+    use std::sync::Once;
+
+    use crate::plugin::convert::rect_to_region;
+    use crate::plugin::slots::SlotRouter;
+
+    static WARNED_NO_RUNTIME: Once = Once::new();
+
+    let (Some(reg), Some(idx)) = (
+        app.plugin_registry.as_ref().cloned(),
+        app.plugin_indexes.as_ref().cloned(),
+    ) else {
+        WARNED_NO_RUNTIME.call_once(|| {
+            tracing::warn!(
+                "compute_home_frame_data called before install_plugin_runtime — TUI is rendering with no plugin output"
+            );
+        });
+        return HomeFrameData::empty();
+    };
+    let reg_guard = reg.read().await;
+    let idx_guard = idx.read().await;
+    let router = SlotRouter::new(&idx_guard, &reg_guard);
+
+    // Give each footer slot ~1/3 of the terminal width for budgeting.
+    let footer_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
+        .split(Rect::new(area.x, area.y, area.width, 1));
+
+    let tips = router
+        .render(
+            "home.tips",
+            rect_to_region(Rect::new(area.x, area.y, area.width, 1)),
+        )
+        .await;
+    let footer_left = router
+        .render("home.footer.left", rect_to_region(footer_cols[0]))
+        .await;
+    let footer_center = router
+        .render("home.footer.center", rect_to_region(footer_cols[1]))
+        .await;
+    let footer_right = router
+        .render("home.footer.right", rect_to_region(footer_cols[2]))
+        .await;
+
+    HomeFrameData {
+        tips,
+        footer_left,
+        footer_center,
+        footer_right,
+    }
+}
+
+pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     let area = frame.area();
 
     if app.show_splash {
@@ -33,9 +113,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .constraints([
             Constraint::Length(3), // header
             Constraint::Min(1),    // log
-            Constraint::Length(1), // status
+            Constraint::Length(1), // tips (plugin slot: home.tips)
             Constraint::Length(3), // input
-            Constraint::Length(1), // metrics
+            Constraint::Length(1), // footer (plugin slots: home.footer.*)
         ])
         .split(area);
 
@@ -75,24 +155,15 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     render_log(app, frame, chunks[1], palette);
 
-    let status = if app.is_loading {
-        Paragraph::new(" ● thinking…").style(
-            palette
-                .base_style()
-                .fg(palette.warning)
-                .add_modifier(Modifier::ITALIC),
-        )
-    } else {
-        Paragraph::new(" ○ ready").style(palette.base_style().fg(palette.accent))
-    };
-    frame.render_widget(
-        status.block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(palette.border).bg(palette.bg)),
-        ),
-        chunks[2],
-    );
+    // Tips row — one-line hints above the prompt, rendered from plugin slot.
+    let tips_lines: Vec<Line<'static>> = frame_data
+        .tips
+        .iter()
+        .cloned()
+        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .collect();
+    let tips_para = Paragraph::new(tips_lines).style(palette.base_style());
+    frame.render_widget(tips_para, chunks[2]);
 
     let mut textarea = app.input_textarea.clone();
     textarea.set_block(
@@ -103,34 +174,62 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     textarea.set_style(palette.base_style());
     frame.render_widget(&textarea, chunks[3]);
 
-    let transcript_label = match &app.last_transcript {
-        Some(p) => format!(" · transcript: {}", p.display()),
-        None => String::new(),
-    };
-    let version_text = format!("v{} ", env!("CARGO_PKG_VERSION"));
-    let metrics_chunks = Layout::default()
+    // Footer row — three horizontal segments from plugin slots.
+    let footer_cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(0),
-            Constraint::Length(version_text.len() as u16),
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
         ])
         .split(chunks[4]);
-    let metrics = Paragraph::new(format!(
-        " ctx≈{} tokens · entries: {}{}",
-        app.context_size,
-        app.entries.len(),
-        transcript_label
-    ))
-    .style(palette.base_style().fg(palette.accent));
-    frame.render_widget(metrics, metrics_chunks[0]);
-    let version = Paragraph::new(Line::from(version_text).right_aligned())
-        .style(palette.base_style().fg(palette.accent));
-    frame.render_widget(version, metrics_chunks[1]);
+
+    let footer_left_lines: Vec<Line<'static>> = frame_data
+        .footer_left
+        .iter()
+        .cloned()
+        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .collect();
+    frame.render_widget(
+        Paragraph::new(footer_left_lines).style(palette.base_style()),
+        footer_cols[0],
+    );
+
+    let footer_center_lines: Vec<Line<'static>> = frame_data
+        .footer_center
+        .iter()
+        .cloned()
+        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .collect();
+    frame.render_widget(
+        Paragraph::new(footer_center_lines)
+            .style(palette.base_style())
+            .centered(),
+        footer_cols[1],
+    );
+
+    let footer_right_lines: Vec<Line<'static>> = frame_data
+        .footer_right
+        .iter()
+        .cloned()
+        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .collect();
+    frame.render_widget(
+        Paragraph::new(footer_right_lines)
+            .style(palette.base_style())
+            .right_aligned(),
+        footer_cols[2],
+    );
 
     if app.is_file_picker_active {
         let popup = centered_rect(60, 40, area);
         frame.render_widget(Clear, popup);
         frame.render_widget_ref(app.file_explorer.widget(), popup);
+    }
+
+    // Screen-stack: if any screen is on top, paint it over the home chrome.
+    if let Some((top_screen, layout)) = app.screen_stack.top() {
+        paint_screen(frame, area, top_screen, layout);
     }
 
     if matches!(
@@ -169,49 +268,6 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             frame.render_widget(block, popup);
             frame.render_widget(editor, inner);
         }
-    }
-
-    if matches!(app.input_mode, InputMode::CommandPalette) {
-        let popup = centered_rect(50, 30, area);
-        frame.render_widget(Clear, popup);
-        let filtered = app.filtered_command_indices();
-        let items: Vec<ListItem> = filtered
-            .iter()
-            .enumerate()
-            .map(|(visible_idx, &cmd_idx)| {
-                let cmd = &app.commands[cmd_idx];
-                let style = if visible_idx == app.command_index {
-                    palette
-                        .base_style()
-                        .fg(palette.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    palette.base_style()
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:<10} ", cmd.name), style),
-                    Span::styled(&cmd.description, palette.base_style().fg(palette.muted)),
-                ]))
-            })
-            .collect();
-        let title = if app.palette_filter.is_empty() {
-            " Commands ".to_string()
-        } else {
-            format!(" Commands · /{} ", app.palette_filter)
-        };
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                    .title(title)
-                    .title_bottom(
-                        Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ").right_aligned(),
-                    ),
-            )
-            .style(palette.base_style())
-            .highlight_symbol("> ");
-        frame.render_widget(list, popup);
     }
 
     if matches!(app.input_mode, InputMode::EditingFile) {
@@ -633,6 +689,127 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
         Span::styled(prefix.to_string(), style.add_modifier(Modifier::BOLD)),
         Span::styled(text.to_string(), style),
     ])
+}
+
+/// Paint a plugin-provided screen over `area`, using the screen's declared
+/// [`savvagent_plugin::ScreenLayout`] to position it.
+///
+/// For `CenteredModal`, the host draws the border and title so the
+/// screen's `render` output fills the inner content area.
+/// For `Fullscreen` and `BottomSheet`, content fills the computed area
+/// directly.
+fn paint_screen(
+    f: &mut Frame,
+    area: Rect,
+    screen: &dyn savvagent_plugin::Screen,
+    layout: &savvagent_plugin::ScreenLayout,
+) {
+    use savvagent_plugin::ScreenLayout;
+
+    match layout {
+        ScreenLayout::Fullscreen { .. } => {
+            // Full-frame overlay: paint content directly.
+            f.render_widget(Clear, area);
+            let region = crate::plugin::convert::rect_to_region(area);
+            let lines: Vec<Line<'static>> = screen
+                .render(region)
+                .into_iter()
+                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .collect();
+            let para = Paragraph::new(lines);
+            f.render_widget(para, area);
+
+            // Tips row at the very bottom of the frame.
+            let tips = screen.tips();
+            if !tips.is_empty() && area.height > 0 {
+                let tips_row = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+                let tips_lines: Vec<Line<'static>> = tips
+                    .into_iter()
+                    .map(crate::plugin::convert::styled_line_to_ratatui)
+                    .collect();
+                f.render_widget(Paragraph::new(tips_lines), tips_row);
+            }
+        }
+        ScreenLayout::CenteredModal {
+            width_pct,
+            height_pct,
+            title,
+        } => {
+            // Compute the outer rect for the modal border.
+            let w = ((area.width as u32 * (*width_pct as u32)) / 100)
+                .max(20)
+                .min(area.width as u32) as u16;
+            let h = ((area.height as u32 * (*height_pct as u32)) / 100)
+                .max(5)
+                .min(area.height as u32) as u16;
+            let x = area.x + area.width.saturating_sub(w) / 2;
+            let y = area.y + area.height.saturating_sub(h) / 2;
+            let outer = Rect::new(x, y, w, h);
+
+            f.render_widget(Clear, outer);
+
+            // Border + optional title.
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(title.as_deref().unwrap_or(""));
+
+            // Tips as a bottom title if present.
+            let tips = screen.tips();
+            let block = if let Some(tip_line) = tips.into_iter().next() {
+                let tip_text: String = tip_line.spans.iter().map(|s| s.text.as_str()).collect();
+                block.title_bottom(Line::from(tip_text).right_aligned())
+            } else {
+                block
+            };
+
+            let inner = outer.inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            f.render_widget(block, outer);
+
+            let region = crate::plugin::convert::rect_to_region(inner);
+            let lines: Vec<Line<'static>> = screen
+                .render(region)
+                .into_iter()
+                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .collect();
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        ScreenLayout::BottomSheet { height } => {
+            let h = (*height).min(area.height);
+            let sheet = Rect::new(area.x, area.y + area.height - h, area.width, h);
+            f.render_widget(Clear, sheet);
+            let region = crate::plugin::convert::rect_to_region(sheet);
+            let lines: Vec<Line<'static>> = screen
+                .render(region)
+                .into_iter()
+                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .collect();
+            f.render_widget(Paragraph::new(lines), sheet);
+
+            let tips = screen.tips();
+            if !tips.is_empty() && sheet.height > 0 {
+                let tips_row = Rect::new(sheet.x, sheet.y + sheet.height - 1, sheet.width, 1);
+                let tips_lines: Vec<Line<'static>> = tips
+                    .into_iter()
+                    .map(crate::plugin::convert::styled_line_to_ratatui)
+                    .collect();
+                f.render_widget(Paragraph::new(tips_lines), tips_row);
+            }
+        }
+        // Future layout variants are silently treated as fullscreen.
+        _ => {
+            f.render_widget(Clear, area);
+            let region = crate::plugin::convert::rect_to_region(area);
+            let lines: Vec<Line<'static>> = screen
+                .render(region)
+                .into_iter()
+                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .collect();
+            f.render_widget(Paragraph::new(lines), area);
+        }
+    }
 }
 
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
