@@ -290,19 +290,11 @@ pub struct App {
     /// and persisted on every successful set.
     pub active_theme: crate::theme::Theme,
 
-    /// Index into the filtered theme list
-    /// (`theme_picker_filtered_themes`); not an index into the rendered
-    /// rows, which include section-header decorations.
-    pub theme_picker_index: usize,
-
-    /// Substring filter narrowing the picker's catalog. Empty means
-    /// "show every theme". Matched case-sensitively against
-    /// `Theme::name()` (built-in name or upstream slug).
-    pub theme_picker_filter: String,
-
-    /// Snapshot of [`App::active_theme`] at picker-open time. Restored
-    /// on Esc so live preview is fully undoable; ignored on Enter.
-    pub theme_picker_pre_theme: crate::theme::Theme,
+    /// Lifted v0.8 picker state. `Some` exactly when
+    /// [`InputMode::SelectingTheme`] is active; `None` otherwise. PR 6
+    /// will wrap this in a Screen plugin and remove the
+    /// `SelectingTheme` variant.
+    pub theme_picker: Option<crate::theme::picker::ThemePicker>,
 
     /// Cached classification of the sandbox state for the startup splash.
     /// Loaded once at `App::new` via `SandboxConfig::load_with_status` so
@@ -381,9 +373,7 @@ impl App {
             transcript_index: 0,
             resumed_at: None,
             active_theme: crate::theme::load(),
-            theme_picker_index: 0,
-            theme_picker_filter: String::new(),
-            theme_picker_pre_theme: crate::theme::Theme::default(),
+            theme_picker: None,
             splash_sandbox: {
                 let (cfg, status) = SandboxConfig::load_with_status();
                 crate::splash::SandboxSplashState::from_load(&cfg, &status)
@@ -642,75 +632,116 @@ impl App {
     /// Filter [`crate::theme::Theme::all`] by case-sensitive substring
     /// match on `Theme::name()` (built-in name or upstream slug).
     /// Returns only selectable rows — section headers are render-time
-    /// decoration handled in `ui.rs`.
+    /// decoration handled in `ui.rs`. Returns the full catalog if no
+    /// picker is open (matches v0.8's empty-filter behavior).
+    //
+    // Production code (main.rs `SelectingTheme` branch) goes through
+    // `app.theme_picker.as_mut().unwrap().on_key(...)` directly after
+    // the lift. The App-level wrappers below are retained for the v0.8
+    // test surface and for callers that didn't migrate to the new
+    // struct yet.
+    #[allow(dead_code)]
     pub fn theme_picker_filtered_themes(&self) -> Vec<crate::theme::Theme> {
-        let filter = self.theme_picker_filter.as_str();
-        crate::theme::Theme::all()
-            .into_iter()
-            .filter(|t| t.name().contains(filter))
-            .collect()
+        match &self.theme_picker {
+            Some(p) => p.filtered_themes(),
+            None => crate::theme::Theme::all(),
+        }
     }
 
     /// Open the theme picker modal. Snapshots [`Self::active_theme`]
     /// for Esc-undo, clears the filter, and positions the cursor on
     /// the active theme so the user starts on their current choice.
     pub fn open_theme_picker(&mut self) {
-        self.theme_picker_pre_theme = self.active_theme;
-        self.theme_picker_filter.clear();
-        let filtered = self.theme_picker_filtered_themes();
-        self.theme_picker_index = filtered
-            .iter()
-            .position(|t| *t == self.active_theme)
-            .unwrap_or(0);
+        self.theme_picker = Some(crate::theme::picker::ThemePicker::new(self.active_theme));
         self.input_mode = InputMode::SelectingTheme;
     }
 
-    /// Move the picker cursor down one row, clamping at the last
-    /// filtered theme. Updates [`Self::active_theme`] to the new
-    /// highlighted theme so the chrome behind the modal re-renders
-    /// with the previewed palette on the next frame.
+    /// Apply `theme` as the new live-preview theme. The render path
+    /// reads `active_theme` on the next frame.
+    pub fn set_active_theme(&mut self, theme: crate::theme::Theme) {
+        self.active_theme = theme;
+    }
+
+    /// Persist the active theme to `~/.savvagent/theme.toml`. Failures
+    /// are surfaced to the user via a note; the in-memory selection is
+    /// kept either way so the session-scoped UX is consistent.
+    pub fn persist_active_theme(&mut self) {
+        let theme = self.active_theme;
+        match crate::theme::save(theme) {
+            Ok(()) => {
+                self.push_note(format!("theme set to `{}`", theme.name()));
+            }
+            Err(e) => {
+                self.push_note(format!(
+                    "theme `{}` applied for this session, but persistence failed: {e}",
+                    theme.name()
+                ));
+            }
+        }
+    }
+
+    /// Move the picker cursor down one row via the lifted struct. Live
+    /// preview is applied to `active_theme` when the picker emits a
+    /// `PreviewTheme` outcome.
+    #[allow(dead_code)]
     pub fn theme_picker_cursor_down(&mut self) {
-        let filtered = self.theme_picker_filtered_themes();
-        if filtered.is_empty() {
+        let Some(p) = self.theme_picker.as_mut() else {
             return;
+        };
+        let outcome = p.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        if let crate::theme::picker::PickerOutcome::PreviewTheme(t) = outcome {
+            self.active_theme = t;
         }
-        let last = filtered.len() - 1;
-        if self.theme_picker_index < last {
-            self.theme_picker_index += 1;
-        }
-        self.active_theme = filtered[self.theme_picker_index];
     }
 
-    /// Move the picker cursor up one row, clamping at the first
-    /// filtered theme. Updates [`Self::active_theme`] for live preview.
+    /// Move the picker cursor up one row via the lifted struct.
+    #[allow(dead_code)]
     pub fn theme_picker_cursor_up(&mut self) {
-        let filtered = self.theme_picker_filtered_themes();
-        if filtered.is_empty() {
+        let Some(p) = self.theme_picker.as_mut() else {
             return;
+        };
+        let outcome = p.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Up,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        if let crate::theme::picker::PickerOutcome::PreviewTheme(t) = outcome {
+            self.active_theme = t;
         }
-        if self.theme_picker_index > 0 {
-            self.theme_picker_index -= 1;
-        }
-        self.active_theme = filtered[self.theme_picker_index];
     }
 
-    /// Append `c` to the picker filter, clamp the cursor index to the
-    /// new filtered length, and update [`Self::active_theme`] to the
-    /// clamped row. If the new filter matches zero themes,
-    /// `active_theme` is left unchanged (preserves the last good live
-    /// preview).
+    /// Append `c` to the picker filter via the lifted struct, then
+    /// apply any live preview the picker emits. No-op when the picker
+    /// is closed.
+    #[allow(dead_code)]
     pub fn theme_picker_typed_char(&mut self, c: char) {
-        self.theme_picker_filter.push(c);
-        self.clamp_theme_picker_after_filter_change();
+        let Some(p) = self.theme_picker.as_mut() else {
+            return;
+        };
+        let outcome = p.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        if let crate::theme::picker::PickerOutcome::PreviewTheme(t) = outcome {
+            self.active_theme = t;
+        }
     }
 
-    /// Pop one char from the picker filter (no-op on empty), clamp the
-    /// cursor, and update live preview.
+    /// Pop one char from the picker filter via the lifted struct.
+    #[allow(dead_code)]
     pub fn theme_picker_backspace(&mut self) {
-        if self.theme_picker_filter.pop().is_none() {
+        let Some(p) = self.theme_picker.as_mut() else {
             return;
+        };
+        let outcome = p.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Backspace,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        if let crate::theme::picker::PickerOutcome::PreviewTheme(t) = outcome {
+            self.active_theme = t;
         }
-        self.clamp_theme_picker_after_filter_change();
     }
 
     /// Close the picker, keeping the highlighted theme as the new
@@ -718,27 +749,21 @@ impl App {
     /// responsibility — the keypath in `main.rs` does it so save
     /// failures can be surfaced to the user without coupling `App` to
     /// the filesystem error path.
+    #[allow(dead_code)]
     pub fn theme_picker_confirm(&mut self) {
+        self.theme_picker = None;
         self.input_mode = InputMode::Editing;
     }
 
     /// Close the picker, reverting [`Self::active_theme`] to the
     /// snapshot taken at open time.
+    #[allow(dead_code)]
     pub fn theme_picker_cancel(&mut self) {
-        self.active_theme = self.theme_picker_pre_theme;
+        if let Some(p) = self.theme_picker.as_ref() {
+            self.active_theme = p.pre_open_theme;
+        }
+        self.theme_picker = None;
         self.input_mode = InputMode::Editing;
-    }
-
-    fn clamp_theme_picker_after_filter_change(&mut self) {
-        let filtered = self.theme_picker_filtered_themes();
-        if filtered.is_empty() {
-            // Leave active_theme alone — keeps the last good preview.
-            return;
-        }
-        if self.theme_picker_index >= filtered.len() {
-            self.theme_picker_index = filtered.len() - 1;
-        }
-        self.active_theme = filtered[self.theme_picker_index];
     }
 
     /// Append a char to the palette filter and reset the cursor.
@@ -1318,6 +1343,38 @@ mod tests {
         App::new("test-model".into(), PathBuf::from("/tmp"))
     }
 
+    // Read-only field accessors. After the v0.8 → ThemePicker lift these
+    // peek through the `Option<ThemePicker>`; when the picker is closed
+    // they return the v0.8 defaults so the assertions below keep their
+    // original meaning.
+    fn picker_filter(app: &App) -> String {
+        app.theme_picker
+            .as_ref()
+            .map(|p| p.filter.clone())
+            .unwrap_or_default()
+    }
+    fn picker_cursor(app: &App) -> usize {
+        app.theme_picker.as_ref().map(|p| p.cursor).unwrap_or(0)
+    }
+    fn picker_pre_theme(app: &App) -> crate::theme::Theme {
+        app.theme_picker
+            .as_ref()
+            .map(|p| p.pre_open_theme)
+            .unwrap_or_default()
+    }
+    fn set_picker_filter(app: &mut App, value: &str) {
+        app.theme_picker
+            .as_mut()
+            .expect("picker must be open")
+            .filter = value.to_string();
+    }
+    fn set_picker_cursor(app: &mut App, value: usize) {
+        app.theme_picker
+            .as_mut()
+            .expect("picker must be open")
+            .cursor = value;
+    }
+
     #[test]
     fn fresh_app_initializes_theme_picker_state_with_defaults() {
         let _g = HOME_LOCK.lock().unwrap();
@@ -1327,9 +1384,11 @@ mod tests {
             !matches!(app.input_mode, InputMode::SelectingTheme),
             "fresh app must not start in the theme picker"
         );
-        assert_eq!(app.theme_picker_filter, "");
-        assert_eq!(app.theme_picker_index, 0);
-        assert_eq!(app.theme_picker_pre_theme, crate::theme::Theme::default());
+        assert!(app.theme_picker.is_none(), "picker is closed on fresh app");
+        // The v0.8 defaults still hold when read through the accessors.
+        assert_eq!(picker_filter(&app), "");
+        assert_eq!(picker_cursor(&app), 0);
+        assert_eq!(picker_pre_theme(&app), crate::theme::Theme::default());
     }
 
     #[test]
@@ -1348,7 +1407,8 @@ mod tests {
         let _g = HOME_LOCK.lock().unwrap();
         let _home = HomeGuard::new();
         let mut app = fresh_app();
-        app.theme_picker_filter = "drac".to_string();
+        app.open_theme_picker();
+        set_picker_filter(&mut app, "drac");
         let filtered = app.theme_picker_filtered_themes();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name(), "dracula");
@@ -1359,7 +1419,8 @@ mod tests {
         let _g = HOME_LOCK.lock().unwrap();
         let _home = HomeGuard::new();
         let mut app = fresh_app();
-        app.theme_picker_filter = "totally-bogus".to_string();
+        app.open_theme_picker();
+        set_picker_filter(&mut app, "totally-bogus");
         assert!(app.theme_picker_filtered_themes().is_empty());
     }
 
@@ -1368,7 +1429,8 @@ mod tests {
         let _g = HOME_LOCK.lock().unwrap();
         let _home = HomeGuard::new();
         let mut app = fresh_app();
-        app.theme_picker_filter = "high".to_string();
+        app.open_theme_picker();
+        set_picker_filter(&mut app, "high");
         let filtered = app.theme_picker_filtered_themes();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name(), "high-contrast");
@@ -1381,7 +1443,7 @@ mod tests {
         let mut app = fresh_app();
         app.active_theme = crate::theme::Theme::Light;
         app.open_theme_picker();
-        assert_eq!(app.theme_picker_pre_theme, crate::theme::Theme::Light);
+        assert_eq!(picker_pre_theme(&app), crate::theme::Theme::Light);
     }
 
     #[test]
@@ -1390,9 +1452,10 @@ mod tests {
         let _home = HomeGuard::new();
         let mut app = fresh_app();
         // Pre-populate with stale state — should be cleared on open.
-        app.theme_picker_filter = "leftover".to_string();
         app.open_theme_picker();
-        assert_eq!(app.theme_picker_filter, "");
+        set_picker_filter(&mut app, "leftover");
+        app.open_theme_picker();
+        assert_eq!(picker_filter(&app), "");
     }
 
     #[test]
@@ -1404,7 +1467,7 @@ mod tests {
         app.open_theme_picker();
         let filtered = app.theme_picker_filtered_themes();
         assert_eq!(
-            filtered[app.theme_picker_index],
+            filtered[picker_cursor(&app)],
             crate::theme::Theme::HighContrast,
             "index must point at the active theme on open"
         );
@@ -1428,13 +1491,14 @@ mod tests {
         let _home = HomeGuard::new();
         let mut app = fresh_app();
         app.active_theme = crate::theme::Theme::Light;
-        app.theme_picker_filter = "drac".to_string();
+        app.open_theme_picker();
+        set_picker_filter(&mut app, "drac");
         app.open_theme_picker();
         // open_theme_picker resets filter to "", so active_theme
         // (Light) IS in the filtered list. Verify it's found.
-        assert_eq!(app.theme_picker_filter, "");
+        assert_eq!(picker_filter(&app), "");
         let filtered = app.theme_picker_filtered_themes();
-        assert_eq!(filtered[app.theme_picker_index], crate::theme::Theme::Light);
+        assert_eq!(filtered[picker_cursor(&app)], crate::theme::Theme::Light);
     }
 
     #[test]
@@ -1443,12 +1507,12 @@ mod tests {
         let _home = HomeGuard::new();
         let mut app = fresh_app();
         app.open_theme_picker(); // index points at Dark (the default)
-        let initial_index = app.theme_picker_index;
+        let initial_index = picker_cursor(&app);
         let filtered = app.theme_picker_filtered_themes();
         let expected = filtered[initial_index + 1];
 
         app.theme_picker_cursor_down();
-        assert_eq!(app.theme_picker_index, initial_index + 1);
+        assert_eq!(picker_cursor(&app), initial_index + 1);
         assert_eq!(app.active_theme, expected, "live preview must apply");
     }
 
@@ -1459,12 +1523,12 @@ mod tests {
         let mut app = fresh_app();
         app.open_theme_picker();
         app.theme_picker_cursor_down();
-        let after_down = app.theme_picker_index;
+        let after_down = picker_cursor(&app);
         let filtered = app.theme_picker_filtered_themes();
         let expected = filtered[after_down - 1];
 
         app.theme_picker_cursor_up();
-        assert_eq!(app.theme_picker_index, after_down - 1);
+        assert_eq!(picker_cursor(&app), after_down - 1);
         assert_eq!(app.active_theme, expected);
     }
 
@@ -1475,11 +1539,11 @@ mod tests {
         let mut app = fresh_app();
         app.open_theme_picker();
         let last = app.theme_picker_filtered_themes().len() - 1;
-        app.theme_picker_index = last;
+        set_picker_cursor(&mut app, last);
         let expected = app.theme_picker_filtered_themes()[last];
 
         app.theme_picker_cursor_down();
-        assert_eq!(app.theme_picker_index, last, "must clamp at last row");
+        assert_eq!(picker_cursor(&app), last, "must clamp at last row");
         assert_eq!(app.active_theme, expected);
     }
 
@@ -1489,11 +1553,11 @@ mod tests {
         let _home = HomeGuard::new();
         let mut app = fresh_app();
         app.open_theme_picker();
-        app.theme_picker_index = 0;
+        set_picker_cursor(&mut app, 0);
         let first = app.theme_picker_filtered_themes()[0];
 
         app.theme_picker_cursor_up();
-        assert_eq!(app.theme_picker_index, 0);
+        assert_eq!(picker_cursor(&app), 0);
         assert_eq!(app.active_theme, first);
     }
 
@@ -1503,7 +1567,7 @@ mod tests {
         let _home = HomeGuard::new();
         let mut app = fresh_app();
         app.open_theme_picker();
-        app.theme_picker_filter = "xyz".to_string();
+        set_picker_filter(&mut app, "xyz");
         // No themes match; helper must not panic, must not change
         // active_theme to anything weird.
         let active_before = app.active_theme;
@@ -1521,7 +1585,7 @@ mod tests {
         app.theme_picker_typed_char('d');
         app.theme_picker_typed_char('r');
         app.theme_picker_typed_char('a');
-        assert_eq!(app.theme_picker_filter, "dra");
+        assert_eq!(picker_filter(&app), "dra");
         let filtered = app.theme_picker_filtered_themes();
         assert!(
             filtered.iter().all(|t| t.name().contains("dra")),
@@ -1537,14 +1601,15 @@ mod tests {
         app.open_theme_picker();
         // Move cursor to an index that won't survive narrowing.
         let last = app.theme_picker_filtered_themes().len() - 1;
-        app.theme_picker_index = last;
+        set_picker_cursor(&mut app, last);
         // Type "drac" — list shrinks to 1 item (dracula).
         for c in "drac".chars() {
             app.theme_picker_typed_char(c);
         }
         assert_eq!(app.theme_picker_filtered_themes().len(), 1);
         assert_eq!(
-            app.theme_picker_index, 0,
+            picker_cursor(&app),
+            0,
             "index must clamp when filter shrinks the list"
         );
     }
@@ -1556,7 +1621,7 @@ mod tests {
         let mut app = fresh_app();
         app.open_theme_picker();
         let last = app.theme_picker_filtered_themes().len() - 1;
-        app.theme_picker_index = last;
+        set_picker_cursor(&mut app, last);
         for c in "drac".chars() {
             app.theme_picker_typed_char(c);
         }
@@ -1602,9 +1667,9 @@ mod tests {
         for c in "drac".chars() {
             app.theme_picker_typed_char(c);
         }
-        assert_eq!(app.theme_picker_filter, "drac");
+        assert_eq!(picker_filter(&app), "drac");
         app.theme_picker_backspace();
-        assert_eq!(app.theme_picker_filter, "dra");
+        assert_eq!(picker_filter(&app), "dra");
     }
 
     #[test]
@@ -1613,9 +1678,9 @@ mod tests {
         let _home = HomeGuard::new();
         let mut app = fresh_app();
         app.open_theme_picker();
-        assert_eq!(app.theme_picker_filter, "");
+        assert_eq!(picker_filter(&app), "");
         app.theme_picker_backspace();
-        assert_eq!(app.theme_picker_filter, "");
+        assert_eq!(picker_filter(&app), "");
     }
 
     #[test]

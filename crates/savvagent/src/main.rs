@@ -1531,43 +1531,33 @@ async fn run_app(
                 }
                 _ => {}
             },
-            InputMode::SelectingTheme => match key.code {
-                KeyCode::Esc => app.theme_picker_cancel(),
-                KeyCode::Up => app.theme_picker_cursor_up(),
-                KeyCode::Down => app.theme_picker_cursor_down(),
-                KeyCode::Backspace => app.theme_picker_backspace(),
-                KeyCode::Enter => {
-                    if app.theme_picker_filtered_themes().is_empty() {
-                        // Spec edge case 2: Enter on a zero-match filter is a
-                        // no-op. Cursor stays on the "no themes match" hint;
-                        // user can Backspace to widen, type to narrow further,
-                        // or Esc to cancel. Without this guard, the last-good
-                        // preview that `clamp_theme_picker_after_filter_change`
-                        // preserved would get committed and persisted.
-                    } else {
-                        let chosen = app.active_theme;
-                        app.theme_picker_confirm();
-                        match theme::save(chosen) {
-                            Ok(()) => {
-                                app.push_note(format!("theme set to `{}`", chosen.name()));
-                            }
-                            Err(e) => {
-                                app.push_note(format!(
-                                    "theme `{}` applied for this session, but persistence failed: {e}",
-                                    chosen.name()
-                                ));
-                            }
+            InputMode::SelectingTheme => {
+                let outcome = app
+                    .theme_picker
+                    .as_mut()
+                    .map(|p| p.on_key(*key))
+                    .unwrap_or(crate::theme::picker::PickerOutcome::Stay);
+                match outcome {
+                    crate::theme::picker::PickerOutcome::Stay => {}
+                    crate::theme::picker::PickerOutcome::PreviewTheme(t) => {
+                        app.set_active_theme(t);
+                    }
+                    crate::theme::picker::PickerOutcome::Apply(t) => {
+                        app.set_active_theme(t);
+                        app.persist_active_theme();
+                        app.theme_picker = None;
+                        app.input_mode = InputMode::Editing;
+                    }
+                    crate::theme::picker::PickerOutcome::Cancel => {
+                        let pre = app.theme_picker.as_ref().map(|p| p.pre_open_theme);
+                        if let Some(t) = pre {
+                            app.set_active_theme(t);
                         }
+                        app.theme_picker = None;
+                        app.input_mode = InputMode::Editing;
                     }
                 }
-                KeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                {
-                    app.theme_picker_typed_char(c);
-                }
-                _ => {}
-            },
+            }
         }
     }
 }
@@ -1987,9 +1977,14 @@ mod theme_command_tests {
         // Open picker.
         handle_theme_command(&mut app, "");
         assert!(matches!(app.input_mode, InputMode::SelectingTheme));
-        // Simulate scrolling to a specific theme.
-        app.theme_picker_filter = "tokyo".to_string();
-        app.theme_picker_index = 0;
+        // Simulate scrolling to a specific theme by poking the lifted
+        // picker fields directly. Mirrors the v0.8 test that wrote to
+        // `app.theme_picker_filter` / `app.theme_picker_index`.
+        {
+            let p = app.theme_picker.as_mut().expect("picker open");
+            p.filter = "tokyo".to_string();
+            p.cursor = 0;
+        }
         let filtered = app.theme_picker_filtered_themes();
         let chosen = filtered[0];
         app.active_theme = chosen;
