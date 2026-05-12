@@ -13,4 +13,7 @@
 /// ID newtypes and small structural types that cross plugin boundaries.
 pub mod types;
 
-pub use types::{PluginId, ProviderId, Region, ScreenInstanceId, Timestamp};
+pub use types::{
+    ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, PluginId,
+    ProviderId, Region, ScreenInstanceId, Timestamp,
+};
