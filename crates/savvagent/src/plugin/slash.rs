@@ -5,13 +5,10 @@ use savvagent_plugin::{Effect, PluginError, PluginId};
 use crate::plugin::manifests::Indexes;
 use crate::plugin::registry::PluginRegistry;
 
-/// Maximum number of nested slash dispatches before the router hard-errors.
-/// Prevents infinite loops when an `Effect::RunSlash` emitted by a plugin
-/// handler would re-enter the same (or another) slash handler.
-const MAX_REENTRANCY_DEPTH: u8 = 4;
-
 /// Routes bare slash command names to the plugin that owns them and dispatches
-/// the call, threading a re-entrancy chain to enforce [`MAX_REENTRANCY_DEPTH`].
+/// the call. Re-entrancy depth enforcement is handled upstream in
+/// `apply_effects` via `MAX_RUNSLASH_DEPTH`; `SlashRouter` is a pure
+/// resolver + single-shot dispatcher.
 pub struct SlashRouter<'a> {
     indexes: &'a Indexes,
     registry: &'a PluginRegistry,
@@ -22,11 +19,6 @@ pub struct SlashRouter<'a> {
 pub enum SlashError {
     /// No enabled plugin has registered a slash command with this name.
     Unknown(String),
-    /// A chain of `Effect::RunSlash` re-entries exceeded [`MAX_REENTRANCY_DEPTH`].
-    ReentrancyLimitExceeded {
-        /// The ordered sequence of slash names that formed the cycle.
-        chain: Vec<String>,
-    },
     /// The plugin's own `handle_slash` returned an error.
     Plugin(PluginError),
 }
@@ -35,13 +27,6 @@ impl std::fmt::Display for SlashError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SlashError::Unknown(name) => write!(f, "unknown slash command: /{name}"),
-            SlashError::ReentrancyLimitExceeded { chain } => {
-                write!(
-                    f,
-                    "slash re-entrancy depth exceeded: {}",
-                    chain.join(" -> ")
-                )
-            }
             SlashError::Plugin(e) => write!(f, "{e}"),
         }
     }
@@ -64,27 +49,9 @@ impl<'a> SlashRouter<'a> {
     /// Dispatch a slash command by name. Locks the owning plugin, calls
     /// `handle_slash`, and returns the emitted effects.
     ///
-    /// Returns [`SlashError::Unknown`] if no plugin owns `name`, or
-    /// [`SlashError::ReentrancyLimitExceeded`] if the re-entrancy depth
-    /// cap is hit before dispatch.
+    /// Returns [`SlashError::Unknown`] if no plugin owns `name`.
+    /// Re-entrancy depth is enforced by the caller (`apply_effects`).
     pub async fn dispatch(&self, name: &str, args: Vec<String>) -> Result<Vec<Effect>, SlashError> {
-        self.dispatch_inner(name, args, &mut Vec::new()).await
-    }
-
-    async fn dispatch_inner(
-        &self,
-        name: &str,
-        args: Vec<String>,
-        chain: &mut Vec<String>,
-    ) -> Result<Vec<Effect>, SlashError> {
-        if chain.len() >= MAX_REENTRANCY_DEPTH as usize {
-            chain.push(name.to_string());
-            return Err(SlashError::ReentrancyLimitExceeded {
-                chain: chain.clone(),
-            });
-        }
-        chain.push(name.to_string());
-
         let pid = self
             .resolve(name)
             .ok_or_else(|| SlashError::Unknown(name.to_string()))?

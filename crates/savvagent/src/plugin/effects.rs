@@ -1,26 +1,39 @@
 //! `apply_effects` is the single mutation surface for `App` in response
 //! to plugin output. Every Effect variant maps to one App method (or
-//! recurses for Stack). Slash re-entrancy goes back through SlashRouter.
+//! recurses for Stack). Slash re-entrancy depth is enforced here so that
+//! the depth cap cannot be bypassed by constructing a fresh SlashRouter.
 
 use savvagent_plugin::{Effect, ScreenArgs};
 
 use crate::app::App;
 use crate::plugin::slash::SlashRouter;
 
+/// Maximum number of nested `Effect::RunSlash` re-entries before an error
+/// is returned. Prevents infinite loops when a plugin's slash handler emits
+/// another `RunSlash` effect.
+const MAX_RUNSLASH_DEPTH: u8 = 4;
+
 /// Apply each effect in sequence, mutating `App` state. Used by the event
 /// loop after dispatching key events, hook events, or slash commands.
 ///
 /// Returns `Err(String)` if an effect referenced an unknown screen or slash
-/// command, or if recursion via `Effect::RunSlash` exceeded the depth limit
-/// in `SlashRouter`.
+/// command, or if recursion via `Effect::RunSlash` exceeded `MAX_RUNSLASH_DEPTH`.
 pub async fn apply_effects(app: &mut App, effects: Vec<Effect>) -> Result<(), String> {
+    apply_effects_with_depth(app, effects, 0).await
+}
+
+async fn apply_effects_with_depth(
+    app: &mut App,
+    effects: Vec<Effect>,
+    depth: u8,
+) -> Result<(), String> {
     for eff in effects {
-        apply_one(app, eff).await?;
+        apply_one(app, eff, depth).await?;
     }
     Ok(())
 }
 
-async fn apply_one(app: &mut App, eff: Effect) -> Result<(), String> {
+async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> {
     match eff {
         Effect::PushNote { line } => app.push_styled_note(line),
         Effect::OpenScreen { id, args } => open_screen(app, &id, args).await?,
@@ -45,17 +58,27 @@ async fn apply_one(app: &mut App, eff: Effect) -> Result<(), String> {
         Effect::SaveTranscript { path } => app.save_transcript_to(path),
         Effect::PromptSend { text } => app.submit_prompt(text),
         Effect::RunSlash { name, args } => {
-            run_slash(app, name, args).await?;
+            if depth >= MAX_RUNSLASH_DEPTH {
+                return Err(format!(
+                    "Effect::RunSlash depth limit ({MAX_RUNSLASH_DEPTH}) exceeded by slash '{name}'"
+                ));
+            }
+            run_slash(app, name, args, depth + 1).await?;
         }
         Effect::ClearLog => app.clear_log(),
         Effect::Quit => app.request_quit(),
         Effect::Stack(children) => {
             // Recurse via Box::pin so the future has a known size.
-            Box::pin(apply_effects(app, children)).await?;
+            Box::pin(apply_effects_with_depth(app, children, depth)).await?;
         }
-        // The Effect enum is #[non_exhaustive]; future variants are silently
-        // ignored until the relevant PR wires them.
-        _ => {}
+        // The Effect enum is #[non_exhaustive]; unhandled variants are logged
+        // so implementers of future PRs can spot missing wiring.
+        other => {
+            tracing::warn!(
+                effect = ?other,
+                "apply_one: unhandled Effect variant (likely needs wiring in a later PR)"
+            );
+        }
     }
     Ok(())
 }
@@ -100,7 +123,12 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
     Ok(())
 }
 
-async fn run_slash(app: &mut App, name: String, args: Vec<String>) -> Result<(), String> {
+async fn run_slash(
+    app: &mut App,
+    name: String,
+    args: Vec<String>,
+    depth: u8,
+) -> Result<(), String> {
     let (reg, idx) = match (&app.plugin_registry, &app.plugin_indexes) {
         (Some(r), Some(i)) => (r.clone(), i.clone()),
         _ => return Err("plugin runtime not installed".into()),
@@ -114,5 +142,74 @@ async fn run_slash(app: &mut App, name: String, args: Vec<String>) -> Result<(),
             .await
             .map_err(|e| e.to_string())?
     };
-    Box::pin(apply_effects(app, effs)).await
+    Box::pin(apply_effects_with_depth(app, effs, depth)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::{HOME_LOCK, HomeGuard};
+    use savvagent_plugin::StyledLine;
+    use std::path::PathBuf;
+
+    fn fresh_app() -> crate::app::App {
+        crate::app::App::new("test-model".into(), PathBuf::from("/tmp"))
+    }
+
+    /// RunSlash at depth >= MAX_RUNSLASH_DEPTH must return a depth-limit error
+    /// without panicking or spinning. This is the core assertion for Fix 1.
+    #[tokio::test]
+    async fn runslash_at_max_depth_returns_error() {
+        // Acquire HOME_LOCK only while constructing App (which reads $HOME via
+        // config paths). Drop both guards before any await point so clippy's
+        // await_holding_lock lint stays green.
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+
+        let effect = Effect::RunSlash {
+            name: "any".into(),
+            args: vec![],
+        };
+        // Apply at depth == MAX_RUNSLASH_DEPTH (4) — must error immediately.
+        let result = Box::pin(apply_effects_with_depth(
+            &mut app,
+            vec![effect],
+            MAX_RUNSLASH_DEPTH,
+        ))
+        .await;
+        assert!(result.is_err(), "expected depth-limit error, got Ok(())");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("depth limit"),
+            "error message should mention depth limit, got: {msg}"
+        );
+    }
+
+    /// Stack effect recurses through children in order; results are applied
+    /// sequentially.
+    #[tokio::test]
+    async fn stack_applies_children_in_order() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        let initial_len = app.entries.len();
+
+        let effects = vec![Effect::Stack(vec![
+            Effect::PushNote {
+                line: StyledLine::plain("first"),
+            },
+            Effect::PushNote {
+                line: StyledLine::plain("second"),
+            },
+        ])];
+        apply_effects(&mut app, effects).await.unwrap();
+
+        // Two new entries should have been appended.
+        assert_eq!(app.entries.len(), initial_len + 2);
+    }
 }

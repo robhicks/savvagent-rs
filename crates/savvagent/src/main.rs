@@ -1163,6 +1163,12 @@ async fn run_app(
         // Screen-stack routing: if any screen is on top, route the key there.
         // Reserved shortcuts (Ctrl-C already caught above; Ctrl-D quits) are
         // handled before forwarding to the screen.
+        //
+        // PR 3 limitation: KeyScope::OnScreen keybinding contributions are not
+        // dispatched here. When a screen is on top, key events route directly
+        // to its on_key(). PR 6 or later may add a KeybindingRouter::route
+        // pass with active_screen=Some(top.id()) before falling through to
+        // on_key, once a built-in screen actually needs OnScreen bindings.
         if !app.screen_stack.is_empty() {
             let portable = crate::plugin::convert::key_event_to_portable(*key);
             if portable.modifiers.ctrl
@@ -1210,7 +1216,7 @@ async fn run_app(
                         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             // Legacy Ctrl-P: open palette via keybinding router for symmetry.
                             let portable = crate::plugin::convert::key_event_to_portable(*key);
-                            if let (Some(reg), Some(idx)) =
+                            if let (Some(_reg), Some(idx)) =
                                 (&app.plugin_registry, &app.plugin_indexes)
                             {
                                 let action = {
@@ -1221,31 +1227,7 @@ async fn run_app(
                                     router.route(&portable, None)
                                 };
                                 if let Some(action) = action {
-                                    match action {
-                                        savvagent_plugin::BoundAction::EmitEffect(e) => {
-                                            let _ =
-                                                crate::plugin::effects::apply_effects(app, vec![e])
-                                                    .await;
-                                        }
-                                        savvagent_plugin::BoundAction::RunSlash { name, args } => {
-                                            let effs = {
-                                                let reg_guard = reg.read().await;
-                                                let idx_guard = idx.read().await;
-                                                let router = crate::plugin::slash::SlashRouter::new(
-                                                    &idx_guard, &reg_guard,
-                                                );
-                                                router
-                                                    .dispatch(&name, args)
-                                                    .await
-                                                    .ok()
-                                                    .unwrap_or_default()
-                                            };
-                                            let _ =
-                                                crate::plugin::effects::apply_effects(app, effs)
-                                                    .await;
-                                        }
-                                        _ => {}
-                                    }
+                                    dispatch_bound_action(app, action).await;
                                     continue;
                                 }
                             }
@@ -1321,7 +1303,7 @@ async fn run_app(
                             // prompt is empty.
                             let portable = crate::plugin::convert::key_event_to_portable(*key);
                             let mut handled = false;
-                            if let (Some(reg), Some(idx)) =
+                            if let (Some(_reg), Some(idx)) =
                                 (&app.plugin_registry, &app.plugin_indexes)
                             {
                                 let action = {
@@ -1332,31 +1314,7 @@ async fn run_app(
                                     router.route(&portable, None)
                                 };
                                 if let Some(action) = action {
-                                    match action {
-                                        savvagent_plugin::BoundAction::EmitEffect(e) => {
-                                            let _ =
-                                                crate::plugin::effects::apply_effects(app, vec![e])
-                                                    .await;
-                                        }
-                                        savvagent_plugin::BoundAction::RunSlash { name, args } => {
-                                            let effs = {
-                                                let reg_guard = reg.read().await;
-                                                let idx_guard = idx.read().await;
-                                                let router = crate::plugin::slash::SlashRouter::new(
-                                                    &idx_guard, &reg_guard,
-                                                );
-                                                router
-                                                    .dispatch(&name, args)
-                                                    .await
-                                                    .ok()
-                                                    .unwrap_or_default()
-                                            };
-                                            let _ =
-                                                crate::plugin::effects::apply_effects(app, effs)
-                                                    .await;
-                                        }
-                                        _ => {}
-                                    }
+                                    dispatch_bound_action(app, action).await;
                                     handled = true;
                                 }
                             }
@@ -1587,6 +1545,55 @@ async fn run_app(
                 _ => {}
             },
         }
+    }
+}
+
+/// Dispatch a [`BoundAction`][savvagent_plugin::BoundAction] produced by the
+/// keybinding router. Logs and surfaces errors to the user via
+/// `push_styled_note` so a malformed binding or runtime error doesn't
+/// silently no-op a keystroke.
+async fn dispatch_bound_action(app: &mut App, action: savvagent_plugin::BoundAction) {
+    match action {
+        savvagent_plugin::BoundAction::EmitEffect(effect) => {
+            if let Err(e) = crate::plugin::effects::apply_effects(app, vec![effect]).await {
+                tracing::warn!(error = %e, "apply_effects from keybinding failed");
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "Action failed: {e}"
+                )));
+            }
+        }
+        savvagent_plugin::BoundAction::RunSlash { name, args } => {
+            let (reg, idx) = match (&app.plugin_registry, &app.plugin_indexes) {
+                (Some(r), Some(i)) => (r.clone(), i.clone()),
+                _ => {
+                    tracing::warn!("dispatch_bound_action: plugin runtime not installed");
+                    return;
+                }
+            };
+            let effs_result = {
+                let reg_guard = reg.read().await;
+                let idx_guard = idx.read().await;
+                let router = crate::plugin::slash::SlashRouter::new(&idx_guard, &reg_guard);
+                router.dispatch(&name, args).await
+            };
+            match effs_result {
+                Ok(effs) => {
+                    if let Err(e) = crate::plugin::effects::apply_effects(app, effs).await {
+                        tracing::warn!(error = %e, command = %name, "apply_effects after slash dispatch failed");
+                        app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                            "Command failed: {e}"
+                        )));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, command = %name, "slash dispatch failed");
+                    app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                        "Command failed: {e}"
+                    )));
+                }
+            }
+        }
+        _ => {}
     }
 }
 

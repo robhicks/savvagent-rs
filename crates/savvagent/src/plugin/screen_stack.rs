@@ -12,16 +12,12 @@ use savvagent_plugin::{Screen, ScreenLayout};
 /// content without the screen needing to know about terminal geometry.
 pub struct ScreenStack {
     stack: Vec<(Box<dyn Screen>, ScreenLayout)>,
-    next_instance_id: u32,
 }
 
 impl ScreenStack {
     /// Returns an empty `ScreenStack`.
     pub fn new() -> Self {
-        Self {
-            stack: Vec::new(),
-            next_instance_id: 1,
-        }
+        Self { stack: Vec::new() }
     }
 
     /// Pushes `screen` and its associated `layout` onto the top of the stack.
@@ -30,7 +26,6 @@ impl ScreenStack {
     /// is popped.
     pub fn push(&mut self, screen: Box<dyn Screen>, layout: ScreenLayout) {
         self.stack.push((screen, layout));
-        self.next_instance_id = self.next_instance_id.saturating_add(1);
     }
 
     /// Removes and returns the top `(screen, layout)` pair, or `None` when the
@@ -114,5 +109,33 @@ mod tests {
     fn empty_pop_returns_none() {
         let mut s = ScreenStack::new();
         assert!(s.pop().is_none());
+    }
+
+    #[test]
+    fn push_preserves_distinct_layouts() {
+        let mut s = ScreenStack::new();
+        s.push(
+            Box::new(DummyScreen("a".into())),
+            ScreenLayout::Fullscreen { hide_chrome: false },
+        );
+        s.push(
+            Box::new(DummyScreen("b".into())),
+            ScreenLayout::CenteredModal {
+                width_pct: 60,
+                height_pct: 50,
+                title: Some("Test".into()),
+            },
+        );
+        let (_, top_layout) = s.top().unwrap();
+        assert!(matches!(
+            top_layout,
+            ScreenLayout::CenteredModal { width_pct: 60, .. }
+        ));
+        s.pop();
+        let (_, top_layout) = s.top().unwrap();
+        assert!(matches!(
+            top_layout,
+            ScreenLayout::Fullscreen { hide_chrome: false }
+        ));
     }
 }
