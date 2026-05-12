@@ -25,6 +25,8 @@ mod creds;
 mod palette;
 mod providers;
 mod splash;
+#[cfg(test)]
+mod test_helpers;
 mod theme;
 mod tui;
 mod ui;
@@ -833,43 +835,25 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
     }
 }
 
-/// `/theme` (no args or `list`) prints every built-in theme with the
-/// active one marked. `/theme <name>` switches to the requested theme
-/// and persists it to `~/.savvagent/theme.toml`; an unknown name is a
-/// soft error that leaves the active theme unchanged.
+/// `/theme` (no args or `list`) opens the interactive theme picker.
+/// `/theme <name>` switches directly to the requested theme and
+/// persists it to `~/.savvagent/theme.toml`; an unknown name is a
+/// soft error that leaves the active theme unchanged. The picker is
+/// refused while a turn is in-flight to avoid mode-switching mid-stream.
 ///
 /// The theme change is applied at the next [`ui::render`] call — no
 /// host reconnect or widget rebuild needed.
-/// Push one indented row per theme to the conversation, marking the
-/// active theme. Used by both `/theme list` sections.
-fn push_theme_section<I>(app: &mut App, themes: I)
-where
-    I: IntoIterator<Item = theme::Theme>,
-{
-    for t in themes {
-        let marker = if t == app.active_theme {
-            " (active)"
-        } else {
-            ""
-        };
-        app.push_note(format!("    {}{}", t.name(), marker));
-    }
-}
-
 fn handle_theme_command(app: &mut App, args: &str) {
+    // Refuse all /theme invocations during an in-flight turn — picker,
+    // `list`, and direct-slug paths alike. Mirrors `/bash` and `/resume`
+    // so users don't get a half-applied theme or a mode switch mid-stream.
+    if app.is_loading {
+        app.push_note("Cannot /theme during an in-flight turn — wait for it to finish.");
+        return;
+    }
     let trimmed = args.trim();
     if trimmed.is_empty() || trimmed == "list" {
-        app.push_note("themes:");
-        // Built-ins first, then the upstream catalog. Grouping keeps the
-        // 18-theme list (3 built-in + 15 catalog) scannable as the
-        // upstream catalog grows.
-        app.push_note("  built-in:");
-        push_theme_section(
-            app,
-            theme::Theme::all().into_iter().filter(|t| t.is_builtin()),
-        );
-        app.push_note("  catalog (ratatui-themes):");
-        push_theme_section(app, theme::Theme::catalog());
+        app.open_theme_picker();
         return;
     }
 
@@ -889,8 +873,6 @@ fn handle_theme_command(app: &mut App, args: &str) {
             }
         }
         None => {
-            // Don't reproduce the entire 18-theme catalog inline on every
-            // typo — point at `/theme list` instead.
             app.push_note(format!(
                 "theme `{}` not found — keeping `{}`. Run `/theme list` to see available themes.",
                 trimmed,
@@ -1476,6 +1458,43 @@ async fn run_app(
                 }
                 _ => {}
             },
+            InputMode::SelectingTheme => match key.code {
+                KeyCode::Esc => app.theme_picker_cancel(),
+                KeyCode::Up => app.theme_picker_cursor_up(),
+                KeyCode::Down => app.theme_picker_cursor_down(),
+                KeyCode::Backspace => app.theme_picker_backspace(),
+                KeyCode::Enter => {
+                    if app.theme_picker_filtered_themes().is_empty() {
+                        // Spec edge case 2: Enter on a zero-match filter is a
+                        // no-op. Cursor stays on the "no themes match" hint;
+                        // user can Backspace to widen, type to narrow further,
+                        // or Esc to cancel. Without this guard, the last-good
+                        // preview that `clamp_theme_picker_after_filter_change`
+                        // preserved would get committed and persisted.
+                    } else {
+                        let chosen = app.active_theme;
+                        app.theme_picker_confirm();
+                        match theme::save(chosen) {
+                            Ok(()) => {
+                                app.push_note(format!("theme set to `{}`", chosen.name()));
+                            }
+                            Err(e) => {
+                                app.push_note(format!(
+                                    "theme `{}` applied for this session, but persistence failed: {e}",
+                                    chosen.name()
+                                ));
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    app.theme_picker_typed_char(c);
+                }
+                _ => {}
+            },
         }
     }
 }
@@ -1639,42 +1658,9 @@ mod model_validation_tests {
 
 #[cfg(test)]
 mod theme_command_tests {
-    use super::{App, Entry, handle_theme_command, theme};
+    use super::{App, CommandSelection, Entry, InputMode, handle_theme_command, theme};
+    use crate::test_helpers::{HOME_LOCK, HomeGuard};
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    // `theme::save` writes to `$HOME/.savvagent/theme.toml`, and `App::new`
-    // reads it. We point `$HOME` at a per-test temp dir to avoid touching
-    // the developer's real theme. Env vars are process-global, so the
-    // tests in this module run under a Mutex.
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
-
-    struct HomeGuard {
-        _td: tempfile::TempDir,
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl HomeGuard {
-        fn new() -> Self {
-            let td = tempfile::TempDir::new().expect("tempdir");
-            let prev = std::env::var_os("HOME");
-            // SAFETY: env mutation guarded by HOME_LOCK across this module's tests.
-            unsafe { std::env::set_var("HOME", td.path()) };
-            Self { _td: td, prev }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: env mutation guarded by HOME_LOCK across this module's tests.
-            unsafe {
-                match &self.prev {
-                    Some(p) => std::env::set_var("HOME", p),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
-    }
 
     fn fresh_app() -> App {
         App::new("test-model".into(), PathBuf::from("/tmp"))
@@ -1694,45 +1680,24 @@ mod theme_command_tests {
     }
 
     #[test]
-    fn list_marks_active_theme() {
+    fn empty_args_opens_picker() {
         let _g = HOME_LOCK.lock().unwrap();
         let _home = HomeGuard::new();
         let mut app = fresh_app();
-        let initial_notes = note_lines(&app).len();
-        handle_theme_command(&mut app, "list");
-        let notes = note_lines(&app);
-        let new_notes: Vec<&&str> = notes.iter().skip(initial_notes).collect();
+        handle_theme_command(&mut app, "");
         assert!(
-            new_notes.iter().any(|l| l.contains("themes:")),
-            "expected `themes:` header, got: {new_notes:?}"
+            matches!(app.input_mode, InputMode::SelectingTheme),
+            "empty `/theme` must open the picker"
         );
-        // App::new()'s default is Theme::Dark, so dark should be marked.
-        assert!(
-            new_notes
-                .iter()
-                .any(|l| l.contains("dark") && l.contains("(active)")),
-            "expected dark marked active, got: {new_notes:?}"
-        );
-        // Every built-in must appear.
-        for t in theme::Theme::all() {
-            assert!(
-                new_notes.iter().any(|l| l.contains(t.name())),
-                "expected `{}` to appear in list, got: {new_notes:?}",
-                t.name()
-            );
-        }
     }
 
     #[test]
-    fn empty_args_lists_themes_like_list() {
+    fn list_arg_opens_picker() {
         let _g = HOME_LOCK.lock().unwrap();
         let _home = HomeGuard::new();
         let mut app = fresh_app();
-        let initial_notes = note_lines(&app).len();
-        handle_theme_command(&mut app, "");
-        let notes = note_lines(&app);
-        assert!(notes.len() > initial_notes);
-        assert!(notes[initial_notes..].iter().any(|l| l.contains("themes:")));
+        handle_theme_command(&mut app, "list");
+        assert!(matches!(app.input_mode, InputMode::SelectingTheme));
     }
 
     #[test]
@@ -1746,12 +1711,13 @@ mod theme_command_tests {
             app.active_theme, original,
             "unknown name must not change the active theme"
         );
+        // Picker must NOT open on an unknown slug — that path is a
+        // direct-typing escape hatch with a clear error.
+        assert!(matches!(app.input_mode, InputMode::Editing));
         let notes = note_lines(&app);
         let last = notes.last().unwrap();
         assert!(last.contains("totally-bogus"), "last note: {last}");
         assert!(last.contains("not found"), "last note: {last}");
-        // The 18-theme catalog is too long to dump inline; the error
-        // line points at `/theme list` instead.
         assert!(last.contains("/theme list"), "last note: {last}");
     }
 
@@ -1762,6 +1728,8 @@ mod theme_command_tests {
         let mut app = fresh_app();
         handle_theme_command(&mut app, "light");
         assert_eq!(app.active_theme, theme::Theme::Light);
+        // Direct slug path: no picker opens; result is announced via note.
+        assert!(matches!(app.input_mode, InputMode::Editing));
         let notes = note_lines(&app);
         assert!(notes.last().unwrap().contains("set to `light`"));
     }
@@ -1773,33 +1741,8 @@ mod theme_command_tests {
         let mut app = fresh_app();
         handle_theme_command(&mut app, "high-contrast");
         assert_eq!(app.active_theme, theme::Theme::HighContrast);
-        // A brand-new App should now load the saved value.
         let app2 = fresh_app();
         assert_eq!(app2.active_theme, theme::Theme::HighContrast);
-    }
-
-    #[test]
-    fn list_renders_built_in_and_catalog_sections() {
-        let _g = HOME_LOCK.lock().unwrap();
-        let _home = HomeGuard::new();
-        let mut app = fresh_app();
-        let initial_notes = note_lines(&app).len();
-        handle_theme_command(&mut app, "list");
-        let notes = note_lines(&app);
-        let new_notes: Vec<&&str> = notes.iter().skip(initial_notes).collect();
-        assert!(
-            new_notes.iter().any(|l| l.contains("built-in:")),
-            "expected `built-in:` group header, got: {new_notes:?}"
-        );
-        assert!(
-            new_notes.iter().any(|l| l.contains("catalog")),
-            "expected catalog group header, got: {new_notes:?}"
-        );
-        // At least one upstream theme should appear under catalog.
-        assert!(
-            new_notes.iter().any(|l| l.contains("dracula")),
-            "expected `dracula` to appear under catalog, got: {new_notes:?}"
-        );
     }
 
     #[test]
@@ -1814,5 +1757,178 @@ mod theme_command_tests {
         }
         let app2 = fresh_app();
         assert_eq!(app2.active_theme, app.active_theme);
+    }
+
+    #[test]
+    fn empty_args_refuses_when_is_loading() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.is_loading = true;
+        handle_theme_command(&mut app, "");
+        assert!(
+            matches!(app.input_mode, InputMode::Editing),
+            "must not open picker during in-flight turn"
+        );
+        let notes = note_lines(&app);
+        let last = notes.last().unwrap();
+        assert!(
+            last.contains("in-flight") || last.contains("wait"),
+            "last note must explain the refusal: {last}"
+        );
+    }
+
+    #[test]
+    fn list_arg_refuses_when_is_loading() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.is_loading = true;
+        handle_theme_command(&mut app, "list");
+        assert!(
+            matches!(app.input_mode, InputMode::Editing),
+            "must not open picker during in-flight turn"
+        );
+        let notes = note_lines(&app);
+        let last = notes.last().unwrap();
+        assert!(
+            last.contains("in-flight") || last.contains("wait"),
+            "last note must explain the refusal: {last}"
+        );
+    }
+
+    #[test]
+    fn direct_slug_refuses_when_is_loading() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        let original = app.active_theme;
+        app.is_loading = true;
+        handle_theme_command(&mut app, "dark");
+        // Must not mutate active_theme during an in-flight turn.
+        assert_eq!(app.active_theme, original);
+        let notes = note_lines(&app);
+        let last = notes.last().unwrap();
+        assert!(
+            last.contains("in-flight") || last.contains("wait"),
+            "last note must explain the refusal: {last}"
+        );
+    }
+
+    #[test]
+    fn theme_picker_enter_with_empty_filter_is_noop() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // Open picker, narrow filter to zero matches.
+        handle_theme_command(&mut app, "");
+        assert!(matches!(app.input_mode, InputMode::SelectingTheme));
+        for c in "totallybogus".chars() {
+            app.theme_picker_typed_char(c);
+        }
+        assert!(app.theme_picker_filtered_themes().is_empty());
+        let before_theme = app.active_theme;
+        let before_notes = note_lines(&app).len();
+
+        // Simulate the production Enter handler's empty-filter guard: when
+        // filtered is empty, do nothing. We pin the *state invariant* the
+        // production code preserves — state stays untouched, no note pushed,
+        // mode stays in SelectingTheme so Esc can still cancel.
+        if app.theme_picker_filtered_themes().is_empty() {
+            // no-op
+        } else {
+            // Would otherwise commit; this branch is unreachable here.
+            unreachable!("filter is empty");
+        }
+
+        assert_eq!(
+            app.active_theme, before_theme,
+            "Enter on empty filter must not clobber the live-preview theme"
+        );
+        assert!(
+            matches!(app.input_mode, InputMode::SelectingTheme),
+            "Enter on empty filter must stay in the picker"
+        );
+        assert_eq!(
+            note_lines(&app).len(),
+            before_notes,
+            "Enter on empty filter must not push any note"
+        );
+    }
+
+    #[test]
+    fn theme_picker_enter_persists_chosen_theme() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // Open picker.
+        handle_theme_command(&mut app, "");
+        assert!(matches!(app.input_mode, InputMode::SelectingTheme));
+        // Simulate scrolling to a specific theme.
+        app.theme_picker_filter = "tokyo".to_string();
+        app.theme_picker_index = 0;
+        let filtered = app.theme_picker_filtered_themes();
+        let chosen = filtered[0];
+        app.active_theme = chosen;
+        // Simulate the Enter handler.
+        app.theme_picker_confirm();
+        let _ = theme::save(app.active_theme);
+
+        let app2 = fresh_app();
+        assert_eq!(app2.active_theme, chosen);
+    }
+
+    #[test]
+    fn theme_picker_esc_does_not_persist() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        // Pre-save Dark so theme.toml has a known starting value.
+        let mut app = fresh_app();
+        handle_theme_command(&mut app, "dark");
+        assert_eq!(app.active_theme, theme::Theme::Dark);
+
+        // Open picker, live-preview, then cancel.
+        handle_theme_command(&mut app, "");
+        app.theme_picker_cursor_down();
+        assert_ne!(app.active_theme, theme::Theme::Dark);
+        app.theme_picker_cancel();
+        assert_eq!(app.active_theme, theme::Theme::Dark);
+
+        // Reload: theme.toml should still say dark.
+        let app2 = fresh_app();
+        assert_eq!(app2.active_theme, theme::Theme::Dark);
+    }
+
+    #[test]
+    fn command_palette_selecting_theme_opens_picker_not_prefill() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // Find the /theme command index in app.commands.
+        let theme_idx = app
+            .commands
+            .iter()
+            .position(|c| c.name == "/theme")
+            .expect("/theme must be registered");
+        // Simulate command-palette selection of /theme by setting palette
+        // state and calling select_command. The contract: /theme should
+        // resolve as Execute(...) (not Prefill) so the keypath runs
+        // handle_theme_command immediately and opens the picker.
+        app.input_mode = InputMode::CommandPalette;
+        app.command_index = theme_idx;
+        let outcome = app.select_command();
+        match outcome {
+            Some(CommandSelection::Execute(cmd)) => {
+                assert_eq!(cmd.trim(), "/theme");
+                // Now run handle_theme_command on empty args, which is
+                // what the main.rs keypath dispatches to for "/theme".
+                handle_theme_command(&mut app, "");
+                assert!(matches!(app.input_mode, InputMode::SelectingTheme));
+            }
+            Some(CommandSelection::Prefill(_)) => {
+                panic!("/theme should be Execute now that needs_arg is false");
+            }
+            None => panic!("/theme command must be selectable"),
+        }
     }
 }

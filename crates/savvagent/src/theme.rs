@@ -103,6 +103,10 @@ impl Theme {
 
     /// Only the upstream catalog (no built-ins). Useful for renderers
     /// that want to group "Built-in" vs "Catalog" sections.
+    // Currently unused in the binary; the test below pins the
+    // catalog/builtin partition invariant. Retained as part of the
+    // public Theme API for future iteration helpers (e.g., settings UI).
+    #[allow(dead_code)]
     pub fn catalog() -> impl Iterator<Item = Theme> {
         ThemeName::all().iter().copied().map(Theme::Upstream)
     }
