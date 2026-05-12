@@ -26,10 +26,10 @@ impl ConnectPickerScreen {
         }
     }
 
-    /// Public constructor used in tests (and after PR 6 by `internal:connect`'s
-    /// `on_event(ProviderRegistered)` handler) to inject the registered set.
-    // PR 6 wires HostEvent::ProviderRegistered → with_candidates. Suppress until then.
-    #[allow(dead_code)]
+    /// Public constructor used by `ConnectPlugin::create_screen` (and by
+    /// tests) to inject the registered-provider set into a freshly opened
+    /// picker. `ConnectPlugin` accumulates candidates via
+    /// [`Plugin::on_event`] on [`savvagent_plugin::HostEvent::ProviderRegistered`].
     pub fn with_candidates(candidates: Vec<(ProviderId, String)>) -> Self {
         Self {
             candidates,

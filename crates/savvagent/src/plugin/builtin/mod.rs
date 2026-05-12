@@ -44,3 +44,12 @@ pub mod provider_common;
 
 /// Anthropic provider shim: keyring-backed `internal:provider-anthropic`.
 pub mod provider_anthropic;
+
+/// OpenAI provider shim: keyring-backed `internal:provider-openai`.
+pub mod provider_openai;
+
+/// Google Gemini provider shim: keyring-backed `internal:provider-gemini`.
+pub mod provider_gemini;
+
+/// Local (Ollama) provider shim: keyless `internal:provider-local`.
+pub mod provider_local;

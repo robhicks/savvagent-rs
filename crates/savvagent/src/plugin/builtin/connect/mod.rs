@@ -5,8 +5,8 @@ pub mod screen;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, Screen, ScreenArgs,
-    ScreenLayout, ScreenSpec, SlashSpec,
+    Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
+    PluginKind, ProviderId, Screen, ScreenArgs, ScreenLayout, ScreenSpec, SlashSpec,
 };
 
 use screen::ConnectPickerScreen;
@@ -16,12 +16,26 @@ use screen::ConnectPickerScreen;
 /// With no args, pushes the `connect.picker` screen so the user can choose
 /// a provider interactively. With one arg, routes directly to the named
 /// provider's connect slash (e.g. `/connect anthropic`).
-pub struct ConnectPlugin;
+///
+/// The plugin keeps an in-memory list of provider candidates, refreshed
+/// whenever a [`HostEvent::ProviderRegistered`] arrives via [`Plugin::on_event`].
+pub struct ConnectPlugin {
+    /// (id, display_name) pairs collected from
+    /// [`HostEvent::ProviderRegistered`] hooks; passed to the picker screen
+    /// every time `/connect` opens it.
+    candidates: Vec<(ProviderId, String)>,
+}
 
 impl ConnectPlugin {
-    /// Construct a new `ConnectPlugin`.
+    /// Construct a new `ConnectPlugin` with no candidates yet.
     pub fn new() -> Self {
-        Self
+        Self { candidates: vec![] }
+    }
+
+    /// Test-only accessor for the candidate list.
+    #[cfg(test)]
+    pub fn candidates(&self) -> &[(ProviderId, String)] {
+        &self.candidates
     }
 }
 
@@ -48,6 +62,9 @@ impl Plugin for ConnectPlugin {
                 title: Some("Connect to a provider".into()),
             },
         }];
+        // Subscribe to ProviderRegistered so we can keep our candidate
+        // list current as provider plugins announce constructed clients.
+        contributions.hooks = vec![HookKind::ProviderRegistered];
 
         Manifest {
             id: PluginId::new("internal:connect").expect("valid built-in id"),
@@ -89,11 +106,25 @@ impl Plugin for ConnectPlugin {
         }
     }
 
+    async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
+        if let HostEvent::ProviderRegistered { id, display_name } = event {
+            // Deduplicate: if this id is already in the candidate list, just
+            // refresh the display name in place rather than appending a
+            // duplicate row.
+            if let Some(existing) = self.candidates.iter_mut().find(|(pid, _)| pid == &id) {
+                existing.1 = display_name;
+            } else {
+                self.candidates.push((id, display_name));
+            }
+        }
+        Ok(vec![])
+    }
+
     fn create_screen(&self, id: &str, args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
         match (id, args) {
-            ("connect.picker", ScreenArgs::ConnectPicker) => {
-                Ok(Box::new(ConnectPickerScreen::new()))
-            }
+            ("connect.picker", ScreenArgs::ConnectPicker) => Ok(Box::new(
+                ConnectPickerScreen::with_candidates(self.candidates.clone()),
+            )),
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
         }
     }
@@ -136,5 +167,56 @@ mod tests {
                 "unexpected effects for id={id}: {effs:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn on_event_provider_registered_appends_candidate() {
+        let mut p = ConnectPlugin::new();
+        let id = ProviderId::new("anthropic").unwrap();
+        let effs = p
+            .on_event(HostEvent::ProviderRegistered {
+                id: id.clone(),
+                display_name: "Anthropic".into(),
+            })
+            .await
+            .unwrap();
+        assert!(effs.is_empty(), "on_event must not emit effects yet");
+        assert_eq!(p.candidates().len(), 1);
+        assert_eq!(p.candidates()[0].0, id);
+        assert_eq!(p.candidates()[0].1, "Anthropic");
+    }
+
+    #[tokio::test]
+    async fn on_event_dedupes_repeated_registrations() {
+        let mut p = ConnectPlugin::new();
+        let id = ProviderId::new("anthropic").unwrap();
+        for label in ["Anthropic", "Anthropic (Claude)"] {
+            p.on_event(HostEvent::ProviderRegistered {
+                id: id.clone(),
+                display_name: label.into(),
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(p.candidates().len(), 1, "duplicate id must dedupe");
+        assert_eq!(p.candidates()[0].1, "Anthropic (Claude)");
+    }
+
+    #[tokio::test]
+    async fn on_event_ignores_other_events() {
+        let mut p = ConnectPlugin::new();
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        assert!(p.candidates().is_empty());
+    }
+
+    #[test]
+    fn manifest_subscribes_to_provider_registered() {
+        let p = ConnectPlugin::new();
+        let m = p.manifest();
+        assert!(
+            m.contributions
+                .hooks
+                .contains(&HookKind::ProviderRegistered)
+        );
     }
 }

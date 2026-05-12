@@ -49,8 +49,7 @@ pub use registry::BuiltinSet;
 /// PR 3 adds: splash, command-palette.
 /// PR 4 adds: view-file, edit-file.
 /// PR 5 adds: connect, resume, model, save, clear.
-/// PR 6 adds: themes + provider shims (task 6.2 ships anthropic; task 6.3
-/// follows with openai/gemini/local).
+/// PR 6 adds: themes + 4 providers (anthropic / openai / gemini / local).
 /// PR 8 adds: plugins-manager.
 ///
 /// Provider plugins are double-registered: once as `Box<dyn Plugin>` so
@@ -59,9 +58,12 @@ pub use registry::BuiltinSet;
 /// `apply_effects` can call `take_client()` after seeing
 /// [`savvagent_plugin::Effect::RegisterProvider`].
 pub fn register_builtins() -> BuiltinSet {
-    let providers: Vec<Box<dyn builtin::provider_common::BuiltinProviderPlugin>> = vec![Box::new(
-        builtin::provider_anthropic::ProviderAnthropicPlugin::new(),
-    )];
+    let providers: Vec<Box<dyn builtin::provider_common::BuiltinProviderPlugin>> = vec![
+        Box::new(builtin::provider_anthropic::ProviderAnthropicPlugin::new()),
+        Box::new(builtin::provider_openai::ProviderOpenAiPlugin::new()),
+        Box::new(builtin::provider_gemini::ProviderGeminiPlugin::new()),
+        Box::new(builtin::provider_local::ProviderLocalPlugin::new()),
+    ];
 
     let plugins: Vec<Box<dyn savvagent_plugin::Plugin>> = vec![
         Box::new(builtin::clear::ClearPlugin::new()),
@@ -80,6 +82,9 @@ pub fn register_builtins() -> BuiltinSet {
         // doc-comment above. The `providers` vec holds a separate set of
         // instances; each `Plugin`-side instance is independent state.
         Box::new(builtin::provider_anthropic::ProviderAnthropicPlugin::new()),
+        Box::new(builtin::provider_openai::ProviderOpenAiPlugin::new()),
+        Box::new(builtin::provider_gemini::ProviderGeminiPlugin::new()),
+        Box::new(builtin::provider_local::ProviderLocalPlugin::new()),
     ];
 
     BuiltinSet { plugins, providers }
@@ -110,9 +115,12 @@ mod tests {
         assert!(ids.contains(&"internal:splash".to_string()));
         assert!(ids.contains(&"internal:themes".to_string()));
         assert!(ids.contains(&"internal:view-file".to_string()));
-        // PR 6 task 6.2 ships the anthropic provider shim.
+        // PR 6 ships the 4 provider shims.
         assert!(ids.contains(&"internal:provider-anthropic".to_string()));
-        assert_eq!(set.plugins.len(), 13);
+        assert!(ids.contains(&"internal:provider-openai".to_string()));
+        assert!(ids.contains(&"internal:provider-gemini".to_string()));
+        assert!(ids.contains(&"internal:provider-local".to_string()));
+        assert_eq!(set.plugins.len(), 16);
 
         // Provider shims are also indexed in the parallel provider vec so
         // `apply_effects` can call `take_client` on them.
@@ -122,6 +130,9 @@ mod tests {
             .map(|p| p.manifest().id.as_str().to_string())
             .collect();
         assert!(provider_ids.contains(&"internal:provider-anthropic".to_string()));
-        assert_eq!(set.providers.len(), 1);
+        assert!(provider_ids.contains(&"internal:provider-openai".to_string()));
+        assert!(provider_ids.contains(&"internal:provider-gemini".to_string()));
+        assert!(provider_ids.contains(&"internal:provider-local".to_string()));
+        assert_eq!(set.providers.len(), 4);
     }
 }
