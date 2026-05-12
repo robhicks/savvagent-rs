@@ -3,6 +3,9 @@
 /// Filterable slash-command picker; opened via `/` from the home view.
 pub mod command_palette;
 
+/// Basic in-TUI file editor; opened via `/edit <path>`.
+pub mod edit_file;
+
 /// Footer widget: sandbox state + turn state + working dir + key reminder.
 pub mod home_footer;
 
@@ -11,3 +14,6 @@ pub mod home_tips;
 
 /// Startup HUD screen with connect status; responds to HostStarting + Connect.
 pub mod splash;
+
+/// Fullscreen read-only file viewer; opened via `/view <path>`.
+pub mod view_file;
