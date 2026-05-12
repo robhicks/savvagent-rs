@@ -20,10 +20,15 @@ pub struct ViewFileScreen {
 impl ViewFileScreen {
     /// Reads `path` from disk and constructs a ready-to-render screen.
     ///
-    /// Returns [`PluginError::InvalidArgs`] if the file cannot be read.
+    /// Returns [`PluginError::InvalidArgs`] if the file is not found, or
+    /// [`PluginError::Internal`] for other I/O failures.
     pub fn open(path: String) -> Result<Self, PluginError> {
-        let body = std::fs::read_to_string(&path)
-            .map_err(|e| PluginError::InvalidArgs(format!("{path}: {e}")))?;
+        let body = std::fs::read_to_string(&path).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                PluginError::InvalidArgs(format!("{path}: file not found"))
+            }
+            _ => PluginError::Internal(format!("read {path}: {e}")),
+        })?;
         let lines = body.lines().map(|l| l.to_string()).collect();
         Ok(Self {
             path,
