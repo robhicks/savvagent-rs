@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui_code_editor::editor::Editor;
 use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Theme};
-use savvagent_host::{SandboxConfig, ToolCallStatus, TranscriptFile, TurnEvent};
+use savvagent_host::{NetOverride, SandboxConfig, ToolCallStatus, TranscriptFile, TurnEvent};
 use serde_json::Value;
 use tui_textarea::TextArea;
 
@@ -106,14 +106,16 @@ pub struct Command {
     pub needs_arg: bool,
 }
 
-/// Parsed `/bash` slash-command suffix. The TUI uses this to thread an
-/// optional per-call network override down to
+/// Parsed `/bash` slash-command suffix. The TUI uses this to thread a
+/// per-call network override down to
 /// [`savvagent_host::Host::run_bash_command`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BashCommand {
-    /// Per-call override of `tool-bash`'s network access. `None` means
-    /// "use the resolved permission decision".
-    pub net_override: Option<bool>,
+    /// Per-call override of `tool-bash`'s network access. See
+    /// [`NetOverride`] for the 3-state semantics — [`NetOverride::Inherit`]
+    /// is the "no flag" case and defers to the resolved permission
+    /// decision.
+    pub net_override: NetOverride,
     /// The shell command itself, stripped of recognised flags.
     pub command: String,
 }
@@ -176,8 +178,8 @@ pub fn parse_bash_command(input: &str) -> Result<BashCommand, BashCommandError> 
             None => (trimmed, ""),
         };
         let net_override = match token {
-            "--net" => Some(true),
-            "--no-net" => Some(false),
+            "--net" => NetOverride::ForceAllow,
+            "--no-net" => NetOverride::ForceDeny,
             other => {
                 return Err(BashCommandError::UnknownFlag {
                     token: other.to_string(),
@@ -194,7 +196,7 @@ pub fn parse_bash_command(input: &str) -> Result<BashCommand, BashCommandError> 
     }
 
     Ok(BashCommand {
-        net_override: None,
+        net_override: NetOverride::Inherit,
         command: trimmed.to_string(),
     })
 }
@@ -1169,21 +1171,21 @@ mod tests {
     #[test]
     fn bash_command_parses_net_flag() {
         let p = parse_bash_command("--net curl https://example.com").unwrap();
-        assert_eq!(p.net_override, Some(true));
+        assert_eq!(p.net_override, NetOverride::ForceAllow);
         assert_eq!(p.command, "curl https://example.com");
     }
 
     #[test]
     fn bash_command_parses_no_net_flag() {
         let p = parse_bash_command("--no-net ls /tmp").unwrap();
-        assert_eq!(p.net_override, Some(false));
+        assert_eq!(p.net_override, NetOverride::ForceDeny);
         assert_eq!(p.command, "ls /tmp");
     }
 
     #[test]
     fn bash_command_without_flag_has_no_override() {
         let p = parse_bash_command("ls /tmp").unwrap();
-        assert_eq!(p.net_override, None);
+        assert_eq!(p.net_override, NetOverride::Inherit);
         assert_eq!(p.command, "ls /tmp");
     }
 
@@ -1191,7 +1193,7 @@ mod tests {
     fn bash_command_flag_only_recognised_at_start() {
         // A --net mid-command is part of the command body.
         let p = parse_bash_command("echo --net hi").unwrap();
-        assert_eq!(p.net_override, None);
+        assert_eq!(p.net_override, NetOverride::Inherit);
         assert_eq!(p.command, "echo --net hi");
     }
 
@@ -1210,7 +1212,7 @@ mod tests {
     #[test]
     fn bash_command_leading_whitespace_trimmed() {
         let p = parse_bash_command("   --net  echo hi").unwrap();
-        assert_eq!(p.net_override, Some(true));
+        assert_eq!(p.net_override, NetOverride::ForceAllow);
         assert_eq!(p.command, "echo hi");
     }
 
@@ -1259,7 +1261,7 @@ mod tests {
         let mut app = fresh_app();
         app.apply_turn_event(TurnEvent::BashNetworkRequested {
             id: 7,
-            summary: "tool-bash spawn requests network access".into(),
+            summary: savvagent_host::BASH_NETWORK_PROMPT_SUMMARY.into(),
         });
         match &app.input_mode {
             InputMode::BashNetworkPrompt { id, summary } => {
