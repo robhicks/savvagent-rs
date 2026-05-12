@@ -27,6 +27,12 @@ pub mod slash;
 #[allow(dead_code)]
 pub mod keybindings;
 
+/// LIFO stack of `(Box<dyn Screen>, ScreenLayout)` pairs driven by
+/// `Effect::OpenScreen` / `Effect::CloseScreen`; replaces the v0.8
+/// `InputMode` flat-field state machine.
+#[allow(dead_code)]
+pub mod screen_stack;
+
 /// Returns the set of built-in plugin instances.
 ///
 /// PR 2 adds: home-footer, home-tips.
