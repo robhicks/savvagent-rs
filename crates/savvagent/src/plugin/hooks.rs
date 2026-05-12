@@ -13,14 +13,24 @@
 //! subscriber cannot starve others of the event.
 //!
 //! Effect application happens **outside** this dispatcher. `emit` returns
-//! the accumulated effects so the caller (`effects::dispatch_host_event`
-//! for in-app dispatch, the TUI event loop for host-originated dispatch)
-//! can apply them through the shared
-//! [`crate::plugin::effects::apply_effects`] mutation surface — which is
-//! where re-entrancy depth tracking lives. Keeping apply out of the
+//! the accumulated effects grouped per-subscriber so the caller
+//! (`effects::dispatch_host_event` for in-app dispatch, the TUI event
+//! loop for host-originated dispatch) can apply each subscriber's batch
+//! independently through the shared
+//! [`crate::plugin::effects::apply_effects`] mutation surface and isolate
+//! failures: if subscriber A's effects fail to apply (e.g. an unknown
+//! screen id), subscriber B's effects still run. This preserves PR 6's
+//! per-subscriber error isolation contract — one buggy subscriber cannot
+//! starve others of the event, even at the apply layer.
+//!
+//! Apply also happens **after** the full fan-out: every subscriber's
+//! `on_event` sees the same pre-event app state, and apply runs in
+//! subscriber-registration order against the post-fan-out app once all
+//! subscribers have observed the event. Effect application is where
+//! re-entrancy depth tracking lives, so keeping apply out of the
 //! dispatcher avoids two competing depth counters.
 
-use savvagent_plugin::{Effect, HostEvent};
+use savvagent_plugin::{Effect, HostEvent, PluginId};
 
 use crate::plugin::manifests::Indexes;
 use crate::plugin::registry::PluginRegistry;
@@ -43,19 +53,21 @@ impl<'a> HookDispatcher<'a> {
         Self { indexes, registry }
     }
 
-    /// Fan `event` out to every subscribed plugin and accumulate their
-    /// returned effects.
+    /// Fan `event` out to every subscribed plugin and collect their
+    /// returned effects grouped per-subscriber.
     ///
     /// Subscribers are visited in registration order. A plugin whose
     /// `on_event` returns an error is logged via `tracing::warn` and
-    /// skipped; later subscribers still see the event. Effects returned
-    /// by each subscriber are appended in order — callers can apply the
-    /// full vector with [`crate::plugin::effects::apply_effects`] (or its
-    /// depth-tracking inner variant) when ready.
-    pub async fn emit(&self, event: HostEvent) -> Vec<Effect> {
+    /// skipped; later subscribers still see the event. Effects are
+    /// returned as `Vec<(PluginId, Vec<Effect>)>` so the caller can
+    /// apply each subscriber's batch independently and continue past an
+    /// individual subscriber whose effects fail to apply — preserving
+    /// per-subscriber error isolation across both the `on_event` call
+    /// and the effect-apply step.
+    pub async fn emit(&self, event: HostEvent) -> Vec<(PluginId, Vec<Effect>)> {
         let kind = event.kind();
         let subs = self.indexes.hooks.get(&kind).cloned().unwrap_or_default();
-        let mut out = Vec::new();
+        let mut out: Vec<(PluginId, Vec<Effect>)> = Vec::new();
         for pid in subs {
             let Some(handle) = self.registry.get(&pid) else {
                 tracing::warn!(
@@ -67,7 +79,7 @@ impl<'a> HookDispatcher<'a> {
             };
             let mut plugin = handle.lock().await;
             match plugin.on_event(event.clone()).await {
-                Ok(effects) => out.extend(effects),
+                Ok(effects) => out.push((pid, effects)),
                 Err(e) => {
                     tracing::warn!(
                         plugin_id = %pid.as_str(),
@@ -164,18 +176,22 @@ mod tests {
         ]);
         let idx = Indexes::build(&reg).await.expect("indexes build");
         let d = HookDispatcher::new(&idx, &reg);
-        let effs = d.emit(HostEvent::HostStarting).await;
+        let batches = d.emit(HostEvent::HostStarting).await;
+        // Two subscribers → two batches, each with exactly one effect.
         assert_eq!(
-            effs.len(),
+            batches.len(),
             2,
-            "expected one effect from each subscriber; got: {effs:?}"
+            "expected one batch per subscriber; got: {batches:?}"
         );
+        for (_pid, effs) in &batches {
+            assert_eq!(effs.len(), 1, "each subscriber contributes one effect");
+        }
     }
 
     #[tokio::test]
     async fn dispatch_skips_subscriber_that_errors() {
         // Errors must not abort fan-out — the second subscriber still gets
-        // its effect into the output Vec.
+        // its batch into the output Vec.
         let reg = PluginRegistry::from_plugins(vec![
             Box::new(ErrorOnEvent {
                 id: "internal:test-bad".into(),
@@ -187,11 +203,16 @@ mod tests {
         ]);
         let idx = Indexes::build(&reg).await.expect("indexes build");
         let d = HookDispatcher::new(&idx, &reg);
-        let effs = d.emit(HostEvent::HostStarting).await;
+        let batches = d.emit(HostEvent::HostStarting).await;
         assert_eq!(
-            effs.len(),
+            batches.len(),
             1,
             "good subscriber must still contribute despite earlier error"
+        );
+        assert_eq!(
+            batches[0].0.as_str(),
+            "internal:test-good",
+            "good subscriber's batch travels through"
         );
     }
 
@@ -200,7 +221,7 @@ mod tests {
         let reg = PluginRegistry::from_plugins(vec![]);
         let idx = Indexes::build(&reg).await.expect("indexes build");
         let d = HookDispatcher::new(&idx, &reg);
-        let effs = d.emit(HostEvent::HostStarting).await;
-        assert!(effs.is_empty());
+        let batches = d.emit(HostEvent::HostStarting).await;
+        assert!(batches.is_empty());
     }
 }

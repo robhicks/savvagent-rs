@@ -1061,6 +1061,48 @@ async fn perform_connect(
         app.refresh_splash_sandbox_from_host(host.sandbox_config());
     }
     app.push_note(format!("Connected to {}.", spec.display_name));
+
+    // Notify hook subscribers about the new provider + active
+    // connection. The `/connect <provider>` slash path emits
+    // `ProviderRegistered` + `Connect` via `Effect::RegisterProvider`,
+    // but this legacy in-TUI provider-picker flow registers the host
+    // directly without going through that effect — so without these
+    // dispatches the splash HUD never flips to "Connected" and
+    // anything else subscribed to `Connect` (telemetry, status
+    // indicators, future auto-prompt rewriters) is silently skipped
+    // for users on the picker path. Errors are warn-only so a buggy
+    // subscriber can't tank the connect.
+    match savvagent_plugin::ProviderId::new(spec.id) {
+        Ok(provider_id) => {
+            if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                app,
+                savvagent_plugin::HostEvent::ProviderRegistered {
+                    id: provider_id.clone(),
+                    display_name: spec.display_name.to_string(),
+                },
+                0,
+            )
+            .await
+            {
+                tracing::warn!(error = %err,
+                    "ProviderRegistered dispatch from perform_connect failed");
+            }
+            if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                app,
+                savvagent_plugin::HostEvent::Connect { provider_id },
+                0,
+            )
+            .await
+            {
+                tracing::warn!(error = %err,
+                    "Connect dispatch from perform_connect failed");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, provider_id = spec.id,
+                "perform_connect: invalid provider id; skipping HostEvent dispatch");
+        }
+    }
 }
 
 /// Translate a streaming [`TurnEvent`] from the host into the corresponding
@@ -1101,13 +1143,31 @@ fn translate_turn_event_to_host_event(
             })
         }
         TurnEvent::ToolCallFinished { status, .. } => {
-            let call_id = last_tool_call_id.take().unwrap_or(0).to_string();
+            // If we never saw a matching `ToolCallStarted`, this is a
+            // synthetic `ToolCallFinished` synthesized by the `/bash`
+            // direct-invocation path (`handle_bash_slash_command` skips
+            // emitting `ToolCallStarted` because the host doesn't go
+            // through `run_turn_streaming` there). Don't fabricate a
+            // `call_id: "0"` orphan HostEvent — warn-log and skip
+            // emission entirely.
+            let Some(call_id) = last_tool_call_id.take() else {
+                tracing::warn!(
+                    "ToolCallFinished with no matching ToolCallStarted — skipping HostEvent \
+                     emission (likely a /bash direct invocation)"
+                );
+                return None;
+            };
             Some(savvagent_plugin::HostEvent::ToolCallEnd {
-                call_id,
+                call_id: call_id.to_string(),
                 success: matches!(status, ToolCallStatus::Ok),
             })
         }
         TurnEvent::TurnComplete { .. } => {
+            // Clear stale per-turn tool-call state so a future
+            // `ToolCallFinished` without a matching `ToolCallStarted`
+            // (e.g. via `/bash`) can't pick up a leaked id from the
+            // previous turn.
+            *last_tool_call_id = None;
             let turn_id = current_turn_id.take().unwrap_or(0);
             Some(savvagent_plugin::HostEvent::TurnEnd {
                 turn_id,
@@ -1172,14 +1232,15 @@ async fn run_app(
             match msg {
                 WorkerMsg::Event(e) => {
                     let was_complete = matches!(e, TurnEvent::TurnComplete { .. });
-                    // Translate the streaming TurnEvent into the
-                    // corresponding HostEvent before mutating App state, so
-                    // a hook handler that re-enters App via `apply_effects`
-                    // sees the pre-event view. (Mirrors how PR 6's
-                    // RegisterProvider effect emits ProviderRegistered
-                    // *after* the registry mutation — there, the post-event
-                    // view is what subscribers want. Here, hooks like
-                    // TurnEnd want the pre-flush text buffer.)
+                    // Translate the streaming TurnEvent before
+                    // `apply_turn_event` (which consumes `e` by value)
+                    // so the translator and the App mutation each get
+                    // their own borrow. The hook fires AFTER
+                    // `apply_turn_event` + `update_metrics`, so
+                    // subscribers observe the post-mutation App view —
+                    // which is what telemetry/render/transcript
+                    // subscribers actually want (they need the latest
+                    // text buffer, metrics, and entry list).
                     let host_event = translate_turn_event_to_host_event(
                         &e,
                         &mut next_turn_id,
@@ -1227,20 +1288,46 @@ async fn run_app(
                     // A runner error terminates the turn without a
                     // TurnComplete; emit TurnEnd { success: false } so
                     // subscribers see symmetry with successful turns.
-                    if let Some(turn_id) = current_turn_id.take() {
-                        if let Err(err) = crate::plugin::effects::dispatch_host_event(
-                            app,
-                            savvagent_plugin::HostEvent::TurnEnd {
-                                turn_id,
-                                success: false,
-                            },
-                            0,
-                        )
-                        .await
-                        {
-                            tracing::warn!(error = %err,
-                                "TurnEnd(failure) dispatch failed");
+                    // If the provider errored before producing
+                    // `IterationStarted { iteration: 1 }` (auth fail,
+                    // network glitch on first request), `current_turn_id`
+                    // is None — synthesize a TurnStart first so
+                    // subscribers see a complete `PromptSubmitted ->
+                    // TurnStart -> TurnEnd` shape instead of a missing
+                    // turn frame for those error modes.
+                    let turn_id = match current_turn_id.take() {
+                        Some(id) => id,
+                        None => {
+                            next_turn_id = next_turn_id.saturating_add(1);
+                            let synthetic = next_turn_id;
+                            if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                                app,
+                                savvagent_plugin::HostEvent::TurnStart { turn_id: synthetic },
+                                0,
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %err,
+                                    "synthetic TurnStart dispatch failed");
+                            }
+                            synthetic
                         }
+                    };
+                    // Clear any stale per-turn tool-call state so the
+                    // next turn starts clean.
+                    last_tool_call_id = None;
+                    if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                        app,
+                        savvagent_plugin::HostEvent::TurnEnd {
+                            turn_id,
+                            success: false,
+                        },
+                        0,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %err,
+                            "TurnEnd(failure) dispatch failed");
                     }
                 }
                 WorkerMsg::BashDone => {
@@ -1251,6 +1338,28 @@ async fn run_app(
         }
 
         if app.should_quit {
+            // If the user requested quit mid-turn, subscribers would
+            // otherwise see a TurnStart with no matching TurnEnd. Emit
+            // TurnEnd { success: false } so the turn frame closes
+            // cleanly. (We dispatch before the host-slot drain so
+            // subscribers still have App state to react to. We don't
+            // bother resetting `last_tool_call_id` here — we're
+            // returning from `run_app` and the variable goes out of
+            // scope.)
+            if let Some(turn_id) = current_turn_id.take() {
+                if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                    app,
+                    savvagent_plugin::HostEvent::TurnEnd {
+                        turn_id,
+                        success: false,
+                    },
+                    0,
+                )
+                .await
+                {
+                    tracing::warn!(error = %err, "TurnEnd(quit) dispatch failed");
+                }
+            }
             drain_pending_bash_net(app, &host_slot).await;
             return Ok(());
         }
@@ -1268,6 +1377,25 @@ async fn run_app(
             continue;
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Ctrl-C mid-turn: emit TurnEnd { success: false } so
+            // subscribers see a complete turn frame instead of a
+            // dangling TurnStart. (No need to reset
+            // `last_tool_call_id` — we're about to return from
+            // `run_app`.)
+            if let Some(turn_id) = current_turn_id.take() {
+                if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                    app,
+                    savvagent_plugin::HostEvent::TurnEnd {
+                        turn_id,
+                        success: false,
+                    },
+                    0,
+                )
+                .await
+                {
+                    tracing::warn!(error = %err, "TurnEnd(ctrl-c) dispatch failed");
+                }
+            }
             drain_pending_bash_net(app, &host_slot).await;
             return Ok(());
         }
@@ -1291,6 +1419,24 @@ async fn run_app(
             if portable.modifiers.ctrl
                 && matches!(portable.code, savvagent_plugin::KeyCodePortable::Char('d'))
             {
+                // Ctrl-D on a screen-stacked view is a quit: same
+                // symmetric-TurnEnd treatment as the top-level Ctrl-C
+                // path above. (No need to reset `last_tool_call_id`
+                // — we're about to return from `run_app`.)
+                if let Some(turn_id) = current_turn_id.take() {
+                    if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                        app,
+                        savvagent_plugin::HostEvent::TurnEnd {
+                            turn_id,
+                            success: false,
+                        },
+                        0,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %err, "TurnEnd(ctrl-d) dispatch failed");
+                    }
+                }
                 drain_pending_bash_net(app, &host_slot).await;
                 return Ok(());
             }
