@@ -115,8 +115,7 @@ mod tests {
         }
 
         async fn on_event(&mut self, _: HostEvent) -> Result<Vec<Effect>, PluginError> {
-            self.count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(vec![Effect::PushNote {
                 line: StyledLine::plain(self.id.clone()),
             }])

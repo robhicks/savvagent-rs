@@ -471,4 +471,138 @@ mod tests {
             app.registered_providers.keys().collect::<Vec<_>>()
         );
     }
+
+    /// PR 7 wired `Effect::RegisterProvider` to emit BOTH
+    /// `HostEvent::ProviderRegistered` (so `internal:connect` refreshes
+    /// its candidate list) AND `HostEvent::Connect` (so `internal:splash`
+    /// flips its HUD). This test pins that dual emission by installing a
+    /// counter plugin subscribed to each `HookKind` and asserting both
+    /// fired exactly once after one `RegisterProvider`.
+    #[tokio::test]
+    async fn register_provider_apply_effects_emits_both_provider_registered_and_connect() {
+        use crate::plugin::builtin::provider_anthropic::ProviderAnthropicPlugin;
+        use crate::plugin::builtin::provider_common::ProviderEntry;
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_mcp::ProviderClient;
+        use savvagent_plugin::{
+            Contributions, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
+            PluginKind, ProviderId,
+        };
+        use savvagent_protocol::{
+            CompleteRequest, CompleteResponse, ListModelsResponse, ProviderError, StreamEvent,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use tokio::sync::mpsc;
+
+        // Same stub client shape as the previous end-to-end test.
+        struct StubClient;
+        #[async_trait]
+        impl ProviderClient for StubClient {
+            async fn complete(
+                &self,
+                _: CompleteRequest,
+                _: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                unreachable!("stub client never invoked in this test")
+            }
+            async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+                unreachable!("stub client never invoked in this test")
+            }
+        }
+
+        // Test plugin: subscribes to ProviderRegistered + Connect and
+        // increments a shared counter whenever each variant arrives, so
+        // the test can assert the dual emission without rooting around
+        // in splash internals.
+        struct DualCounter {
+            id: String,
+            registered_calls: Arc<AtomicU32>,
+            connect_calls: Arc<AtomicU32>,
+        }
+
+        #[async_trait]
+        impl Plugin for DualCounter {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.hooks = vec![HookKind::ProviderRegistered, HookKind::Connect];
+                Manifest {
+                    id: PluginId::new(&self.id).expect("valid id"),
+                    name: self.id.clone(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+
+            async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
+                match event {
+                    HostEvent::ProviderRegistered { .. } => {
+                        self.registered_calls.fetch_add(1, Ordering::SeqCst);
+                    }
+                    HostEvent::Connect { .. } => {
+                        self.connect_calls.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+                Ok(vec![])
+            }
+        }
+
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+
+        let registered_calls = Arc::new(AtomicU32::new(0));
+        let connect_calls = Arc::new(AtomicU32::new(0));
+
+        let counter = DualCounter {
+            id: "internal:test-dual-counter".into(),
+            registered_calls: registered_calls.clone(),
+            connect_calls: connect_calls.clone(),
+        };
+
+        // Pair the counter with the anthropic provider plugin so
+        // RegisterProvider has a valid take_provider_client target.
+        let provider_entry = ProviderEntry::new(ProviderAnthropicPlugin::with_test_client(
+            Box::new(StubClient),
+        ));
+        let set = BuiltinSet {
+            plugins: vec![Box::new(counter)],
+            providers: vec![provider_entry],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        // Drive a single RegisterProvider effect — the same shape
+        // ConnectPlugin emits after handle_slash succeeds.
+        let effects = vec![Effect::RegisterProvider {
+            id: ProviderId::new("anthropic").expect("valid id"),
+            display_name: "Anthropic".into(),
+        }];
+        apply_effects(&mut app, effects)
+            .await
+            .expect("RegisterProvider must succeed");
+
+        assert_eq!(
+            registered_calls.load(Ordering::SeqCst),
+            1,
+            "ProviderRegistered should fire exactly once"
+        );
+        assert_eq!(
+            connect_calls.load(Ordering::SeqCst),
+            1,
+            "Connect should fire exactly once after RegisterProvider"
+        );
+        assert!(
+            app.registered_providers.contains_key("anthropic"),
+            "provider client travels into App as part of the same chain"
+        );
+    }
 }
