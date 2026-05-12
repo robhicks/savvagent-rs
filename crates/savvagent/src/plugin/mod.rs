@@ -1,6 +1,10 @@
 //! Plugin runtime root. PR 1 ships only the empty `register_builtins()`
 //! entry point; subsequent PRs add registry/screen stack/routers/effects.
 
+/// In-memory registry of constructed plugin instances and their enabled-set.
+#[allow(dead_code)] // wired into the event loop in Task 2.8
+pub mod registry;
+
 /// Returns the set of built-in plugin instances. Empty in PR 1.
 ///
 /// PR 2 adds: home-footer, home-tips.
