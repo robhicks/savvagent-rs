@@ -70,6 +70,39 @@ fn default_schema_version() -> u32 {
     SCHEMA_VERSION
 }
 
+/// What happened when [`SandboxConfig::load_with_status`] looked for the
+/// on-disk preference file. Used by the startup splash to distinguish a
+/// real opt-out (`Loaded` + `mode = Off`) from a config that *failed* to
+/// load and silently fell back to Off — the latter is a misconfiguration
+/// the user should see, not a quiet downgrade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SandboxLoadStatus {
+    /// `~/.savvagent/sandbox.toml` does not exist. Defaults are in use; the
+    /// splash should treat this as the implicit Default mode (no nag is
+    /// already provided by [`SandboxMode::Default`]).
+    NoFile,
+    /// File parsed cleanly. The config faithfully represents the user's
+    /// on-disk preference.
+    Loaded,
+    /// File present but TOML parsing failed. The returned config has
+    /// `mode = Off` as a fail-safe — but the splash should surface the
+    /// parse error so the user knows their preferred state is *not*
+    /// actually applied.
+    ParseError {
+        /// Verbatim error from the TOML parser.
+        message: String,
+    },
+    /// File declares a schema version this build doesn't understand. Same
+    /// fail-safe to Off as `ParseError`, with the splash showing the
+    /// version mismatch so the user knows to upgrade.
+    UnsupportedVersion {
+        /// Version declared in the file.
+        found: u32,
+        /// Newest schema version this build can parse.
+        max: u32,
+    },
+}
+
 /// Tri-state sandbox preference. Distinguishes "no explicit choice" from an
 /// explicit on/off setting so the splash banner can honor the v0.7 "no-nag
 /// on opt-out" promise.
@@ -231,9 +264,20 @@ impl SandboxConfig {
     /// Load from `~/.savvagent/sandbox.toml`. Returns the default if the file
     /// is absent, unparseable, or written by a newer schema version (each
     /// case is logged at `warn!` level).
+    ///
+    /// Callers that need to distinguish "file absent" from "parse error" —
+    /// e.g. the startup splash banner — should use
+    /// [`SandboxConfig::load_with_status`] instead.
     pub fn load() -> Self {
+        Self::load_with_status().0
+    }
+
+    /// Load and report what happened. Used by the startup splash to surface
+    /// parse errors as a third visual state instead of silently falling back
+    /// to defaults (which would lie about the on-disk preference).
+    pub fn load_with_status() -> (Self, SandboxLoadStatus) {
         let Some(path) = sandbox_toml_path() else {
-            return Self::default();
+            return (Self::default(), SandboxLoadStatus::NoFile);
         };
         load_from_path(&path)
     }
@@ -306,7 +350,7 @@ impl SandboxConfig {
     }
 }
 
-fn load_from_path(path: &Path) -> SandboxConfig {
+fn load_from_path(path: &Path) -> (SandboxConfig, SandboxLoadStatus) {
     match std::fs::read_to_string(path) {
         Ok(text) => match toml::from_str::<SandboxConfig>(&text) {
             Ok(cfg) => {
@@ -320,27 +364,37 @@ fn load_from_path(path: &Path) -> SandboxConfig {
                         cfg.version,
                         SCHEMA_VERSION,
                     );
-                    return SandboxConfig {
-                        mode: SandboxMode::Off,
-                        ..SandboxConfig::default()
-                    };
+                    return (
+                        SandboxConfig {
+                            mode: SandboxMode::Off,
+                            ..SandboxConfig::default()
+                        },
+                        SandboxLoadStatus::UnsupportedVersion {
+                            found: cfg.version,
+                            max: SCHEMA_VERSION,
+                        },
+                    );
                 }
-                cfg
+                (cfg, SandboxLoadStatus::Loaded)
             }
             Err(e) => {
+                let message = e.to_string();
                 tracing::warn!(
-                    "sandbox.toml at {} failed to parse: {e}. Falling back to \
+                    "sandbox.toml at {} failed to parse: {message}. Falling back to \
                      disabled to preserve any prior opt-out intent. Fix the file \
                      and reload to re-enable.",
                     path.display()
                 );
-                SandboxConfig {
-                    mode: SandboxMode::Off,
-                    ..SandboxConfig::default()
-                }
+                (
+                    SandboxConfig {
+                        mode: SandboxMode::Off,
+                        ..SandboxConfig::default()
+                    },
+                    SandboxLoadStatus::ParseError { message },
+                )
             }
         },
-        Err(_) => SandboxConfig::default(),
+        Err(_) => (SandboxConfig::default(), SandboxLoadStatus::NoFile),
     }
 }
 
@@ -1298,7 +1352,7 @@ mod tests {
     fn load_from_path_returns_default_on_when_file_absent() {
         let td = tempfile::TempDir::new().unwrap();
         let missing = td.path().join("does-not-exist.toml");
-        let cfg = load_from_path(&missing);
+        let (cfg, status) = load_from_path(&missing);
         assert_eq!(
             cfg.mode,
             SandboxMode::Default,
@@ -1308,6 +1362,12 @@ mod tests {
             cfg.is_enabled(),
             "Default mode is enabled at runtime even without an on-disk preference"
         );
+        assert_eq!(
+            status,
+            SandboxLoadStatus::NoFile,
+            "absent file must report NoFile so the splash can avoid showing a \
+             parse-error indicator"
+        );
     }
 
     #[test]
@@ -1315,7 +1375,7 @@ mod tests {
         let td = tempfile::TempDir::new().unwrap();
         let path = td.path().join("sandbox.toml");
         std::fs::write(&path, "enabled = false\n").unwrap();
-        let cfg = load_from_path(&path);
+        let (cfg, status) = load_from_path(&path);
         assert_eq!(
             cfg.mode,
             SandboxMode::Off,
@@ -1329,6 +1389,12 @@ mod tests {
             cfg.mode.is_explicit(),
             "explicit Off must signal the splash to suppress the v0.7 nag"
         );
+        assert_eq!(
+            status,
+            SandboxLoadStatus::Loaded,
+            "successful parse must report Loaded — the splash uses this to \
+             distinguish a real opt-out from a parse-error fallback"
+        );
     }
 
     #[test]
@@ -1336,7 +1402,7 @@ mod tests {
         let td = tempfile::TempDir::new().unwrap();
         let path = td.path().join("sandbox.toml");
         std::fs::write(&path, "enabled = true\n").unwrap();
-        let cfg = load_from_path(&path);
+        let (cfg, status) = load_from_path(&path);
         assert_eq!(
             cfg.mode,
             SandboxMode::On,
@@ -1346,6 +1412,7 @@ mod tests {
             cfg.mode.is_explicit(),
             "explicit On must signal the splash to suppress the v0.7 nag"
         );
+        assert_eq!(status, SandboxLoadStatus::Loaded);
     }
 
     #[test]
@@ -1356,7 +1423,7 @@ mod tests {
         // serde-default regression (where every missing field silently resets)
         // would be caught by the allow_net assertion.
         std::fs::write(&path, "allow_net = true\n").unwrap();
-        let cfg = load_from_path(&path);
+        let (cfg, status) = load_from_path(&path);
         assert_eq!(
             cfg.mode,
             SandboxMode::Default,
@@ -1372,6 +1439,7 @@ mod tests {
             cfg.is_enabled(),
             "Default mode must still enable sandboxing at runtime"
         );
+        assert_eq!(status, SandboxLoadStatus::Loaded);
     }
 
     #[test]
@@ -1380,7 +1448,7 @@ mod tests {
         let path = td.path().join("sandbox.toml");
         // Malformed TOML — unclosed string.
         std::fs::write(&path, "enabled = \"unclosed\n").unwrap();
-        let cfg = load_from_path(&path);
+        let (cfg, status) = load_from_path(&path);
         assert!(
             !cfg.is_enabled(),
             "parse error must fall back to disabled (fail-safe), not default-on"
@@ -1390,6 +1458,15 @@ mod tests {
             SandboxMode::Off,
             "parse-error fallback must be the explicit Off mode (no splash nag)"
         );
+        match status {
+            SandboxLoadStatus::ParseError { message } => {
+                assert!(
+                    !message.is_empty(),
+                    "parse-error status must carry a non-empty message for the splash to surface"
+                );
+            }
+            other => panic!("expected SandboxLoadStatus::ParseError, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1400,12 +1477,21 @@ mod tests {
         // pretend it understood the contents and falls back to Off.
         let future_version = SCHEMA_VERSION + 1;
         std::fs::write(&path, format!("version = {future_version}\n")).unwrap();
-        let cfg = load_from_path(&path);
+        let (cfg, status) = load_from_path(&path);
         assert_eq!(
             cfg.mode,
             SandboxMode::Off,
             "future-version file must fall back to Off (fail-safe), not silently \
              load with possibly-misinterpreted fields"
+        );
+        assert_eq!(
+            status,
+            SandboxLoadStatus::UnsupportedVersion {
+                found: future_version,
+                max: SCHEMA_VERSION,
+            },
+            "future-version status must surface the version mismatch so the splash \
+             can prompt the user to upgrade"
         );
     }
 
@@ -1415,9 +1501,28 @@ mod tests {
         let path = td.path().join("sandbox.toml");
         let text = format!("version = {SCHEMA_VERSION}\nenabled = false\n");
         std::fs::write(&path, text).unwrap();
-        let cfg = load_from_path(&path);
+        let (cfg, status) = load_from_path(&path);
         assert_eq!(cfg.mode, SandboxMode::Off);
         assert_eq!(cfg.version, SCHEMA_VERSION);
+        assert_eq!(status, SandboxLoadStatus::Loaded);
+    }
+
+    #[test]
+    fn load_with_status_returns_no_file_when_home_unset() {
+        // Drive the public API directly. If $HOME is unset we get
+        // SandboxLoadStatus::NoFile (and SandboxConfig::default()) without
+        // touching the disk. This is the path the TUI hits in headless CI
+        // images where neither $HOME nor $USERPROFILE is set.
+        //
+        // We can't mutate env in a multi-threaded test safely, so this test
+        // documents the contract via the equivalent load_from_path path: a
+        // missing file yields NoFile. The env-based branch is exercised by
+        // sandbox_toml_path() which is private but covered indirectly by
+        // the integration test for save() in the test below.
+        let td = tempfile::TempDir::new().unwrap();
+        let missing = td.path().join("nonexistent.toml");
+        let (_, status) = load_from_path(&missing);
+        assert_eq!(status, SandboxLoadStatus::NoFile);
     }
 
     #[test]

@@ -33,7 +33,8 @@ pub use permissions::{
     PermissionPolicy, PermissionsToml, Rule, SerializableRule, Verdict,
 };
 pub use sandbox::{
-    SCHEMA_VERSION, SandboxConfig, SandboxMode, SandboxWrapper, ToolSandboxOverride, apply_sandbox,
+    SCHEMA_VERSION, SandboxConfig, SandboxLoadStatus, SandboxMode, SandboxWrapper,
+    ToolSandboxOverride, apply_sandbox,
 };
 pub use savvagent_protocol::{ListModelsResponse, ModelInfo, ToolDef};
 pub use session::{

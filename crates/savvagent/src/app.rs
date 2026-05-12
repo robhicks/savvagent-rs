@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
 use ratatui_code_editor::editor::Editor;
 use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Theme};
-use savvagent_host::{ToolCallStatus, TranscriptFile, TurnEvent};
+use savvagent_host::{SandboxConfig, ToolCallStatus, TranscriptFile, TurnEvent};
 use serde_json::Value;
 use tui_textarea::TextArea;
 
@@ -278,6 +278,14 @@ pub struct App {
     /// `~/.savvagent/theme.toml` at startup, mutated by `/theme <name>`,
     /// and persisted on every successful set.
     pub active_theme: crate::theme::Theme,
+
+    /// Cached classification of the sandbox state for the startup splash.
+    /// Loaded once at `App::new` via `SandboxConfig::load_with_status` so
+    /// the splash render path doesn't re-read disk on every frame; refreshed
+    /// from `host.sandbox_config()` once a host materializes so the banner
+    /// matches what the host will actually apply, not whatever was on disk
+    /// at TUI launch time.
+    pub splash_sandbox: crate::splash::SandboxSplashState,
 }
 
 impl App {
@@ -337,9 +345,23 @@ impl App {
             transcript_index: 0,
             resumed_at: None,
             active_theme: crate::theme::load(),
+            splash_sandbox: {
+                let (cfg, status) = SandboxConfig::load_with_status();
+                crate::splash::SandboxSplashState::from_load(&cfg, &status)
+            },
         };
         app.refresh_commands();
         app
+    }
+
+    /// Refresh the splash sandbox indicator from a connected host. Called
+    /// at startup if the TUI launched with a saved-credentials host already
+    /// running, and from the `/connect` success path. Once a host is up,
+    /// its [`SandboxConfig`] is the source of truth for what will actually
+    /// be applied to tool spawns — anything the on-disk file said after
+    /// that point would be a lie.
+    pub fn refresh_splash_sandbox_from_host(&mut self, host_cfg: &SandboxConfig) {
+        self.splash_sandbox = crate::splash::SandboxSplashState::from_host_config(host_cfg);
     }
 
     /// Apply one streaming event from the host into the conversation log.

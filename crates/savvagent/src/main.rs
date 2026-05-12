@@ -126,6 +126,13 @@ async fn main() -> Result<()> {
     let mut app = App::new(header_model, transcript_dir);
     app.connected = host_slot.read().await.is_some();
     app.active_provider_id = initial_provider;
+    // If we already have a host (e.g. saved-credentials bootstrap), align
+    // the splash sandbox indicator with what the host will actually apply.
+    // Otherwise it would briefly show the on-disk preference even when the
+    // active host was built with a different SandboxConfig override.
+    if let Some(host) = current_host(&host_slot).await {
+        app.refresh_splash_sandbox_from_host(host.sandbox_config());
+    }
     if !app.connected {
         app.push_note(
             "Not connected. Type / (or press Ctrl-P) and pick /connect to set up a provider.",
@@ -1048,6 +1055,13 @@ async fn perform_connect(
     app.connected = true;
     app.active_provider_id = Some(spec.id);
     app.model = std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| spec.default_model.to_string());
+    // Align the splash sandbox indicator with the now-active host's config.
+    // If the user lands on `/connect` within the 3s splash window, this
+    // refresh makes the banner reflect what tools will actually be wrapped
+    // with rather than the on-disk file read at TUI launch.
+    if let Some(host) = current_host(host_slot).await {
+        app.refresh_splash_sandbox_from_host(host.sandbox_config());
+    }
     app.push_note(format!("Connected to {}.", spec.display_name));
 }
 
