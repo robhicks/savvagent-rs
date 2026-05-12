@@ -25,9 +25,9 @@ mod creds;
 mod palette;
 mod providers;
 mod splash;
-mod theme;
 #[cfg(test)]
 mod test_helpers;
+mod theme;
 mod tui;
 mod ui;
 
@@ -847,9 +847,7 @@ fn handle_theme_command(app: &mut App, args: &str) {
     let trimmed = args.trim();
     if trimmed.is_empty() || trimmed == "list" {
         if app.is_loading {
-            app.push_note(
-                "Cannot /theme during an in-flight turn — wait for it to finish.",
-            );
+            app.push_note("Cannot /theme during an in-flight turn — wait for it to finish.");
             return;
         }
         app.open_theme_picker();
