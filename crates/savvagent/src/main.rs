@@ -129,9 +129,25 @@ async fn main() -> Result<()> {
     {
         use crate::plugin::manifests::Indexes;
         use crate::plugin::registry::PluginRegistry;
+        use savvagent_plugin::PluginKind;
 
         let set = plugin::register_builtins();
-        let registry = PluginRegistry::new(set);
+        let mut registry = PluginRegistry::new(set);
+
+        // Apply persisted Optional-plugin enabled state from
+        // ~/.savvagent/plugins.toml so the initial Indexes::build picks
+        // up the user's saved choices. Core plugins are always enabled
+        // regardless of what the file says; unknown ids are skipped.
+        let persisted = plugin::builtin::plugins_manager::persistence::load();
+        for (pid, enabled) in persisted {
+            if let Some(plugin) = registry.get(&pid) {
+                let kind = plugin.lock().await.manifest().kind;
+                if matches!(kind, PluginKind::Optional) {
+                    registry.set_enabled(&pid, enabled);
+                }
+            }
+        }
+
         let indexes = Indexes::build(&registry)
             .await
             .unwrap_or_else(|e| panic!("plugin manifest conflict at startup: {e}"));

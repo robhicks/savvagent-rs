@@ -84,6 +84,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
         Box::new(builtin::model::ModelPlugin::new()),
+        Box::new(builtin::plugins_manager::PluginsManagerPlugin::new()),
         Box::new(builtin::resume::ResumePlugin::new()),
         Box::new(builtin::save::SavePlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
@@ -101,9 +102,9 @@ mod tests {
     use savvagent_plugin::PluginId;
 
     #[tokio::test]
-    async fn register_builtins_pr6_complete() {
+    async fn register_builtins_pr8_complete() {
         let set = register_builtins();
-        // Non-provider plugins from PR 1..PR 5 + themes.
+        // Non-provider plugins from PR 1..PR 5 + themes (PR 6) + plugins-manager (PR 8).
         let plugin_ids: Vec<_> = set
             .plugins
             .iter()
@@ -117,6 +118,7 @@ mod tests {
             "internal:home-footer",
             "internal:home-tips",
             "internal:model",
+            "internal:plugins-manager",
             "internal:resume",
             "internal:save",
             "internal:splash",
@@ -128,7 +130,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 12);
+        assert_eq!(set.plugins.len(), 13);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -155,15 +157,14 @@ mod tests {
         // Registry shape: the post-fix invariant is that the registry's
         // plugins HashMap has one entry per non-provider plugin PLUS one
         // entry per provider plugin (same underlying Arc as the providers
-        // map). That's 12 + 4 = 16 unique ids in `plugins` and 4 in
-        // `providers`. The dual-instance bug would have produced either
-        // a HashMap collision (silent overwrite) or 20 entries — neither
-        // matches the assertion below.
+        // map). PR 8 adds one non-provider plugin (`internal:plugins-manager`),
+        // bringing the total to 13 + 4 = 17 unique ids in `plugins` and 4
+        // in `providers`.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            16,
-            "registry should have 12 non-provider + 4 provider plugins"
+            17,
+            "registry should have 13 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),

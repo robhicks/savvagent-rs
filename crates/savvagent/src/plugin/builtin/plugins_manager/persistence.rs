@@ -39,22 +39,26 @@ pub struct PluginEntry {
 /// shape changes — additive fields stay at this value.
 const SCHEMA_VERSION: u32 = 1;
 
-/// Compute the path to `~/.savvagent/plugins.toml`. Returns a sentinel
-/// (`/.savvagent/plugins.toml`) if `$HOME` is unset or empty so callers can
-/// still proceed; the `load`/`save` callers treat missing reads as empty
-/// and silently log on write failures.
-pub fn config_path() -> PathBuf {
-    let home = match std::env::var_os("HOME") {
-        Some(s) if !s.is_empty() => PathBuf::from(s),
-        _ => PathBuf::from("/"),
-    };
-    home.join(".savvagent").join("plugins.toml")
+/// Compute the path to `~/.savvagent/plugins.toml`. Returns `None` if
+/// `$HOME` is unset or empty (matches the convention in
+/// `themes::catalog::config_path` and `sandbox::sandbox_toml_path`); the
+/// `load`/`save` callers treat that case as a silent no-op so unit
+/// tests that don't redirect `$HOME` can't accidentally clobber the
+/// developer's real `~/.savvagent/plugins.toml`.
+pub fn config_path() -> Option<PathBuf> {
+    let raw = std::env::var_os("HOME")?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw).join(".savvagent").join("plugins.toml"))
 }
 
 /// Load the persisted enabled-state map. See module docs for robustness rules.
 pub fn load() -> HashMap<PluginId, bool> {
-    let path = config_path();
     let mut out = HashMap::new();
+    let Some(path) = config_path() else {
+        return out;
+    };
     let Ok(text) = std::fs::read_to_string(&path) else {
         return out;
     };
@@ -92,8 +96,15 @@ pub fn load() -> HashMap<PluginId, bool> {
 /// with `0o700`, writes via a sibling `.tmp` file with `0o600`, then
 /// renames it into place. Only Optional plugins should appear in the
 /// passed-in map — Core plugins are never written.
+///
+/// `Ok(())` is returned silently if `$HOME` is unset or empty so the
+/// caller (which has no way to recover from that) doesn't surface a
+/// confusing error in the TUI; the resulting state is the same as a
+/// missing file on next load (i.e. defaults apply).
 pub fn save(entries: &HashMap<PluginId, bool>) -> std::io::Result<()> {
-    let path = config_path();
+    let Some(path) = config_path() else {
+        return Ok(());
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -145,7 +156,7 @@ mod tests {
         let _home = HomeGuard::new();
         // Materialise the directory under the per-test $HOME so the
         // mismatched file actually lives at the path `load` reads.
-        let path = config_path();
+        let path = config_path().expect("HOME set by HomeGuard");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -167,7 +178,7 @@ enabled = false
     fn malformed_toml_returns_empty() {
         let _g = HOME_LOCK.lock().unwrap();
         let _home = HomeGuard::new();
-        let path = config_path();
+        let path = config_path().expect("HOME set by HomeGuard");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "this is not valid toml ===").unwrap();
         let entries = load();
@@ -178,7 +189,7 @@ enabled = false
     fn unknown_plugin_id_is_skipped() {
         let _g = HOME_LOCK.lock().unwrap();
         let _home = HomeGuard::new();
-        let path = config_path();
+        let path = config_path().expect("HOME set by HomeGuard");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,

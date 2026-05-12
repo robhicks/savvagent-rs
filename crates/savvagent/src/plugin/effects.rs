@@ -3,10 +3,15 @@
 //! recurses for Stack). Slash re-entrancy depth is enforced here so that
 //! the depth cap cannot be bypassed by constructing a fresh SlashRouter.
 
-use savvagent_plugin::{Effect, HostEvent, PluginId, ScreenArgs};
+use std::collections::HashMap;
+
+use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs};
 
 use crate::app::App;
+use crate::plugin::builtin::plugins_manager::screen::{PluginRow, PluginsManagerScreen};
+use crate::plugin::builtin::plugins_manager::{persistence, summarize_contributions};
 use crate::plugin::hooks::HookDispatcher;
+use crate::plugin::manifests::Indexes;
 use crate::plugin::slash::SlashRouter;
 
 /// Maximum number of nested dispatch entries before an error is returned.
@@ -169,6 +174,9 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         }
         Effect::ClearLog => app.clear_log(),
         Effect::Quit => app.request_quit(),
+        Effect::TogglePlugin { id, enabled } => {
+            apply_toggle_plugin(app, id, enabled).await?;
+        }
         Effect::Stack(children) => {
             // Recurse via Box::pin so the future has a known size.
             Box::pin(apply_effects_with_depth(app, children, depth)).await?;
@@ -180,6 +188,81 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                 effect = ?other,
                 "apply_one: unhandled Effect variant (likely needs wiring in a later PR)"
             );
+        }
+    }
+    Ok(())
+}
+
+/// Apply [`Effect::TogglePlugin`]: refuse Core toggles, update the registry's
+/// enabled-set, rebuild derived indexes, and persist Optional state to
+/// `~/.savvagent/plugins.toml`. Errors here are returned to the caller so
+/// the event-loop can surface them; persistence failures surface as a
+/// styled note rather than an error so the in-memory toggle still takes
+/// effect.
+async fn apply_toggle_plugin(app: &mut App, id: PluginId, enabled: bool) -> Result<(), String> {
+    let reg_handle = match app.plugin_registry.as_ref().cloned() {
+        Some(h) => h,
+        None => {
+            tracing::error!("Effect::TogglePlugin: plugin runtime not installed");
+            app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                "Plugin runtime not yet installed; /plugins requires app startup to complete.",
+            ));
+            return Ok(());
+        }
+    };
+
+    // Phase 1: refuse Core toggles + mutate the enabled-set under the
+    // registry's write lock. The lock is released before we rebuild
+    // indexes so Indexes::build's per-plugin manifest locks don't fight
+    // the outer write guard.
+    {
+        let mut reg = reg_handle.write().await;
+        if let Some(plugin) = reg.get(&id) {
+            let kind = plugin.lock().await.manifest().kind;
+            if matches!(kind, PluginKind::Core) {
+                tracing::warn!(plugin = %id.as_str(), "refusing to toggle Core plugin");
+                return Ok(());
+            }
+        } else {
+            tracing::warn!(plugin = %id.as_str(), "TogglePlugin: unknown plugin id");
+            return Ok(());
+        }
+        reg.set_enabled(&id, enabled);
+    }
+
+    // Phase 2: rebuild the derived indexes so the new enabled set is
+    // visible to slash/screen/hook dispatch.
+    {
+        let reg = reg_handle.read().await;
+        let new_idx = Indexes::build(&reg).await.map_err(|e| e.to_string())?;
+        if let Some(idx_handle) = app.plugin_indexes.as_ref() {
+            let mut idx = idx_handle.write().await;
+            *idx = new_idx;
+        }
+    }
+
+    // Phase 3: persist Optional rows. Core plugins are never written, so
+    // hand-edits that disable Core are still ignored on next load.
+    {
+        let reg = reg_handle.read().await;
+        let mut entries: HashMap<PluginId, bool> = HashMap::new();
+        // Snapshot ids first so we don't borrow `reg` across the manifest
+        // lock acquisitions below.
+        let ids: Vec<PluginId> = reg.all_ids().cloned().collect();
+        for pid in ids {
+            let Some(plugin) = reg.get(&pid) else {
+                continue;
+            };
+            let kind = plugin.lock().await.manifest().kind;
+            if matches!(kind, PluginKind::Optional) {
+                entries.insert(pid.clone(), reg.is_enabled(&pid));
+            }
+        }
+        if let Err(e) = persistence::save(&entries) {
+            tracing::warn!(error = %e, "failed to save plugins.toml");
+            app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                "plugins.toml save failed: {e}"
+            )));
         }
     }
     Ok(())
@@ -232,8 +315,50 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
         (screen, layout)
     };
 
+    // For screens whose row/data list lives in `App`/the registry rather
+    // than in `ScreenArgs`, swap the plugin's just-built empty screen for
+    // a populated one. Today that's only `plugins.manager`; future
+    // screens with the same shape (e.g. a hooks inspector) should follow
+    // the same pattern rather than smuggling state through ScreenArgs.
+    let screen: Box<dyn savvagent_plugin::Screen> = match id {
+        "plugins.manager" => {
+            let rows = build_plugins_manager_rows(&reg).await;
+            Box::new(PluginsManagerScreen::with_rows(rows))
+        }
+        _ => screen,
+    };
+
     app.screen_stack.push(screen, layout);
     Ok(())
+}
+
+/// Build one [`PluginRow`] per registered plugin by walking the registry's
+/// `all_ids` and locking each plugin's manifest. Sorted alphabetically by
+/// id so the manager screen has a stable ordering across runs.
+async fn build_plugins_manager_rows(
+    reg_handle: &std::sync::Arc<tokio::sync::RwLock<crate::plugin::registry::PluginRegistry>>,
+) -> Vec<PluginRow> {
+    let reg = reg_handle.read().await;
+    let mut ids: Vec<PluginId> = reg.all_ids().cloned().collect();
+    ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+    let mut rows = Vec::with_capacity(ids.len());
+    for pid in ids {
+        let Some(plugin) = reg.get(&pid) else {
+            continue;
+        };
+        let manifest = plugin.lock().await.manifest();
+        let summary = summarize_contributions(&manifest.contributions);
+        rows.push(PluginRow {
+            id: pid.clone(),
+            name: manifest.name,
+            version: manifest.version,
+            kind: manifest.kind,
+            enabled: reg.is_enabled(&pid),
+            contribution_summary: summary,
+        });
+    }
+    rows
 }
 
 /// Deliver a [`HostEvent`] to every plugin that subscribed to its
@@ -865,6 +990,144 @@ mod tests {
             last_path.lock().unwrap().as_deref(),
             Some(path_str.as_str()),
             "TranscriptSaved payload must carry the saved path"
+        );
+    }
+
+    /// `Effect::TogglePlugin` for an Optional plugin must (a) flip the
+    /// registry's enabled bit, (b) rebuild the indexes so the new state
+    /// is observable to dispatch, and (c) persist the change to
+    /// `~/.savvagent/plugins.toml`.
+    ///
+    /// HOME_LOCK is a `std::sync::Mutex` and the `HomeGuard` holds the
+    /// `$HOME` redirect; both need to span the awaiting toggle so the
+    /// persistence::save path lands in the per-test tempdir, not the
+    /// developer's real `~/.savvagent/`. Tokio's `current_thread` flavor
+    /// keeps the future pinned to one OS thread, so holding a std Mutex
+    /// across `.await` is safe — we silence the lint that catches the
+    /// more general (multi-thread runtime) case.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn toggle_plugin_optional_updates_registry_and_persists() {
+        use crate::plugin::builtin::plugins_manager::persistence as plugins_toml;
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_plugin::{Contributions, Manifest, Plugin, PluginId, PluginKind};
+
+        // Minimal Optional plugin — the toggle target.
+        struct Optional;
+        #[async_trait]
+        impl Plugin for Optional {
+            fn manifest(&self) -> Manifest {
+                Manifest {
+                    id: PluginId::new("internal:test-optional").expect("valid"),
+                    name: "Test Optional".into(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions: Contributions::default(),
+                }
+            }
+        }
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+
+        let set = BuiltinSet {
+            plugins: vec![Box::new(Optional)],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        let pid = PluginId::new("internal:test-optional").expect("valid");
+
+        // Pre-condition: plugin is enabled, and the registry says so.
+        {
+            let reg = app.plugin_registry.as_ref().unwrap().read().await;
+            assert!(reg.is_enabled(&pid));
+        }
+
+        apply_effects(
+            &mut app,
+            vec![Effect::TogglePlugin {
+                id: pid.clone(),
+                enabled: false,
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        // Post: registry now says disabled.
+        {
+            let reg = app.plugin_registry.as_ref().unwrap().read().await;
+            assert!(
+                !reg.is_enabled(&pid),
+                "registry should mark Optional plugin disabled after TogglePlugin(false)"
+            );
+        }
+
+        // And ~/.savvagent/plugins.toml carries the override.
+        let loaded = plugins_toml::load();
+        assert_eq!(loaded.get(&pid), Some(&false));
+    }
+
+    /// Toggling a Core plugin is a no-op at the apply_effects level: the
+    /// registry remains unchanged and nothing is written.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn toggle_plugin_core_is_refused() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_plugin::{Contributions, Manifest, Plugin, PluginId, PluginKind};
+
+        struct Core;
+        #[async_trait]
+        impl Plugin for Core {
+            fn manifest(&self) -> Manifest {
+                Manifest {
+                    id: PluginId::new("internal:test-core").expect("valid"),
+                    name: "Test Core".into(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Core,
+                    contributions: Contributions::default(),
+                }
+            }
+        }
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+
+        let set = BuiltinSet {
+            plugins: vec![Box::new(Core)],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        let pid = PluginId::new("internal:test-core").expect("valid");
+
+        apply_effects(
+            &mut app,
+            vec![Effect::TogglePlugin {
+                id: pid.clone(),
+                enabled: false,
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        // Registry should still mark the Core plugin enabled.
+        let reg = app.plugin_registry.as_ref().unwrap().read().await;
+        assert!(
+            reg.is_enabled(&pid),
+            "Core plugin must remain enabled after a refused TogglePlugin"
         );
     }
 }
