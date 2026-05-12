@@ -629,6 +629,35 @@ impl App {
         self.input_mode = InputMode::SelectingTheme;
     }
 
+    /// Move the picker cursor down one row, clamping at the last
+    /// filtered theme. Updates [`Self::active_theme`] to the new
+    /// highlighted theme so the chrome behind the modal re-renders
+    /// with the previewed palette on the next frame.
+    pub fn theme_picker_cursor_down(&mut self) {
+        let filtered = self.theme_picker_filtered_themes();
+        if filtered.is_empty() {
+            return;
+        }
+        let last = filtered.len() - 1;
+        if self.theme_picker_index < last {
+            self.theme_picker_index += 1;
+        }
+        self.active_theme = filtered[self.theme_picker_index];
+    }
+
+    /// Move the picker cursor up one row, clamping at the first
+    /// filtered theme. Updates [`Self::active_theme`] for live preview.
+    pub fn theme_picker_cursor_up(&mut self) {
+        let filtered = self.theme_picker_filtered_themes();
+        if filtered.is_empty() {
+            return;
+        }
+        if self.theme_picker_index > 0 {
+            self.theme_picker_index -= 1;
+        }
+        self.active_theme = filtered[self.theme_picker_index];
+    }
+
     /// Append a char to the palette filter and reset the cursor.
     pub fn palette_push_char(&mut self, c: char) {
         self.palette_filter.push(c);
@@ -1271,6 +1300,81 @@ mod tests {
         assert_eq!(app.theme_picker_filter, "");
         let filtered = app.theme_picker_filtered_themes();
         assert_eq!(filtered[app.theme_picker_index], crate::theme::Theme::Light);
+    }
+
+    #[test]
+    fn theme_picker_cursor_down_advances_and_live_previews() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker(); // index points at Dark (the default)
+        let initial_index = app.theme_picker_index;
+        let filtered = app.theme_picker_filtered_themes();
+        let expected = filtered[initial_index + 1];
+
+        app.theme_picker_cursor_down();
+        assert_eq!(app.theme_picker_index, initial_index + 1);
+        assert_eq!(app.active_theme, expected, "live preview must apply");
+    }
+
+    #[test]
+    fn theme_picker_cursor_up_decrements_and_live_previews() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        app.theme_picker_cursor_down();
+        let after_down = app.theme_picker_index;
+        let filtered = app.theme_picker_filtered_themes();
+        let expected = filtered[after_down - 1];
+
+        app.theme_picker_cursor_up();
+        assert_eq!(app.theme_picker_index, after_down - 1);
+        assert_eq!(app.active_theme, expected);
+    }
+
+    #[test]
+    fn theme_picker_cursor_down_clamps_at_end() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        let last = app.theme_picker_filtered_themes().len() - 1;
+        app.theme_picker_index = last;
+        let expected = app.theme_picker_filtered_themes()[last];
+
+        app.theme_picker_cursor_down();
+        assert_eq!(app.theme_picker_index, last, "must clamp at last row");
+        assert_eq!(app.active_theme, expected);
+    }
+
+    #[test]
+    fn theme_picker_cursor_up_clamps_at_start() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        app.theme_picker_index = 0;
+        let first = app.theme_picker_filtered_themes()[0];
+
+        app.theme_picker_cursor_up();
+        assert_eq!(app.theme_picker_index, 0);
+        assert_eq!(app.active_theme, first);
+    }
+
+    #[test]
+    fn theme_picker_cursor_moves_are_no_op_when_filtered_empty() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.open_theme_picker();
+        app.theme_picker_filter = "xyz".to_string();
+        // No themes match; helper must not panic, must not change
+        // active_theme to anything weird.
+        let active_before = app.active_theme;
+        app.theme_picker_cursor_down();
+        app.theme_picker_cursor_up();
+        assert_eq!(app.active_theme, active_before);
     }
 
     #[test]
