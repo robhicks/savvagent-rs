@@ -67,6 +67,18 @@ pub enum Effect {
     ClearLog,
     /// Shut down the application cleanly.
     Quit,
+    /// Enable or disable a registered plugin by id. The runtime updates its
+    /// enabled-set, rebuilds derived indexes, and (if the plugin is
+    /// [`crate::manifest::PluginKind::Optional`]) persists the new state
+    /// to `~/.savvagent/plugins.toml`. Toggling a
+    /// [`crate::manifest::PluginKind::Core`] plugin is a no-op at the
+    /// runtime level (the manager screen also refuses to emit it).
+    TogglePlugin {
+        /// Plugin to toggle.
+        id: crate::types::PluginId,
+        /// Desired enabled state (`true` to enable, `false` to disable).
+        enabled: bool,
+    },
     /// Compound: apply children in order. Not atomic — partial application is
     /// observable if a later child fails or has user-visible side effects.
     /// Useful for `vec![SetActiveTheme{..}, CloseScreen]`-style sequences from
@@ -119,5 +131,21 @@ mod tests {
             name: "theme".into(),
             args: vec![],
         };
+    }
+
+    #[test]
+    fn toggle_plugin_carries_id_and_state() {
+        use crate::types::PluginId;
+        let eff = Effect::TogglePlugin {
+            id: PluginId::new("internal:provider-anthropic").expect("valid"),
+            enabled: false,
+        };
+        match eff {
+            Effect::TogglePlugin { id, enabled } => {
+                assert_eq!(id.as_str(), "internal:provider-anthropic");
+                assert!(!enabled);
+            }
+            _ => panic!("expected TogglePlugin"),
+        }
     }
 }

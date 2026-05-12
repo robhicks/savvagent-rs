@@ -21,6 +21,10 @@ pub mod home_tips;
 /// Cycles to the next model on the active provider; registered as `/model`.
 pub mod model;
 
+/// Manages enabled/disabled state of Optional plugins; opened via `/plugins`.
+/// Persists per-user state in `~/.savvagent/plugins.toml`.
+pub mod plugins_manager;
+
 /// Transcript picker; opened via `/resume` with an in-memory cache backed
 /// by the [`HookKind::TranscriptSaved`] hook.
 pub mod resume;

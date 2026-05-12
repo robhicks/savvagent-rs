@@ -119,6 +119,14 @@ impl PluginRegistry {
         self.plugins.keys().filter(|id| self.enabled.contains(id))
     }
 
+    /// Iterates over every registered [`PluginId`] regardless of enabled state.
+    /// Used by the plugins-manager screen to populate its row list and by
+    /// `apply_effects::Effect::TogglePlugin` when collecting Optional ids for
+    /// persistence.
+    pub fn all_ids(&self) -> impl Iterator<Item = &PluginId> {
+        self.plugins.keys()
+    }
+
     /// Returns the shared plugin handle for `id`, or `None` if not registered.
     pub fn get(&self, id: &PluginId) -> Option<Arc<Mutex<dyn Plugin>>> {
         self.plugins.get(id).cloned()
