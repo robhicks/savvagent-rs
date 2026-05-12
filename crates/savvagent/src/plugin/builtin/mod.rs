@@ -1,5 +1,8 @@
 //! Built-in plugin implementations. Each subdirectory hosts one plugin.
 
+/// Clears the conversation log; registered as `/clear`.
+pub mod clear;
+
 /// Filterable slash-command picker; opened via `/` from the home view.
 pub mod command_palette;
 
