@@ -17,6 +17,11 @@ pub mod manifests;
 /// and concatenates each contributor's rendered lines.
 pub mod slots;
 
+/// Slash command routing: resolves bare command names to their owning plugin
+/// and dispatches `handle_slash`, with a re-entrancy depth cap.
+#[allow(dead_code)]
+pub mod slash;
+
 /// Returns the set of built-in plugin instances.
 ///
 /// PR 2 adds: home-footer, home-tips.
