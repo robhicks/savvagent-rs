@@ -909,11 +909,10 @@ impl Drop for CurrentTurnEventsGuard<'_> {
     }
 }
 
-/// Single-source-of-truth summary text shown to the user when a `tool-bash`
-/// spawn requests network access. Surfaced via
-/// [`TurnEvent::BashNetworkRequested`]; consumed by the TUI's bash-network
-/// modal. Promoted to a public const so the test fixtures and production
-/// path can compare against the same string.
+/// Summary text shown to the user when a `tool-bash` spawn requests
+/// network access. Surfaced via [`TurnEvent::BashNetworkRequested`];
+/// consumed by the TUI's bash-network modal. Public so test fixtures and
+/// the production path share a single string.
 pub const BASH_NETWORK_PROMPT_SUMMARY: &str = "tool-bash spawn requests network access";
 
 /// Bootstrap resolver used while the registry is being constructed —
@@ -965,8 +964,13 @@ impl BashNetResolver for HostBashNetResolver {
         .await
         {
             Ok(v) => v,
+            // `tracing::error!` — not `warn!`. A resolver failure silently
+            // downgrades the user's bash-network preference to deny, and
+            // the TUI surface for that today is "bash spawn fails with no
+            // visible reason". Future work: surface this on the per-turn
+            // events channel so the TUI can show it as a notice.
             Err(e) => {
-                tracing::warn!("tool-bash net resolver failed: {e}. Defaulting to deny.");
+                tracing::error!("tool-bash net resolver failed: {e}. Defaulting to deny.");
                 false
             }
         }

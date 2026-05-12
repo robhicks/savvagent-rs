@@ -44,16 +44,16 @@ use crate::sandbox::{SandboxConfig, SandboxWrapper, apply_sandbox};
 /// detection scheme used in `sandbox.rs::net_allowed_for`.
 const TOOL_BASH_MARKER: &str = "tool-bash";
 
-/// Per-call override of `tool-bash`'s network access. Replaces the older
-/// `Option<bool>` plumbing so the three states have names and the
-/// "explicit override short-circuits the cache" semantics are structural
-/// rather than implicit in callers.
+/// Per-call override of `tool-bash`'s network access.
 ///
 /// | Variant      | Meaning                                                 |
 /// |--------------|---------------------------------------------------------|
 /// | `Inherit`    | Defer to the resolver's policy (may park on a prompt).  |
 /// | `ForceAllow` | Grant network access regardless of policy or cache.     |
 /// | `ForceDeny`  | Deny network access regardless of policy or cache.      |
+///
+/// Explicit overrides never touch the resolver cache — see
+/// [`BashNetResolver::resolve`] for the short-circuit guarantee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetOverride {
     /// Defer to the resolver's policy. The resolver may emit a
@@ -86,8 +86,17 @@ pub trait BashNetResolver: Send + Sync + 'static {
 
     /// Resolve with override consideration. The default implementation
     /// short-circuits explicit overrides; `Inherit` defers to
-    /// [`resolve_policy`]. Override only if you need different
-    /// short-circuit semantics — most callers should not.
+    /// [`resolve_policy`].
+    ///
+    /// **Do not override this method.** The dispatcher in
+    /// [`LazyBash::dispatch`] relies on the exact "explicit overrides
+    /// never touch `resolve_policy`, never touch the cache" behavior
+    /// expressed below. Overriding `resolve` is permitted by Rust but
+    /// breaks an invariant pinned only by the
+    /// `force_allow_short_circuits_policy` /
+    /// `force_deny_short_circuits_policy` tests, neither of which run
+    /// against a custom override. If you need different policy
+    /// behavior, change [`resolve_policy`].
     ///
     /// [`resolve_policy`]: BashNetResolver::resolve_policy
     async fn resolve(&self, over: NetOverride) -> bool {
@@ -100,9 +109,8 @@ pub trait BashNetResolver: Send + Sync + 'static {
 }
 
 /// Shorthand for the trait-object handle the registry stores. Held behind
-/// an `RwLock` so the host can swap in the real resolver after construction
-/// (the temporary one used at `connect` time defers all decisions to a
-/// hard-coded false).
+/// an `RwLock` in [`LazyBash`] so the host can swap in the real resolver
+/// after construction (see [`crate::session::Host::wire_self_into_resolver`]).
 pub(crate) type BashNetResolverHandle = Arc<dyn BashNetResolver>;
 
 /// Aggregate view of all connected tool servers.
@@ -143,10 +151,11 @@ struct LazyBash {
     config: BashSpawnConfig,
     /// Resolves the runtime `allow_net` for a given per-call override.
     /// Invoked once per call before we look at the cached active server.
-    /// Held behind `RwLock` so the host can install a real resolver
+    /// Held behind `RwLock` so the host can install the real resolver
     /// (one that calls back into the host's permission state) after
-    /// `Host` construction completes — at `connect` time we can't yet
-    /// capture `self` into the closure.
+    /// `Host` construction — at `connect` time we don't yet have an
+    /// `Arc<Host>` to give the resolver, so we install a deny-by-default
+    /// placeholder and swap it during `wire_self_into_resolver`.
     resolver: Arc<RwLock<BashNetResolverHandle>>,
     /// Currently-active spawned server, if any.
     ///
@@ -181,11 +190,11 @@ struct BashSpawnConfig {
 /// Spawn-determining parameters of an active `tool-bash` child. Two
 /// `BashSpawnKey`s compare equal iff the cached server is suitable for
 /// the new call without a respawn. Today the only spawn-determining
-/// parameter is `allow_net`; v0.9's domain-allowlist work will extend
-/// the key with an `allowed_domains: Vec<String>` field, at which point
-/// every existing site that asks "does the cache still satisfy this
-/// call?" already routes through the key's `==` and gets the new field
-/// for free.
+/// parameter is `allow_net`; a future domain-allowlist extension would
+/// add an `allowed_domains` field, at which point every existing site
+/// that asks "does the cache still satisfy this call?" already routes
+/// through the key's `==` and gets the new field for free (provided
+/// `PartialEq` derive — or a manual impl — includes it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BashSpawnKey {
     allow_net: bool,
@@ -301,7 +310,7 @@ impl ToolRegistry {
 
                         let wrapper = apply_sandbox(&mut cmd, command, project_root, sandbox);
                         let allow_net = sandbox.net_allowed_for(command);
-                        log_sandbox_wrapper(&label, &wrapper, allow_net);
+                        log_sandbox_wrapper(&label, &wrapper, allow_net, sandbox.is_enabled());
 
                         let transport = TokioChildProcess::new(cmd)
                             .with_context(|| format!("spawn tool server: {label}"))?;
@@ -551,16 +560,42 @@ fn build_bash_command(
 
     let wrapper = apply_sandbox(&mut cmd, command, project_root, &sandbox);
     let label = command.display().to_string();
-    log_sandbox_wrapper(&label, &wrapper, allow_net);
+    // The bash spawn path uses the merged-with-override `sandbox` config,
+    // so its `is_enabled()` reflects the actual state for this spawn.
+    log_sandbox_wrapper(&label, &wrapper, allow_net, sandbox.is_enabled());
     cmd
 }
 
 /// Log the resolved sandbox wrapper for a freshly built tool command.
 /// Single source of truth for the eager and bash spawn paths so the log
 /// format stays consistent.
-fn log_sandbox_wrapper(label: &str, wrapper: &SandboxWrapper, allow_net: bool) {
+///
+/// `sandbox_enabled` distinguishes the two structurally different reasons
+/// a wrapper resolves to [`SandboxWrapper::None`]:
+///
+/// - Sandboxing is disabled by config — nothing to say.
+/// - Sandboxing is enabled but the wrapper binary (`bwrap` / `sandbox-exec`)
+///   is unavailable — the tool is about to run **unwrapped despite the
+///   user's opt-in**. That's a security-relevant degradation; emit
+///   `tracing::error!` for every such spawn so it never goes silent.
+///   ([`apply_sandbox`] also `warn!`s once per missing binary, but that
+///   warning fires before the user might be paying attention; this one
+///   fires on every spawn that's actually running unwrapped.)
+fn log_sandbox_wrapper(
+    label: &str,
+    wrapper: &SandboxWrapper,
+    allow_net: bool,
+    sandbox_enabled: bool,
+) {
     match wrapper {
-        SandboxWrapper::None => {}
+        SandboxWrapper::None => {
+            if sandbox_enabled {
+                tracing::error!(
+                    "sandbox enabled but tool `{label}` ran unwrapped \
+                     (allow_net={allow_net}) — required wrapper binary not found"
+                );
+            }
+        }
         SandboxWrapper::Bwrap => {
             tracing::info!("sandbox[bwrap]: {label} (allow_net={allow_net})");
         }
@@ -627,9 +662,8 @@ impl ToolCallOutcome {
     }
 
     /// Normalize the outcome of `RunningService::call_tool` into a
-    /// [`ToolCallOutcome`]. Shared by the eager and lazy bash dispatch
-    /// paths — `name` is the tool name, used for the transport-error
-    /// message only.
+    /// [`ToolCallOutcome`]. `name` is used only to format the
+    /// transport-error message; the success path doesn't consult it.
     pub(crate) fn from_call_result(
         name: &str,
         result: std::result::Result<rmcp::model::CallToolResult, ServiceError>,
@@ -804,6 +838,78 @@ mod lazy_bash_tests {
             bash.spawn_count.load(Ordering::SeqCst),
             1,
             "matching override should reuse the cached spawn"
+        );
+    }
+
+    #[test]
+    fn bash_spawn_key_equality_discriminates_allow_net() {
+        // Pin the contract `LazyBash::dispatch` relies on: two keys
+        // compare equal iff they describe an interchangeable spawn.
+        // When this struct grows new fields (e.g. v0.9 domain allowlist),
+        // a forgotten `PartialEq` derive line — or a hand-rolled `Eq`
+        // impl that misses the new field — would make the new variant
+        // collapse into an existing cache slot. This test catches that.
+        assert_eq!(
+            BashSpawnKey { allow_net: true },
+            BashSpawnKey { allow_net: true }
+        );
+        assert_eq!(
+            BashSpawnKey { allow_net: false },
+            BashSpawnKey { allow_net: false }
+        );
+        assert_ne!(
+            BashSpawnKey { allow_net: true },
+            BashSpawnKey { allow_net: false }
+        );
+    }
+}
+
+#[cfg(test)]
+mod tool_call_outcome_tests {
+    use super::*;
+    use rmcp::model::{CallToolResult, Content};
+
+    #[test]
+    fn from_call_result_success_produces_non_error_outcome() {
+        // CallToolResult::success sets is_error = Some(false). The
+        // `is_error == None` branch in `from_call_result` is unreachable
+        // via this public constructor but folds into the same arm — its
+        // behavior matches Some(false) by construction.
+        let result = CallToolResult::success(vec![Content::text("hello".to_string())]);
+        let outcome = ToolCallOutcome::from_call_result("greet", Ok(result));
+        assert!(!outcome.is_error);
+        assert_eq!(outcome.payload, "hello");
+    }
+
+    #[test]
+    fn from_call_result_error_flag_produces_error_outcome() {
+        let result = CallToolResult::error(vec![Content::text("tool blew up".to_string())]);
+        let outcome = ToolCallOutcome::from_call_result("greet", Ok(result));
+        assert!(
+            outcome.is_error,
+            "MCP-side `is_error: true` must flow through to ToolCallOutcome::is_error"
+        );
+        assert_eq!(outcome.payload, "tool blew up");
+    }
+
+    #[test]
+    fn from_call_result_transport_err_carries_tool_name_in_payload() {
+        // TransportClosed is the simplest ServiceError variant to
+        // construct in a test (unit variant, no payload). The branch
+        // under test is "any Err -> Self::error with tool name", which
+        // doesn't depend on which ServiceError variant is passed.
+        let err = ServiceError::TransportClosed;
+        let outcome = ToolCallOutcome::from_call_result("greet", Err(err));
+        assert!(outcome.is_error);
+        assert!(
+            outcome.payload.contains("greet"),
+            "transport-error payload must name the tool for operator triage: {}",
+            outcome.payload
+        );
+        assert!(
+            outcome.payload.contains("transport error"),
+            "transport-error payload must self-identify: {}",
+            outcome.payload
         );
     }
 }
