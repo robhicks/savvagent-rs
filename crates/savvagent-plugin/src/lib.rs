@@ -23,7 +23,8 @@ pub mod styled;
 
 pub use types::{
     ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, PluginId,
-    ProviderId, Region, ScreenInstanceId, ThemeEntry, ThemePalette, Timestamp,
+    ProviderId, Region, ScreenArgs, ScreenInstanceId, ThemeEntry,
+    ThemePalette, Timestamp, TranscriptHandle,
 };
 
 pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};

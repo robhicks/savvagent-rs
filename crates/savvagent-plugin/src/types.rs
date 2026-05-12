@@ -160,6 +160,52 @@ impl ThemePalette {
     }
 }
 
+/// Identifying handle for a saved conversation transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptHandle {
+    /// Stable, unique identifier for this transcript.
+    pub id: String,
+    /// Human-readable display label shown in the resume picker UI.
+    pub label: String,
+    /// Wall-clock time at which this transcript was saved.
+    pub saved_at: Timestamp,
+}
+
+/// Per-screen open arguments passed across the plugin boundary when a screen is activated.
+///
+/// Marked `#[non_exhaustive]` so that adding new screens in future PRs does not
+/// break existing match arms in plugin crates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScreenArgs {
+    /// No screen-specific args; the screen reads any context it needs from its own factory.
+    None,
+    /// Open the theme picker, scrolled to the currently-active theme.
+    ThemePicker {
+        /// Slug of the theme that is currently active (used to pre-select the cursor row).
+        current_slug: String,
+    },
+    /// Open the provider connection picker with no pre-selected entry.
+    ConnectPicker,
+    /// Open the resume-session picker populated with the given transcript handles.
+    ResumePicker {
+        /// Ordered list of saved transcripts to display in the picker.
+        transcripts: Vec<TranscriptHandle>,
+    },
+    /// Open a read-only file viewer for the given path.
+    ViewFile {
+        /// Absolute or workspace-relative path of the file to display.
+        path: String,
+    },
+    /// Open an editor for the given path.
+    EditFile {
+        /// Absolute or workspace-relative path of the file to edit.
+        path: String,
+    },
+    /// Open the installed-plugins manager screen.
+    PluginsManager,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +280,19 @@ mod tests {
         };
         assert_eq!(entry.slug, "light");
         assert!(!entry.dark);
+    }
+
+    #[test]
+    fn screen_args_variants_are_typed() {
+        let _none = ScreenArgs::None;
+        let _theme = ScreenArgs::ThemePicker { current_slug: "dark".into() };
+        let _view = ScreenArgs::ViewFile { path: "/tmp/x.rs".into() };
+        let _resume = ScreenArgs::ResumePicker {
+            transcripts: vec![TranscriptHandle {
+                id: "t1".into(),
+                label: "yesterday".into(),
+                saved_at: Timestamp { secs: 0, nanos: 0 },
+            }],
+        };
     }
 }
