@@ -13,8 +13,10 @@ use crate::types::{KeyEventPortable, Region};
 #[async_trait]
 pub trait Screen: Send {
     /// Returns the screen id this instance was created for. Matches the
-    /// `ScreenSpec::id` from the originating plugin's manifest.
-    fn id(&self) -> &str;
+    /// `ScreenSpec::id` from the originating plugin's manifest. Returns an
+    /// owned `String` rather than a borrow so the value crosses the
+    /// plugin boundary without lifetime constraints (WIT-portability).
+    fn id(&self) -> String;
 
     /// Render the screen's content lines for the given inner region. Chrome
     /// (borders, title, centering) is painted by the runtime around this content.

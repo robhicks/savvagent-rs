@@ -36,6 +36,7 @@ pub enum PluginKind {
 /// Constructed by `Plugin::manifest` and indexed once at startup by the
 /// runtime. Fields are independent; a plugin may fill any subset.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Contributions {
     /// Slash commands this plugin handles (name + summary + optional args hint).
     pub slash_commands: Vec<SlashSpec>,
@@ -103,7 +104,7 @@ pub enum ScreenLayout {
 /// Registration descriptor for an LLM provider contributed by a plugin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderSpec {
-    /// Stable identifier for the provider (e.g. `ProviderId("anthropic")`).
+    /// Stable identifier for the provider (e.g. `ProviderId::new("anthropic").unwrap()`).
     pub id: ProviderId,
     /// Human-readable name shown in provider picker UIs.
     pub display_name: String,

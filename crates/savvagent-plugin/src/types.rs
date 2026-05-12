@@ -1,22 +1,90 @@
 //! ID newtypes and small structural types crossing plugin boundaries.
 
-/// Stable identifier for a registered plugin (transparent newtype over `String`).
+/// Stable identifier for a registered plugin.
 ///
-/// Built-ins use the prefix `internal:` (for example, `internal:themes`,
+/// External callers must use [`PluginId::new`] to construct a value; the inner
+/// field is `pub(crate)` so direct tuple construction is only available within
+/// this crate.  Built-ins use the prefix `internal:` (e.g. `internal:themes`,
 /// `internal:provider-anthropic`). Third-party plugins are expected to use a
 /// vendor-scoped prefix (e.g. `acme:my-plugin`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PluginId(
-    /// The plugin's identifier string.
-    pub String,
-);
+pub struct PluginId(pub(crate) String);
 
-/// Stable identifier for an LLM provider (transparent newtype over `String`).
+impl PluginId {
+    /// Construct a validated plugin id. Must be non-empty, must contain at
+    /// least one `:` separator, and the part before the first `:` (the
+    /// vendor prefix) must match `^[a-z][a-z0-9_-]*$`.
+    pub fn new(s: impl Into<String>) -> Result<Self, crate::error::PluginError> {
+        let s: String = s.into();
+        let Some((prefix, rest)) = s.split_once(':') else {
+            return Err(crate::error::PluginError::InvalidArgs(format!(
+                "plugin id must contain a vendor-prefix separator ':' — got {s:?}"
+            )));
+        };
+        if prefix.is_empty() || rest.is_empty() {
+            return Err(crate::error::PluginError::InvalidArgs(format!(
+                "plugin id vendor prefix and suffix must both be non-empty — got {s:?}"
+            )));
+        }
+        let mut chars = prefix.chars();
+        let first = chars.next().expect("non-empty checked above");
+        if !first.is_ascii_lowercase() {
+            return Err(crate::error::PluginError::InvalidArgs(format!(
+                "plugin id vendor prefix must start with [a-z] — got {s:?}"
+            )));
+        }
+        if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+            return Err(crate::error::PluginError::InvalidArgs(format!(
+                "plugin id vendor prefix must match [a-z][a-z0-9_-]* — got {s:?}"
+            )));
+        }
+        Ok(Self(s))
+    }
+
+    /// Borrow the inner string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable identifier for an LLM provider.
+///
+/// External callers must use [`ProviderId::new`] to construct a value; the inner
+/// field is `pub(crate)` so direct tuple construction is only available within
+/// this crate.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProviderId(
-    /// The provider's id string (e.g. `"anthropic"`).
-    pub String,
-);
+pub struct ProviderId(pub(crate) String);
+
+impl ProviderId {
+    /// Construct a validated provider id. Must be non-empty and consist
+    /// only of `[a-z0-9_-]` characters, starting with `[a-z]`.
+    pub fn new(s: impl Into<String>) -> Result<Self, crate::error::PluginError> {
+        let s: String = s.into();
+        if s.is_empty() {
+            return Err(crate::error::PluginError::InvalidArgs(
+                "provider id must be non-empty".into(),
+            ));
+        }
+        let mut chars = s.chars();
+        let first = chars.next().unwrap();
+        if !first.is_ascii_lowercase() {
+            return Err(crate::error::PluginError::InvalidArgs(format!(
+                "provider id must start with [a-z] — got {s:?}"
+            )));
+        }
+        if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+            return Err(crate::error::PluginError::InvalidArgs(format!(
+                "provider id must match [a-z][a-z0-9_-]* — got {s:?}"
+            )));
+        }
+        Ok(Self(s))
+    }
+
+    /// Borrow the inner string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Transparent newtype identifying a live terminal screen instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,8 +163,11 @@ pub enum KeyCodePortable {
     PageDown,
     /// A function key. The `u8` is the function-key number (1–12 common; higher if supported).
     F(u8),
-    /// A key code that the terminal reported but that is not otherwise mapped.
-    Null,
+    /// Sentinel for terminal-reported key codes that do not correspond to any
+    /// other variant (e.g. unsupported function keys, extended key codes that
+    /// the runtime hasn't mapped). Plugins should treat this as a no-op unless
+    /// they have a specific reason to react.
+    Unknown,
 }
 
 /// Modifier keys held during a key event.
@@ -114,9 +185,19 @@ pub struct KeyMods {
 
 /// A single-key chord. Reserved for future multi-key chord extension.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct ChordPortable {
     /// The key event that forms this chord.
     pub key: KeyEventPortable,
+}
+
+impl ChordPortable {
+    /// Build a single-key chord. Reserved for future multi-key chord
+    /// extension; `#[non_exhaustive]` lets us add new fields without
+    /// breaking existing call sites.
+    pub fn new(key: KeyEventPortable) -> Self {
+        Self { key }
+    }
 }
 
 use crate::styled::ThemeColor;
@@ -211,6 +292,32 @@ pub enum ScreenArgs {
     PluginsManager,
 }
 
+impl ScreenArgs {
+    /// Returns the canonical screen id this args variant pairs with, or
+    /// `None` for the `None` variant.
+    ///
+    /// Use this when constructing an `Effect::OpenScreen` to keep the
+    /// `id` and `args` in sync without hardcoding the same string in
+    /// two places:
+    ///
+    /// ```ignore
+    /// let args = ScreenArgs::ThemePicker { current_slug: "dark".into() };
+    /// let id = args.screen_id().expect("not the None variant").to_string();
+    /// Effect::OpenScreen { id, args }
+    /// ```
+    pub fn screen_id(&self) -> Option<&'static str> {
+        match self {
+            ScreenArgs::None => None,
+            ScreenArgs::ThemePicker { .. } => Some("themes.picker"),
+            ScreenArgs::ConnectPicker => Some("connect.picker"),
+            ScreenArgs::ResumePicker { .. } => Some("resume.picker"),
+            ScreenArgs::ViewFile { .. } => Some("view-file"),
+            ScreenArgs::EditFile { .. } => Some("edit-file"),
+            ScreenArgs::PluginsManager => Some("plugins.manager"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +328,50 @@ mod tests {
         let q = ProviderId("anthropic".to_string());
         assert_eq!(p.0, "internal:themes");
         assert_eq!(q.0, "anthropic");
+    }
+
+    #[test]
+    fn plugin_id_new_accepts_internal_themes() {
+        let id = PluginId::new("internal:themes").unwrap();
+        assert_eq!(id.as_str(), "internal:themes");
+    }
+
+    #[test]
+    fn plugin_id_new_rejects_no_colon() {
+        assert!(matches!(
+            PluginId::new("themes").unwrap_err(),
+            crate::error::PluginError::InvalidArgs(_)
+        ));
+    }
+
+    #[test]
+    fn plugin_id_new_rejects_uppercase_prefix() {
+        assert!(matches!(
+            PluginId::new("Internal:themes").unwrap_err(),
+            crate::error::PluginError::InvalidArgs(_)
+        ));
+    }
+
+    #[test]
+    fn plugin_id_new_rejects_empty_suffix() {
+        assert!(matches!(
+            PluginId::new("internal:").unwrap_err(),
+            crate::error::PluginError::InvalidArgs(_)
+        ));
+    }
+
+    #[test]
+    fn provider_id_new_accepts_anthropic() {
+        let id = ProviderId::new("anthropic").unwrap();
+        assert_eq!(id.as_str(), "anthropic");
+    }
+
+    #[test]
+    fn provider_id_new_rejects_uppercase() {
+        assert!(matches!(
+            ProviderId::new("Anthropic").unwrap_err(),
+            crate::error::PluginError::InvalidArgs(_)
+        ));
     }
 
     #[test]
@@ -319,5 +470,40 @@ mod tests {
                 saved_at: Timestamp { secs: 0, nanos: 0 },
             }],
         };
+    }
+
+    #[test]
+    fn screen_args_screen_id_pairs_every_non_none_variant() {
+        assert_eq!(ScreenArgs::None.screen_id(), None);
+        assert_eq!(
+            ScreenArgs::ThemePicker {
+                current_slug: "x".into()
+            }
+            .screen_id(),
+            Some("themes.picker")
+        );
+        assert_eq!(
+            ScreenArgs::ConnectPicker.screen_id(),
+            Some("connect.picker")
+        );
+        assert_eq!(
+            ScreenArgs::ResumePicker {
+                transcripts: vec![]
+            }
+            .screen_id(),
+            Some("resume.picker")
+        );
+        assert_eq!(
+            ScreenArgs::ViewFile { path: "/x".into() }.screen_id(),
+            Some("view-file")
+        );
+        assert_eq!(
+            ScreenArgs::EditFile { path: "/x".into() }.screen_id(),
+            Some("edit-file")
+        );
+        assert_eq!(
+            ScreenArgs::PluginsManager.screen_id(),
+            Some("plugins.manager")
+        );
     }
 }
