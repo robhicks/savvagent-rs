@@ -38,9 +38,10 @@ pub use sandbox::{
 };
 pub use savvagent_protocol::{ListModelsResponse, ModelInfo, ToolDef};
 pub use session::{
-    BashNetResolveError, Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus,
-    TranscriptError, TranscriptFile, TurnEvent, TurnOutcome,
+    BASH_NETWORK_PROMPT_SUMMARY, BashNetResolveError, Host, HostError, TRANSCRIPT_SCHEMA_VERSION,
+    ToolCall, ToolCallStatus, TranscriptError, TranscriptFile, TurnEvent, TurnOutcome,
 };
+pub use tools::{BashNetResolver, NetOverride};
 
 #[doc(hidden)]
 pub use provider::RmcpProviderClient;

@@ -22,14 +22,15 @@
 //! **not** mutate the session-cached bash network decision.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use rmcp::{
-    RoleClient, ServiceExt, model::CallToolRequestParams, service::RunningService,
+    RoleClient, ServiceExt,
+    model::CallToolRequestParams,
+    service::{RunningService, ServiceError},
     transport::TokioChildProcess,
 };
 use savvagent_protocol::ToolDef;
@@ -43,15 +44,66 @@ use crate::sandbox::{SandboxConfig, SandboxWrapper, apply_sandbox};
 /// detection scheme used in `sandbox.rs::net_allowed_for`.
 const TOOL_BASH_MARKER: &str = "tool-bash";
 
+/// Per-call override of `tool-bash`'s network access. Replaces the older
+/// `Option<bool>` plumbing so the three states have names and the
+/// "explicit override short-circuits the cache" semantics are structural
+/// rather than implicit in callers.
+///
+/// | Variant      | Meaning                                                 |
+/// |--------------|---------------------------------------------------------|
+/// | `Inherit`    | Defer to the resolver's policy (may park on a prompt).  |
+/// | `ForceAllow` | Grant network access regardless of policy or cache.     |
+/// | `ForceDeny`  | Deny network access regardless of policy or cache.      |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NetOverride {
+    /// Defer to the resolver's policy. The resolver may emit a
+    /// [`crate::session::TurnEvent::BashNetworkRequested`] prompt.
+    #[default]
+    Inherit,
+    /// Bypass the resolver and grant network access for this call's spawn.
+    ForceAllow,
+    /// Bypass the resolver and deny network access for this call's spawn.
+    ForceDeny,
+}
+
 /// Resolver invoked by [`ToolRegistry::call_with_bash_net_override`] when a
 /// bash dispatch needs to know what `allow_net` to spawn with.
 ///
-/// `Some(v)` is the per-call `--net`/`--no-net` override; the resolver must
-/// return it directly without touching the session cache. `None` means
-/// "resolve via permission policy" (which may emit a `BashNetworkRequested`
-/// prompt and await the user's answer).
-pub(crate) type BashNetResolver =
-    Arc<dyn Fn(Option<bool>) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync + 'static>;
+/// The trait's required method, [`resolve_policy`], is the no-override case
+/// — implementations consult their permission state and may park on a user
+/// prompt. The default [`resolve`] method short-circuits explicit
+/// [`NetOverride::ForceAllow`] / [`NetOverride::ForceDeny`] without
+/// touching the session cache; only [`NetOverride::Inherit`] reaches
+/// [`resolve_policy`]. Callers should always invoke [`resolve`] — the
+/// short-circuit logic stays in one place.
+///
+/// [`resolve_policy`]: BashNetResolver::resolve_policy
+/// [`resolve`]: BashNetResolver::resolve
+#[async_trait]
+pub trait BashNetResolver: Send + Sync + 'static {
+    /// Resolve the policy-level `allow_net`. May park on a user prompt.
+    async fn resolve_policy(&self) -> bool;
+
+    /// Resolve with override consideration. The default implementation
+    /// short-circuits explicit overrides; `Inherit` defers to
+    /// [`resolve_policy`]. Override only if you need different
+    /// short-circuit semantics — most callers should not.
+    ///
+    /// [`resolve_policy`]: BashNetResolver::resolve_policy
+    async fn resolve(&self, over: NetOverride) -> bool {
+        match over {
+            NetOverride::ForceAllow => true,
+            NetOverride::ForceDeny => false,
+            NetOverride::Inherit => self.resolve_policy().await,
+        }
+    }
+}
+
+/// Shorthand for the trait-object handle the registry stores. Held behind
+/// an `RwLock` so the host can swap in the real resolver after construction
+/// (the temporary one used at `connect` time defers all decisions to a
+/// hard-coded false).
+pub(crate) type BashNetResolverHandle = Arc<dyn BashNetResolver>;
 
 /// Aggregate view of all connected tool servers.
 pub(crate) struct ToolRegistry {
@@ -95,7 +147,7 @@ struct LazyBash {
     /// (one that calls back into the host's permission state) after
     /// `Host` construction completes — at `connect` time we can't yet
     /// capture `self` into the closure.
-    resolver: Arc<RwLock<BashNetResolver>>,
+    resolver: Arc<RwLock<BashNetResolverHandle>>,
     /// Currently-active spawned server, if any.
     ///
     /// The lock guards only the (reuse-or-respawn → dispatch) sequence
@@ -126,13 +178,26 @@ struct BashSpawnConfig {
     sandbox_template: SandboxConfig,
 }
 
-/// An active, lazily-spawned `tool-bash` child plus the `allow_net` it
-/// was spawned with. Killed (via `service.cancel()`) before a respawn or
-/// at registry shutdown.
+/// Spawn-determining parameters of an active `tool-bash` child. Two
+/// `BashSpawnKey`s compare equal iff the cached server is suitable for
+/// the new call without a respawn. Today the only spawn-determining
+/// parameter is `allow_net`; v0.9's domain-allowlist work will extend
+/// the key with an `allowed_domains: Vec<String>` field, at which point
+/// every existing site that asks "does the cache still satisfy this
+/// call?" already routes through the key's `==` and gets the new field
+/// for free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BashSpawnKey {
+    allow_net: bool,
+}
+
+/// An active, lazily-spawned `tool-bash` child plus the [`BashSpawnKey`]
+/// it was spawned with. Killed (via `service.cancel()`) before a respawn
+/// or at registry shutdown.
 struct ActiveBashServer {
     label: String,
     service: RunningService<RoleClient, ()>,
-    allow_net: bool,
+    spawn_key: BashSpawnKey,
 }
 
 impl ToolRegistry {
@@ -157,7 +222,7 @@ impl ToolRegistry {
         endpoints: &[ToolEndpoint],
         project_root: &Path,
         sandbox: &SandboxConfig,
-        bash_net_resolver: BashNetResolver,
+        bash_net_resolver: BashNetResolverHandle,
     ) -> Result<Self> {
         let mut eager_servers = Vec::new();
         let mut routes: HashMap<String, usize> = HashMap::new();
@@ -235,15 +300,8 @@ impl ToolRegistry {
                         cmd.env("SAVVAGENT_TOOL_GREP_ROOT", project_root);
 
                         let wrapper = apply_sandbox(&mut cmd, command, project_root, sandbox);
-                        match wrapper {
-                            SandboxWrapper::None => {}
-                            SandboxWrapper::Bwrap => {
-                                tracing::info!("sandbox[bwrap]: {label}");
-                            }
-                            SandboxWrapper::SandboxExec => {
-                                tracing::info!("sandbox[sandbox-exec]: {label}");
-                            }
-                        }
+                        let allow_net = sandbox.net_allowed_for(command);
+                        log_sandbox_wrapper(&label, &wrapper, allow_net);
 
                         let transport = TokioChildProcess::new(cmd)
                             .with_context(|| format!("spawn tool server: {label}"))?;
@@ -292,7 +350,7 @@ impl ToolRegistry {
         })
     }
 
-    /// Call `name` with an optional per-call bash network override.
+    /// Call `name` with a per-call bash network override.
     ///
     /// For non-bash tools, `net_override` is ignored. For bash tools, the
     /// override is passed to the resolver and to the spawn logic; see
@@ -301,7 +359,7 @@ impl ToolRegistry {
         &self,
         name: &str,
         input: Value,
-        net_override: Option<bool>,
+        net_override: NetOverride,
     ) -> ToolCallOutcome {
         // Validate args shape up-front; both paths need it as an object.
         let args = match input {
@@ -327,18 +385,7 @@ impl ToolRegistry {
         };
         let server = &self.eager_servers[idx];
         let params = CallToolRequestParams::new(name.to_string()).with_arguments(args);
-        match server.service.call_tool(params).await {
-            Ok(result) => {
-                let is_error = result.is_error == Some(true);
-                let payload = render_result_payload(&result);
-                if is_error {
-                    ToolCallOutcome::error(payload)
-                } else {
-                    ToolCallOutcome::success(payload)
-                }
-            }
-            Err(e) => ToolCallOutcome::error(format!("tool transport error on {name}: {e}")),
-        }
+        ToolCallOutcome::from_call_result(name, server.service.call_tool(params).await)
     }
 
     /// Replace the bash network resolver. Used by [`crate::session::Host`]
@@ -347,7 +394,7 @@ impl ToolRegistry {
     /// [`crate::session::TurnEvent::BashNetworkRequested`].
     ///
     /// No-op when no `tool-bash` endpoint is configured.
-    pub(crate) fn install_bash_net_resolver(&self, resolver: BashNetResolver) {
+    pub(crate) fn install_bash_net_resolver(&self, resolver: BashNetResolverHandle) {
         if let Some(lazy) = self.lazy_bash.as_ref() {
             *lazy.resolver.write().expect("resolver lock poisoned") = resolver;
         }
@@ -378,34 +425,35 @@ impl LazyBash {
         &self,
         name: &str,
         args: serde_json::Map<String, Value>,
-        net_override: Option<bool>,
+        net_override: NetOverride,
     ) -> ToolCallOutcome {
         // Step 1: resolve the per-call allow_net via the host-supplied
         // resolver. This may emit a prompt and block until the user
         // answers — hence why we run it before taking the active-server
         // lock. We snapshot the current resolver under a brief read lock,
         // then drop the lock before awaiting so the host can swap the
-        // resolver freely.
+        // resolver freely. The trait's default `resolve` impl handles the
+        // explicit-override short-circuit, so we don't need to repeat that
+        // logic here.
         let resolver = self
             .resolver
             .read()
             .expect("resolver lock poisoned")
             .clone();
-        let allow_net = (resolver)(net_override).await;
+        let allow_net = resolver.resolve(net_override).await;
+        let new_key = BashSpawnKey { allow_net };
 
         // Step 2: lock the active server slot so we get a single
         // ordering for the (reuse-or-respawn → dispatch) sequence.
         let mut guard = self.active.lock().await;
-        let cached_allow_net = guard.as_ref().map(|a| a.allow_net);
-        let must_respawn = match cached_allow_net {
-            None => true,
-            Some(prev) => prev != allow_net,
-        };
+        let cached_key = guard.as_ref().map(|a| a.spawn_key.clone());
+        let must_respawn = cached_key.as_ref() != Some(&new_key);
 
         if must_respawn {
-            if let Some(prev) = cached_allow_net {
+            if let Some(prev) = &cached_key {
                 tracing::info!(
-                    "tool-bash: allow_net change detected ({prev} -> {allow_net}); respawning"
+                    "tool-bash: spawn key changed ({:?} -> {new_key:?}); respawning",
+                    prev
                 );
             }
 
@@ -444,16 +492,16 @@ impl LazyBash {
             {
                 tracing::warn!(
                     "lazy tool-bash respawn: error cancelling previous server {} \
-                     (allow_net={}): {e} (ignored — new server already up)",
+                     ({:?}): {e} (ignored — new server already up)",
                     prev.label,
-                    prev.allow_net,
+                    prev.spawn_key,
                 );
             }
 
             *guard = Some(ActiveBashServer {
                 label,
                 service: new_service,
-                allow_net,
+                spawn_key: new_key,
             });
             tracing::debug!("lazy tool-bash: (re)spawned with allow_net={allow_net}");
         }
@@ -462,18 +510,7 @@ impl LazyBash {
         // just populated it above (or confirmed an existing entry).
         let active = guard.as_ref().expect("active bash server present");
         let params = CallToolRequestParams::new(name.to_string()).with_arguments(args);
-        match active.service.call_tool(params).await {
-            Ok(result) => {
-                let is_error = result.is_error == Some(true);
-                let payload = render_result_payload(&result);
-                if is_error {
-                    ToolCallOutcome::error(payload)
-                } else {
-                    ToolCallOutcome::success(payload)
-                }
-            }
-            Err(e) => ToolCallOutcome::error(format!("tool transport error on {name}: {e}")),
-        }
+        ToolCallOutcome::from_call_result(name, active.service.call_tool(params).await)
     }
 }
 
@@ -514,6 +551,14 @@ fn build_bash_command(
 
     let wrapper = apply_sandbox(&mut cmd, command, project_root, &sandbox);
     let label = command.display().to_string();
+    log_sandbox_wrapper(&label, &wrapper, allow_net);
+    cmd
+}
+
+/// Log the resolved sandbox wrapper for a freshly built tool command.
+/// Single source of truth for the eager and bash spawn paths so the log
+/// format stays consistent.
+fn log_sandbox_wrapper(label: &str, wrapper: &SandboxWrapper, allow_net: bool) {
     match wrapper {
         SandboxWrapper::None => {}
         SandboxWrapper::Bwrap => {
@@ -523,7 +568,6 @@ fn build_bash_command(
             tracing::info!("sandbox[sandbox-exec]: {label} (allow_net={allow_net})");
         }
     }
-    cmd
 }
 
 /// Normalize the shape of an MCP tool result into a single `String` payload
@@ -581,6 +625,27 @@ impl ToolCallOutcome {
             payload,
         }
     }
+
+    /// Normalize the outcome of `RunningService::call_tool` into a
+    /// [`ToolCallOutcome`]. Shared by the eager and lazy bash dispatch
+    /// paths — `name` is the tool name, used for the transport-error
+    /// message only.
+    pub(crate) fn from_call_result(
+        name: &str,
+        result: std::result::Result<rmcp::model::CallToolResult, ServiceError>,
+    ) -> Self {
+        match result {
+            Ok(r) => {
+                let payload = render_result_payload(&r);
+                if r.is_error == Some(true) {
+                    Self::error(payload)
+                } else {
+                    Self::success(payload)
+                }
+            }
+            Err(e) => Self::error(format!("tool transport error on {name}: {e}")),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -592,12 +657,26 @@ mod lazy_bash_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Resolver that returns a fixed `allow_net` and counts invocations.
-    fn fixed_resolver(value: bool, counter: Arc<AtomicUsize>) -> BashNetResolver {
-        Arc::new(move |over: Option<bool>| {
-            counter.fetch_add(1, Ordering::SeqCst);
-            let v = over.unwrap_or(value);
-            Box::pin(async move { v })
+    /// Resolver that returns a fixed `allow_net` policy and counts invocations.
+    /// The trait's default `resolve` short-circuits explicit overrides, so
+    /// `resolve_policy` only runs when the caller passes `NetOverride::Inherit`.
+    struct FixedResolver {
+        policy: bool,
+        invocations: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl BashNetResolver for FixedResolver {
+        async fn resolve_policy(&self) -> bool {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            self.policy
+        }
+    }
+
+    fn fixed_resolver(policy: bool, counter: Arc<AtomicUsize>) -> BashNetResolverHandle {
+        Arc::new(FixedResolver {
+            policy,
+            invocations: counter,
         })
     }
 
@@ -609,23 +688,21 @@ mod lazy_bash_tests {
     /// decision. The real `LazyBash::dispatch` is exercised end-to-end
     /// in the integration test in `session.rs`.
     struct CountingBash {
-        resolver: BashNetResolver,
-        active: Mutex<Option<bool>>,
+        resolver: BashNetResolverHandle,
+        active: Mutex<Option<BashSpawnKey>>,
         spawn_count: AtomicUsize,
     }
 
     impl CountingBash {
-        async fn dispatch(&self, net_override: Option<bool>) -> bool {
+        async fn dispatch(&self, net_override: NetOverride) -> bool {
             let resolver = self.resolver.clone();
-            let allow_net = (resolver)(net_override).await;
+            let allow_net = resolver.resolve(net_override).await;
+            let new_key = BashSpawnKey { allow_net };
             let mut guard = self.active.lock().await;
-            let must_respawn = match guard.as_ref() {
-                None => true,
-                Some(prev) => *prev != allow_net,
-            };
+            let must_respawn = guard.as_ref() != Some(&new_key);
             if must_respawn {
                 self.spawn_count.fetch_add(1, Ordering::SeqCst);
-                *guard = Some(allow_net);
+                *guard = Some(new_key);
             }
             allow_net
         }
@@ -640,8 +717,8 @@ mod lazy_bash_tests {
             spawn_count: AtomicUsize::new(0),
         };
 
-        assert!(bash.dispatch(None).await);
-        assert!(bash.dispatch(None).await);
+        assert!(bash.dispatch(NetOverride::Inherit).await);
+        assert!(bash.dispatch(NetOverride::Inherit).await);
 
         assert_eq!(
             bash.spawn_count.load(Ordering::SeqCst),
@@ -654,21 +731,58 @@ mod lazy_bash_tests {
     async fn override_flip_respawns() {
         let counter = Arc::new(AtomicUsize::new(0));
         let bash = CountingBash {
-            // Resolver default is `true`; per-call override(false) flips it.
+            // Resolver policy is `true`; per-call ForceDeny flips it.
             resolver: fixed_resolver(true, counter.clone()),
             active: Mutex::new(None),
             spawn_count: AtomicUsize::new(0),
         };
 
-        // Call 1: override = Some(false) → spawn with allow_net=false.
-        assert!(!bash.dispatch(Some(false)).await);
-        // Call 2: no override → resolver returns true → respawn.
-        assert!(bash.dispatch(None).await);
+        // Call 1: ForceDeny → spawn with allow_net=false.
+        assert!(!bash.dispatch(NetOverride::ForceDeny).await);
+        // Call 2: Inherit → resolver returns true → respawn.
+        assert!(bash.dispatch(NetOverride::Inherit).await);
 
         assert_eq!(
             bash.spawn_count.load(Ordering::SeqCst),
             2,
             "flipping allow_net between calls must force a respawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_allow_short_circuits_policy() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bash = CountingBash {
+            // Resolver policy is `false` — but ForceAllow never asks.
+            resolver: fixed_resolver(false, counter.clone()),
+            active: Mutex::new(None),
+            spawn_count: AtomicUsize::new(0),
+        };
+
+        assert!(bash.dispatch(NetOverride::ForceAllow).await);
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "ForceAllow must NOT call resolve_policy — the override short-circuits"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_deny_short_circuits_policy() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let bash = CountingBash {
+            resolver: fixed_resolver(true, counter.clone()),
+            active: Mutex::new(None),
+            spawn_count: AtomicUsize::new(0),
+        };
+
+        assert!(!bash.dispatch(NetOverride::ForceDeny).await);
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "ForceDeny must NOT call resolve_policy — the override short-circuits"
         );
     }
 
@@ -681,10 +795,10 @@ mod lazy_bash_tests {
             spawn_count: AtomicUsize::new(0),
         };
 
-        // Call 1: no override → resolver true → spawn(true).
-        assert!(bash.dispatch(None).await);
-        // Call 2: override=Some(true) → matches active → reuse.
-        assert!(bash.dispatch(Some(true)).await);
+        // Call 1: Inherit → resolver true → spawn(true).
+        assert!(bash.dispatch(NetOverride::Inherit).await);
+        // Call 2: ForceAllow → matches active → reuse.
+        assert!(bash.dispatch(NetOverride::ForceAllow).await);
 
         assert_eq!(
             bash.spawn_count.load(Ordering::SeqCst),

@@ -22,7 +22,7 @@ use crate::permissions::{
 use crate::project;
 use crate::provider::RmcpProviderClient;
 use crate::sandbox::SandboxConfig;
-use crate::tools::{BashNetResolver, ToolRegistry};
+use crate::tools::{BashNetResolver, BashNetResolverHandle, NetOverride, ToolRegistry};
 
 /// Current transcript file schema version.
 ///
@@ -507,7 +507,11 @@ impl Host {
                             let guard = self.tools.lock().await;
                             let registry = guard.as_ref().expect("tools registry present");
                             registry
-                                .call_with_bash_net_override(&name, input.clone(), None)
+                                .call_with_bash_net_override(
+                                    &name,
+                                    input.clone(),
+                                    NetOverride::Inherit,
+                                )
                                 .await
                         };
                         let status = if outcome.is_error {
@@ -719,10 +723,15 @@ impl Host {
     /// shut down. If `tool-bash` is not configured on this host, returns
     /// `Ok((true, "unknown tool: run"))` from the tool dispatch layer.
     ///
-    /// `net_override`:
-    /// - `None` — use the configured bash-network policy (default: `Ask`).
-    /// - `Some(true)` — force `allow_net = true` for this call only.
-    /// - `Some(false)` — force `allow_net = false` for this call only.
+    /// `net_override` — per-call sandbox network preference. See
+    /// [`NetOverride`] for the 3-state semantics.
+    ///
+    /// - [`NetOverride::Inherit`] — defer to the configured bash-network
+    ///   policy (default: `Ask`). May park on a user prompt.
+    /// - [`NetOverride::ForceAllow`] — force `allow_net = true` for this
+    ///   call only.
+    /// - [`NetOverride::ForceDeny`] — force `allow_net = false` for this
+    ///   call only.
     ///
     /// Per-call overrides do not mutate the session decision cache.
     ///
@@ -733,7 +742,7 @@ impl Host {
     pub async fn run_bash_command(
         &self,
         command: &str,
-        net_override: Option<bool>,
+        net_override: NetOverride,
         events: Option<mpsc::Sender<TurnEvent>>,
     ) -> Result<(bool, String), String> {
         let _events_guard = CurrentTurnEventsGuard::install(&self.current_turn_events, &events);
@@ -758,43 +767,11 @@ impl Host {
     /// Idempotent — replacing the resolver multiple times is fine; the
     /// `ToolRegistry`'s lazy-bash slot reads it under a lock.
     async fn wire_self_into_resolver(&self) {
-        let policy = self.policy.clone();
-        let pending = self.pending_bash_network.clone();
-        let next_id = self.next_request_id.clone();
-        let current_events = self.current_turn_events.clone();
-        let resolver: crate::tools::BashNetResolver = Arc::new(move |over: Option<bool>| {
-            // Per-call override short-circuits: never touch the cache.
-            if let Some(v) = over {
-                return Box::pin(async move { v });
-            }
-            let policy = policy.clone();
-            let pending = pending.clone();
-            let next_id = next_id.clone();
-            // Snapshot the current-turn events Sender (if any) so the
-            // resolver can emit a prompt without holding a lock across
-            // the await.
-            let events = current_events
-                .lock()
-                .expect("current_turn_events poisoned")
-                .clone();
-            Box::pin(async move {
-                let summary = "tool-bash spawn requests network access".to_string();
-                match resolve_bash_network_with_state(
-                    &policy,
-                    &pending,
-                    &next_id,
-                    events.as_ref(),
-                    summary,
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!("tool-bash net resolver failed: {e}. Defaulting to deny.");
-                        false
-                    }
-                }
-            })
+        let resolver: BashNetResolverHandle = Arc::new(HostBashNetResolver {
+            policy: self.policy.clone(),
+            pending: self.pending_bash_network.clone(),
+            next_id: self.next_request_id.clone(),
+            current_events: self.current_turn_events.clone(),
         });
         let guard = self.tools.lock().await;
         if let Some(reg) = guard.as_ref() {
@@ -932,17 +909,68 @@ impl Drop for CurrentTurnEventsGuard<'_> {
     }
 }
 
+/// Single-source-of-truth summary text shown to the user when a `tool-bash`
+/// spawn requests network access. Surfaced via
+/// [`TurnEvent::BashNetworkRequested`]; consumed by the TUI's bash-network
+/// modal. Promoted to a public const so the test fixtures and production
+/// path can compare against the same string.
+pub const BASH_NETWORK_PROMPT_SUMMARY: &str = "tool-bash spawn requests network access";
+
 /// Bootstrap resolver used while the registry is being constructed —
-/// before we have an `Arc<Host>` we can capture into a closure that
-/// calls back into the host's permission state. It returns the
-/// per-call override if any, otherwise `false` (deny). The real
-/// resolver is installed in [`Host::wire_self_into_resolver`] right
-/// after `Host` construction.
-fn bootstrap_bash_net_resolver() -> BashNetResolver {
-    std::sync::Arc::new(|over: Option<bool>| {
-        let v = over.unwrap_or(false);
-        Box::pin(async move { v })
-    })
+/// before we have an `Arc<Host>` we can install a resolver that calls
+/// back into the host's permission state. Its `resolve_policy` returns
+/// `false` (deny). The real resolver is installed in
+/// [`Host::wire_self_into_resolver`] right after `Host` construction —
+/// at which point the trait's default `resolve` takes over, so explicit
+/// overrides short-circuit normally.
+struct BootstrapBashNetResolver;
+
+#[async_trait::async_trait]
+impl BashNetResolver for BootstrapBashNetResolver {
+    async fn resolve_policy(&self) -> bool {
+        false
+    }
+}
+
+fn bootstrap_bash_net_resolver() -> BashNetResolverHandle {
+    std::sync::Arc::new(BootstrapBashNetResolver)
+}
+
+/// Production resolver installed by [`Host::wire_self_into_resolver`]
+/// after `Host` construction. Holds `Arc`-shared handles into the host's
+/// permission state so `resolve_policy` can emit a
+/// [`TurnEvent::BashNetworkRequested`] event and await the user's answer.
+struct HostBashNetResolver {
+    policy: PermissionPolicy,
+    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<BashNetworkChoice>>>>,
+    next_id: Arc<AtomicU64>,
+    current_events: Arc<std::sync::Mutex<Option<mpsc::Sender<TurnEvent>>>>,
+}
+
+#[async_trait::async_trait]
+impl BashNetResolver for HostBashNetResolver {
+    async fn resolve_policy(&self) -> bool {
+        let events = self
+            .current_events
+            .lock()
+            .expect("current_turn_events poisoned")
+            .clone();
+        match resolve_bash_network_with_state(
+            &self.policy,
+            &self.pending,
+            &self.next_id,
+            events.as_ref(),
+            BASH_NETWORK_PROMPT_SUMMARY.to_string(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("tool-bash net resolver failed: {e}. Defaulting to deny.");
+                false
+            }
+        }
+    }
 }
 
 /// Reasons the lazy bash-network resolver can fail to produce a
@@ -1276,13 +1304,12 @@ mod policy_tests {
         use std::sync::Arc;
 
         use crate::permissions::BashNetworkPolicy;
-        use crate::tools::BashNetResolver;
+        use crate::tools::{BashNetResolver, NetOverride};
 
         // Build a transient Ask-policy host and reach into its state to
-        // construct the same resolver closure
-        // `wire_self_into_resolver` produces. We test through the
-        // resolver because the registry's lazy-bash dispatch path goes
-        // through exactly this closure on every call.
+        // construct the same resolver struct `wire_self_into_resolver`
+        // installs. We test through the resolver because the registry's
+        // lazy-bash dispatch path runs exactly this code on every call.
         let provider: Box<dyn ProviderClient + Send + Sync> =
             Box::new(ScriptedProvider::new("noop", json!({})));
         let project_root = std::env::temp_dir().join("savvagent-lazy-bash-test");
@@ -1298,38 +1325,11 @@ mod policy_tests {
         );
         let host = Arc::new(Host::with_components(config, provider).await.unwrap());
 
-        // Recreate exactly the resolver closure
-        // `Host::wire_self_into_resolver` installs into the registry's
-        // lazy slot. We can't easily reach into a real lazy slot
-        // without a working tool-bash binary in the test environment;
-        // building the resolver by hand exercises the same code path.
-        let policy = host.policy.clone();
-        let pending = host.pending_bash_network.clone();
-        let next_id = host.next_request_id.clone();
-        let current_events = host.current_turn_events.clone();
-        let resolver: BashNetResolver = Arc::new(move |over: Option<bool>| {
-            if let Some(v) = over {
-                return Box::pin(async move { v });
-            }
-            let policy = policy.clone();
-            let pending = pending.clone();
-            let next_id = next_id.clone();
-            let events = current_events
-                .lock()
-                .expect("current_turn_events poisoned")
-                .clone();
-            Box::pin(async move {
-                let summary = "tool-bash spawn requests network access".to_string();
-                super::resolve_bash_network_with_state(
-                    &policy,
-                    &pending,
-                    &next_id,
-                    events.as_ref(),
-                    summary,
-                )
-                .await
-                .unwrap_or(false)
-            })
+        let resolver = Arc::new(super::HostBashNetResolver {
+            policy: host.policy.clone(),
+            pending: host.pending_bash_network.clone(),
+            next_id: host.next_request_id.clone(),
+            current_events: host.current_turn_events.clone(),
         });
 
         // Publish a per-turn events channel into the host's slot — same
@@ -1338,10 +1338,9 @@ mod policy_tests {
         *host.current_turn_events.lock().unwrap() = Some(events_tx);
 
         // Spawn the first resolve in a task so we can pump events and
-        // call resolve_bash_network_decision concurrently. Note: the
-        // resolver future is `Send + 'static` because all state is Arc.
+        // call resolve_bash_network_decision concurrently.
         let resolver_clone = resolver.clone();
-        let first = tokio::spawn(async move { (resolver_clone)(None).await });
+        let first = tokio::spawn(async move { resolver_clone.resolve(NetOverride::Inherit).await });
 
         // We expect a single BashNetworkRequested. Pluck its id, then
         // answer AlwaysThisSession so the cache populates.
@@ -1359,9 +1358,7 @@ mod policy_tests {
         assert!(allow_first, "AlwaysThisSession must resolve allow_net=true");
 
         // Second resolve: should NOT emit another prompt (cache hit).
-        // Drop the existing receiver's stash by trying a non-blocking
-        // recv after the second resolve.
-        let allow_second = (resolver)(None).await;
+        let allow_second = resolver.resolve(NetOverride::Inherit).await;
         assert!(
             allow_second,
             "second resolve must reuse the cached AlwaysThisSession decision"
@@ -1386,18 +1383,17 @@ mod policy_tests {
         drop(resolver);
     }
 
-    /// The closure that `Host::wire_self_into_resolver` builds must
-    /// short-circuit a per-call override (`Some(true)` / `Some(false)`)
-    /// *before* it touches the session decision cache. This pins that
-    /// contract: even after running the closure with both override
-    /// values back-to-back, the policy's cached decision must stay
-    /// `None`.
+    /// The trait's default `resolve` impl short-circuits explicit
+    /// overrides *before* it touches the session decision cache. This
+    /// pins that contract: even after running the resolver with both
+    /// `ForceAllow` and `ForceDeny` back-to-back, the policy's cached
+    /// decision must stay `None`.
     #[tokio::test]
     async fn per_call_override_short_circuits_without_touching_cache() {
         use std::sync::Arc;
 
         use crate::permissions::BashNetworkPolicy;
-        use crate::tools::BashNetResolver;
+        use crate::tools::{BashNetResolver, NetOverride};
 
         let provider: Box<dyn ProviderClient + Send + Sync> =
             Box::new(ScriptedProvider::new("noop", json!({})));
@@ -1414,52 +1410,27 @@ mod policy_tests {
         );
         let host = Arc::new(Host::with_components(config, provider).await.unwrap());
 
-        // Rebuild the same closure shape as `wire_self_into_resolver`.
-        let policy = host.policy.clone();
-        let pending = host.pending_bash_network.clone();
-        let next_id = host.next_request_id.clone();
-        let current_events = host.current_turn_events.clone();
-        let resolver: BashNetResolver = Arc::new(move |over: Option<bool>| {
-            if let Some(v) = over {
-                return Box::pin(async move { v });
-            }
-            let policy = policy.clone();
-            let pending = pending.clone();
-            let next_id = next_id.clone();
-            let events = current_events
-                .lock()
-                .expect("current_turn_events poisoned")
-                .clone();
-            Box::pin(async move {
-                let summary = "tool-bash spawn requests network access".to_string();
-                super::resolve_bash_network_with_state(
-                    &policy,
-                    &pending,
-                    &next_id,
-                    events.as_ref(),
-                    summary,
-                )
-                .await
-                .unwrap_or(false)
-            })
+        let resolver = Arc::new(super::HostBashNetResolver {
+            policy: host.policy.clone(),
+            pending: host.pending_bash_network.clone(),
+            next_id: host.next_request_id.clone(),
+            current_events: host.current_turn_events.clone(),
         });
 
-        // Call with Some(true) override.
-        let allow = (resolver)(Some(true)).await;
+        let allow = resolver.resolve(NetOverride::ForceAllow).await;
         assert!(allow);
         assert_eq!(
             host.policy.bash_network_cached(),
             None,
-            "override Some(true) must NOT update the cache"
+            "ForceAllow must NOT update the cache"
         );
 
-        // Call with Some(false) override.
-        let allow = (resolver)(Some(false)).await;
+        let allow = resolver.resolve(NetOverride::ForceDeny).await;
         assert!(!allow);
         assert_eq!(
             host.policy.bash_network_cached(),
             None,
-            "override Some(false) must NOT update the cache"
+            "ForceDeny must NOT update the cache"
         );
     }
 
