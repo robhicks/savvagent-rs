@@ -307,6 +307,13 @@ pub struct App {
     /// matches what the host will actually apply, not whatever was on disk
     /// at TUI launch time.
     pub splash_sandbox: crate::splash::SandboxSplashState,
+
+    /// Plugin registry (populated at startup via `install_plugin_runtime`).
+    pub plugin_registry:
+        Option<std::sync::Arc<tokio::sync::RwLock<crate::plugin::registry::PluginRegistry>>>,
+    /// Indexes built from each enabled plugin's manifest.
+    pub plugin_indexes:
+        Option<std::sync::Arc<tokio::sync::RwLock<crate::plugin::manifests::Indexes>>>,
 }
 
 impl App {
@@ -373,9 +380,23 @@ impl App {
                 let (cfg, status) = SandboxConfig::load_with_status();
                 crate::splash::SandboxSplashState::from_load(&cfg, &status)
             },
+            plugin_registry: None,
+            plugin_indexes: None,
         };
         app.refresh_commands();
         app
+    }
+
+    /// Install the plugin runtime. Called once at startup from `main`.
+    pub fn install_plugin_runtime(
+        &mut self,
+        registry: crate::plugin::registry::PluginRegistry,
+        indexes: crate::plugin::manifests::Indexes,
+    ) {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        self.plugin_registry = Some(Arc::new(RwLock::new(registry)));
+        self.plugin_indexes = Some(Arc::new(RwLock::new(indexes)));
     }
 
     /// Refresh the splash sandbox indicator from a connected host. Called
