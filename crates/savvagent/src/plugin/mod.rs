@@ -51,6 +51,7 @@ pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
     vec![
         Box::new(builtin::clear::ClearPlugin::new()),
         Box::new(builtin::command_palette::CommandPalettePlugin::new()),
+        Box::new(builtin::connect::ConnectPlugin::new()),
         Box::new(builtin::edit_file::EditFilePlugin::new()),
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
@@ -74,6 +75,7 @@ mod tests {
             .collect();
         assert!(ids.contains(&"internal:clear".to_string()));
         assert!(ids.contains(&"internal:command-palette".to_string()));
+        assert!(ids.contains(&"internal:connect".to_string()));
         assert!(ids.contains(&"internal:edit-file".to_string()));
         assert!(ids.contains(&"internal:home-footer".to_string()));
         assert!(ids.contains(&"internal:home-tips".to_string()));
@@ -81,6 +83,6 @@ mod tests {
         assert!(ids.contains(&"internal:save".to_string()));
         assert!(ids.contains(&"internal:splash".to_string()));
         assert!(ids.contains(&"internal:view-file".to_string()));
-        assert_eq!(plugins.len(), 9);
+        assert_eq!(plugins.len(), 10);
     }
 }

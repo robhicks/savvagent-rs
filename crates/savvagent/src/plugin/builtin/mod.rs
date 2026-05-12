@@ -6,6 +6,9 @@ pub mod clear;
 /// Filterable slash-command picker; opened via `/` from the home view.
 pub mod command_palette;
 
+/// Provider connection picker; opened via `/connect` with no args.
+pub mod connect;
+
 /// Basic in-TUI file editor; opened via `/edit <path>`.
 pub mod edit_file;
 
