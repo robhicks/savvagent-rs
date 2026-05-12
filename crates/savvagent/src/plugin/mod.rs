@@ -1,6 +1,10 @@
 //! Plugin runtime root. PR 1 ships only the empty `register_builtins()`
 //! entry point; subsequent PRs add registry/screen stack/routers/effects.
 
+/// Built-in plugin implementations shipped with the binary.
+#[allow(dead_code)] // wired into register_builtins as each plugin lands
+pub mod builtin;
+
 /// In-memory registry of constructed plugin instances and their enabled-set.
 #[allow(dead_code)] // wired into the event loop in Task 2.8
 pub mod registry;
