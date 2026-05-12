@@ -36,3 +36,10 @@ pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};
 /// Closed-vocabulary effect and bound-action types returned by plugin callbacks.
 pub mod effect;
 pub use effect::{BoundAction, Effect};
+
+/// Plugin manifest, contributions bundle, and per-kind spec types.
+pub mod manifest;
+pub use manifest::{
+    Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind,
+    ProviderSpec, ScreenLayout, ScreenSpec, SlashSpec, SlotSpec,
+};
