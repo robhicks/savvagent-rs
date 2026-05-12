@@ -1110,10 +1110,34 @@ impl App {
         tracing::debug!("register_provider effect ignored in PR 3");
     }
 
-    /// Save transcript to the given path. Stub — full wiring in PR 5.
-    #[allow(unused_variables)]
-    pub fn save_transcript_to(&mut self, path: String) {
-        tracing::debug!("save_transcript_to effect ignored in PR 3");
+    /// Save transcript to the given path. Serializes `entries` to a JSON array
+    /// of strings (one element per entry) and writes to `path`.
+    pub fn save_transcript_to(&mut self, path: String) -> std::io::Result<()> {
+        let lines: Vec<String> = self
+            .entries
+            .iter()
+            .map(|e| match e {
+                Entry::User(t) => format!("user: {t}"),
+                Entry::Assistant(t) => format!("assistant: {t}"),
+                Entry::Tool {
+                    name,
+                    arguments,
+                    status,
+                    ..
+                } => {
+                    let status_label = match status {
+                        Some(ToolCallStatus::Ok) => "ok",
+                        Some(ToolCallStatus::Errored) => "error",
+                        None => "in-flight",
+                    };
+                    format!("tool: {name}({arguments}) [{status_label}]")
+                }
+                Entry::Note(t) => format!("note: {t}"),
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&lines).map_err(std::io::Error::other)?;
+        std::fs::write(&path, json)?;
+        Ok(())
     }
 
     /// Submit a prompt to the active provider. Stub — full wiring in PR 5.

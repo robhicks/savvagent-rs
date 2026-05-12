@@ -49,10 +49,15 @@ pub mod effects;
 /// PR 8 adds: plugins-manager.
 pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
     vec![
+        Box::new(builtin::clear::ClearPlugin::new()),
         Box::new(builtin::command_palette::CommandPalettePlugin::new()),
+        Box::new(builtin::connect::ConnectPlugin::new()),
         Box::new(builtin::edit_file::EditFilePlugin::new()),
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
+        Box::new(builtin::model::ModelPlugin::new()),
+        Box::new(builtin::resume::ResumePlugin::new()),
+        Box::new(builtin::save::SavePlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
     ]
@@ -63,18 +68,23 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn register_builtins_pr4_complete() {
+    async fn register_builtins_pr5_complete() {
         let plugins = register_builtins();
         let ids: Vec<_> = plugins
             .iter()
             .map(|p| p.manifest().id.as_str().to_string())
             .collect();
+        assert!(ids.contains(&"internal:clear".to_string()));
         assert!(ids.contains(&"internal:command-palette".to_string()));
+        assert!(ids.contains(&"internal:connect".to_string()));
         assert!(ids.contains(&"internal:edit-file".to_string()));
         assert!(ids.contains(&"internal:home-footer".to_string()));
         assert!(ids.contains(&"internal:home-tips".to_string()));
+        assert!(ids.contains(&"internal:model".to_string()));
+        assert!(ids.contains(&"internal:resume".to_string()));
+        assert!(ids.contains(&"internal:save".to_string()));
         assert!(ids.contains(&"internal:splash".to_string()));
         assert!(ids.contains(&"internal:view-file".to_string()));
-        assert_eq!(plugins.len(), 6);
+        assert_eq!(plugins.len(), 11);
     }
 }

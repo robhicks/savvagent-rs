@@ -376,8 +376,10 @@ async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
 /// Run a slash command and apply its side effects. Used both when the user
 /// types `/foo` + Enter and when they pick a no-arg command from the
 /// palette. Commands that need direct host access (`/tools`, `/model`,
-/// `/save`) are dispatched here; the rest fall through to
-/// [`App::handle_command`].
+/// `/bash`, `/sandbox`, `/theme`, `/resume`) are dispatched here first.
+/// All other slash commands are routed through the plugin SlashRouter; on
+/// `SlashError::Unknown` we fall back to the legacy `App::handle_command`
+/// for backwards compatibility with commands not yet ported to plugins.
 async fn dispatch_slash_command(
     app: &mut App,
     cmd: &str,
@@ -423,22 +425,44 @@ async fn dispatch_slash_command(
         _ => {}
     }
 
-    let was_save = trimmed == "/save";
-    app.handle_command(cmd);
-    if was_save {
-        if let Some(host) = current_host(host_slot).await {
-            match save_transcript_now(app, &host).await {
-                Ok(p) if !p.as_os_str().is_empty() => {
-                    app.push_note(format!("Saved {}", p.display()));
-                    app.last_transcript = Some(p);
+    // Try the plugin SlashRouter before falling through to the legacy handler.
+    // Parse "/cmd arg1 arg2..." into (name, args).
+    let name_str = head.strip_prefix('/').unwrap_or(head);
+    let args: Vec<String> = rest.split_whitespace().map(String::from).collect();
+    if let (Some(reg), Some(idx)) = (&app.plugin_registry, &app.plugin_indexes) {
+        let reg = reg.clone();
+        let idx = idx.clone();
+        let effs_result = {
+            let reg_guard = reg.read().await;
+            let idx_guard = idx.read().await;
+            let router = crate::plugin::slash::SlashRouter::new(&idx_guard, &reg_guard);
+            router.dispatch(name_str, args).await
+        };
+        match effs_result {
+            Ok(effs) => {
+                if let Err(e) = crate::plugin::effects::apply_effects(app, effs).await {
+                    tracing::warn!(error = %e, command = %name_str, "apply_effects after textarea slash dispatch failed");
+                    app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                        "Command failed: {e}"
+                    )));
                 }
-                Ok(_) => app.push_note("Nothing to save."),
-                Err(e) => app.push_note(format!("Save error: {e}")),
+                return;
             }
-        } else {
-            app.push_note("Not connected — nothing to save.");
+            Err(crate::plugin::slash::SlashError::Unknown(_)) => {
+                // Fall through to legacy handle_command below.
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, command = %name_str, "textarea slash dispatch failed");
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "Command failed: {e}"
+                )));
+                return;
+            }
         }
     }
+
+    // TODO: remove legacy fallback once all slash commands are plugin-driven.
+    app.handle_command(cmd);
 }
 
 /// Render `/tools` output: one note per registered tool, with the policy's
