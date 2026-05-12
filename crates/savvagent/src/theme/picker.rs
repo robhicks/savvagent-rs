@@ -15,25 +15,26 @@ use super::Theme;
 /// In v0.8 these fields lived directly on `App`. The lift puts them in
 /// one struct so PR 6's `Plugin` impl can wrap a single value rather
 /// than four scattered fields.
-pub struct ThemePicker {
+#[derive(Debug)]
+pub(crate) struct ThemePicker {
     /// Substring filter narrowing the catalog. Empty means "show every
     /// theme". Matched case-sensitively against [`Theme::name`] (the
     /// built-in name or upstream slug).
-    pub filter: String,
+    pub(crate) filter: String,
     /// Index into the filtered theme list (`filtered_themes()`); not an
     /// index into the rendered rows, which include section-header
     /// decorations.
-    pub cursor: usize,
-    /// Snapshot of the active theme at picker-open time. Restored on
-    /// Esc so live preview is fully undoable; ignored on Enter.
-    pub pre_open_theme: Theme,
+    pub(crate) cursor: usize,
+    /// Snapshot of the theme that was active when the picker opened.
+    /// Set once by `new`; never mutated. Used to restore on `Cancel`.
+    pub(crate) pre_open_theme: Theme,
 }
 
 /// Result of [`ThemePicker::on_key`]. The caller (host key dispatch)
 /// owns the side effects: applying the previewed theme, persisting on
 /// commit, or restoring the pre-open snapshot on cancel.
 #[derive(Debug, PartialEq, Eq)]
-pub enum PickerOutcome {
+pub(crate) enum PickerOutcome {
     /// No state change observable to the caller — picker stays open with
     /// no preview update.
     Stay,
@@ -49,7 +50,7 @@ pub enum PickerOutcome {
 impl ThemePicker {
     /// Open the picker with the active theme as both the pre-open
     /// snapshot and the initial cursor target. Filter starts empty.
-    pub fn new(active: Theme) -> Self {
+    pub(crate) fn new(active: Theme) -> Self {
         let mut picker = Self {
             filter: String::new(),
             cursor: 0,
@@ -68,7 +69,7 @@ impl ThemePicker {
     /// Catalog filtered by case-sensitive substring match on
     /// [`Theme::name`]. Returns only selectable rows — section headers
     /// are render-time decoration handled in `ui.rs`.
-    pub fn filtered_themes(&self) -> Vec<Theme> {
+    pub(crate) fn filtered_themes(&self) -> Vec<Theme> {
         let filter = self.filter.as_str();
         Theme::all()
             .into_iter()
@@ -78,7 +79,7 @@ impl ThemePicker {
 
     /// Dispatch a single key event. Returns the outcome the caller
     /// should act on; the picker mutates its own state in-place.
-    pub fn on_key(&mut self, key: KeyEvent) -> PickerOutcome {
+    pub(crate) fn on_key(&mut self, key: KeyEvent) -> PickerOutcome {
         match key.code {
             KeyCode::Esc => PickerOutcome::Cancel,
             KeyCode::Enter => {
@@ -86,7 +87,7 @@ impl ThemePicker {
                 // edge case 2: Enter on a zero-match filter must NOT
                 // commit the last-good preview.
                 let candidates = self.filtered_themes();
-                match candidates.get(self.cursor).cloned() {
+                match candidates.get(self.cursor).copied() {
                     Some(t) => PickerOutcome::Apply(t),
                     None => PickerOutcome::Stay,
                 }

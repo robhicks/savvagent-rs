@@ -294,7 +294,7 @@ pub struct App {
     /// [`InputMode::SelectingTheme`] is active; `None` otherwise. PR 6
     /// will wrap this in a Screen plugin and remove the
     /// `SelectingTheme` variant.
-    pub theme_picker: Option<crate::theme::picker::ThemePicker>,
+    pub(crate) theme_picker: Option<crate::theme::picker::ThemePicker>,
 
     /// Cached classification of the sandbox state for the startup splash.
     /// Loaded once at `App::new` via `SandboxConfig::load_with_status` so
@@ -640,7 +640,7 @@ impl App {
     // the lift. The App-level wrappers below are retained for the v0.8
     // test surface and for callers that didn't migrate to the new
     // struct yet.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn theme_picker_filtered_themes(&self) -> Vec<crate::theme::Theme> {
         match &self.theme_picker {
             Some(p) => p.filtered_themes(),
@@ -683,7 +683,7 @@ impl App {
     /// Move the picker cursor down one row via the lifted struct. Live
     /// preview is applied to `active_theme` when the picker emits a
     /// `PreviewTheme` outcome.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn theme_picker_cursor_down(&mut self) {
         let Some(p) = self.theme_picker.as_mut() else {
             return;
@@ -698,7 +698,7 @@ impl App {
     }
 
     /// Move the picker cursor up one row via the lifted struct.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn theme_picker_cursor_up(&mut self) {
         let Some(p) = self.theme_picker.as_mut() else {
             return;
@@ -715,7 +715,7 @@ impl App {
     /// Append `c` to the picker filter via the lifted struct, then
     /// apply any live preview the picker emits. No-op when the picker
     /// is closed.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn theme_picker_typed_char(&mut self, c: char) {
         let Some(p) = self.theme_picker.as_mut() else {
             return;
@@ -730,7 +730,7 @@ impl App {
     }
 
     /// Pop one char from the picker filter via the lifted struct.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn theme_picker_backspace(&mut self) {
         let Some(p) = self.theme_picker.as_mut() else {
             return;
@@ -749,7 +749,7 @@ impl App {
     /// responsibility — the keypath in `main.rs` does it so save
     /// failures can be surfaced to the user without coupling `App` to
     /// the filesystem error path.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn theme_picker_confirm(&mut self) {
         self.theme_picker = None;
         self.input_mode = InputMode::Editing;
@@ -757,7 +757,7 @@ impl App {
 
     /// Close the picker, reverting [`Self::active_theme`] to the
     /// snapshot taken at open time.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn theme_picker_cancel(&mut self) {
         if let Some(p) = self.theme_picker.as_ref() {
             self.active_theme = p.pre_open_theme;
