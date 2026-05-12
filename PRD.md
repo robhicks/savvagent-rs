@@ -210,7 +210,7 @@ M1–M9 are shipped. M7 (v0.2.0) added Layer-1 path containment, M8 (v0.3.0) the
 
 ### M6 · Public release v0.1.0 (✅ done)
 - Distributed via [`cargo-dist`](https://opensource.axo.dev/cargo-dist/): `.tar.xz` for Linux (x86_64 / aarch64) and macOS arm64, `.zip` for Windows x86_64, plus shell (`curl | sh`) and PowerShell (`irm | iex`) installers from GitHub Releases. Config in `[workspace.metadata.dist]`, workflow at `.github/workflows/release.yml`.
-- License: MIT OR Apache-2.0.
+- License: AGPL-3.0-or-later.
 - Crates.io publication remains deferred until there's an external consumer for the libraries.
 - TUI editor widget decision (see §9): `tui-textarea` for the prompt input; `ratatui-code-editor` retained for the in-TUI viewer/editor pending a future consolidation pass.
 

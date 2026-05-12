@@ -270,4 +270,5 @@ the system prompt. See `crates/savvagent-host/src/project.rs` and the
 
 ## License
 
-Dual-licensed under Apache-2.0 OR MIT, at your option.
+Licensed under the GNU Affero General Public License v3.0 or later
+(`AGPL-3.0-or-later`). See [`LICENSE`](LICENSE) for the full text.

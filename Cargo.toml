@@ -19,7 +19,7 @@ default-members = ["crates/savvagent"]
 [workspace.package]
 version = "0.8.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-or-later"
 repository = "https://github.com/robhicks/savvagent-rs"
 rust-version = "1.85"
 
