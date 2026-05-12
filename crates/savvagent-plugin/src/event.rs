@@ -115,7 +115,9 @@ mod tests {
 
     #[test]
     fn kind_matches_variant() {
-        let e = HostEvent::Connect { provider_id: ProviderId("anthropic".into()) };
+        let e = HostEvent::Connect {
+            provider_id: ProviderId("anthropic".into()),
+        };
         assert_eq!(e.kind(), HookKind::Connect);
 
         let e = HostEvent::TurnStart { turn_id: 7 };

@@ -156,7 +156,12 @@ impl ThemePalette {
     /// Constructor that prevents external code from depending on field order.
     /// Required by `#[non_exhaustive]`.
     pub fn new(bg: ThemeColor, fg: ThemeColor, accent: ThemeColor, muted: ThemeColor) -> Self {
-        Self { bg, fg, accent, muted }
+        Self {
+            bg,
+            fg,
+            accent,
+            muted,
+        }
     }
 }
 
@@ -220,14 +225,22 @@ mod tests {
 
     #[test]
     fn region_fields_are_u16() {
-        let r = Region { x: 0, y: 0, width: 80, height: 24 };
+        let r = Region {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
         let area: u32 = r.width as u32 * r.height as u32;
         assert_eq!(area, 1920);
     }
 
     #[test]
     fn timestamp_is_i64_secs_plus_u32_nanos() {
-        let t = Timestamp { secs: 1_700_000_000, nanos: 500_000_000 };
+        let t = Timestamp {
+            secs: 1_700_000_000,
+            nanos: 500_000_000,
+        };
         assert_eq!(t.secs, 1_700_000_000);
         assert_eq!(t.nanos, 500_000_000);
     }
@@ -242,7 +255,12 @@ mod tests {
     fn key_event_portable_is_constructible() {
         let k = KeyEventPortable {
             code: KeyCodePortable::Char('a'),
-            modifiers: KeyMods { ctrl: true, alt: false, shift: false, meta: false },
+            modifiers: KeyMods {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                meta: false,
+            },
         };
         assert!(k.modifiers.ctrl);
         match k.code {
@@ -256,7 +274,10 @@ mod tests {
         let c = ChordPortable {
             key: KeyEventPortable {
                 code: KeyCodePortable::Char('s'),
-                modifiers: KeyMods { ctrl: true, ..Default::default() },
+                modifiers: KeyMods {
+                    ctrl: true,
+                    ..Default::default()
+                },
             },
         };
         match c.key.code {
@@ -285,8 +306,12 @@ mod tests {
     #[test]
     fn screen_args_variants_are_typed() {
         let _none = ScreenArgs::None;
-        let _theme = ScreenArgs::ThemePicker { current_slug: "dark".into() };
-        let _view = ScreenArgs::ViewFile { path: "/tmp/x.rs".into() };
+        let _theme = ScreenArgs::ThemePicker {
+            current_slug: "dark".into(),
+        };
+        let _view = ScreenArgs::ViewFile {
+            path: "/tmp/x.rs".into(),
+        };
         let _resume = ScreenArgs::ResumePicker {
             transcripts: vec![TranscriptHandle {
                 id: "t1".into(),

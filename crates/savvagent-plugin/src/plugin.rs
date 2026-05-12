@@ -43,11 +43,7 @@ pub trait Plugin: Send + Sync {
     /// screen id this plugin declared in its manifest. Each call creates a new
     /// instance — per-open state lives in the returned `Screen`. Default impl
     /// returns `PluginError::ScreenNotFound`.
-    fn create_screen(
-        &self,
-        id: &str,
-        args: ScreenArgs,
-    ) -> Result<Box<dyn Screen>, PluginError> {
+    fn create_screen(&self, id: &str, args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
         let _ = args;
         Err(PluginError::ScreenNotFound(id.to_string()))
     }
@@ -55,10 +51,7 @@ pub trait Plugin: Send + Sync {
     /// Handle a `HostEvent`. Called for each event whose `HookKind` appears in
     /// this plugin's manifest hooks list. Sequential per event (other subscribers
     /// run after); accumulated effects are applied as a batch.
-    async fn on_event(
-        &mut self,
-        event: HostEvent,
-    ) -> Result<Vec<Effect>, PluginError> {
+    async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
         let _ = event;
         Ok(vec![])
     }

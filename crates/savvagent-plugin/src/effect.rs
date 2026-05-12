@@ -98,7 +98,10 @@ mod tests {
     #[test]
     fn stack_is_recursive() {
         let outer = Effect::Stack(vec![
-            Effect::SetActiveTheme { slug: "dark".into(), persist: true },
+            Effect::SetActiveTheme {
+                slug: "dark".into(),
+                persist: true,
+            },
             Effect::CloseScreen,
         ]);
         match outer {
@@ -110,6 +113,9 @@ mod tests {
     #[test]
     fn bound_action_holds_an_effect() {
         let _ = BoundAction::EmitEffect(Effect::Quit);
-        let _ = BoundAction::RunSlash { name: "theme".into(), args: vec![] };
+        let _ = BoundAction::RunSlash {
+            name: "theme".into(),
+            args: vec![],
+        };
     }
 }

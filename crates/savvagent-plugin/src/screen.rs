@@ -23,18 +23,12 @@ pub trait Screen: Send {
     /// Handle a key event while this screen is on top of the runtime's stack.
     /// Returned effects are applied after the call. Returning `Effect::CloseScreen`
     /// pops this screen off the stack.
-    async fn on_key(
-        &mut self,
-        key: KeyEventPortable,
-    ) -> Result<Vec<Effect>, PluginError>;
+    async fn on_key(&mut self, key: KeyEventPortable) -> Result<Vec<Effect>, PluginError>;
 
     /// Optional: handle a `HostEvent` while this screen is open. Default impl
     /// returns no effects. Useful for screens that need to react to async work
     /// (e.g., transcript-list-ready notifications).
-    async fn on_event(
-        &mut self,
-        event: HostEvent,
-    ) -> Result<Vec<Effect>, PluginError> {
+    async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
         let _ = event;
         Ok(vec![])
     }

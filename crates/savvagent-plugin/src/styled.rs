@@ -119,7 +119,10 @@ mod tests {
                 text: "hello".to_string(),
                 fg: Some(ThemeColor::Green),
                 bg: None,
-                modifiers: TextMods { bold: true, ..Default::default() },
+                modifiers: TextMods {
+                    bold: true,
+                    ..Default::default()
+                },
             }],
         };
         assert_eq!(line.spans.len(), 1);
@@ -130,7 +133,11 @@ mod tests {
     fn theme_color_supports_named_indexed_and_rgb() {
         let _named = ThemeColor::Red;
         let _idx = ThemeColor::Indexed(208);
-        let _rgb = ThemeColor::Rgb { r: 255, g: 128, b: 64 };
+        let _rgb = ThemeColor::Rgb {
+            r: 255,
+            g: 128,
+            b: 64,
+        };
     }
 
     #[test]

@@ -26,9 +26,8 @@ pub mod event;
 pub use event::{HookKind, HostEvent};
 
 pub use types::{
-    ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, PluginId,
-    ProviderId, Region, ScreenArgs, ScreenInstanceId, ThemeEntry,
-    ThemePalette, Timestamp, TranscriptHandle,
+    ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, PluginId, ProviderId, Region,
+    ScreenArgs, ScreenInstanceId, ThemeEntry, ThemePalette, Timestamp, TranscriptHandle,
 };
 
 pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};
@@ -40,8 +39,8 @@ pub use effect::{BoundAction, Effect};
 /// Plugin manifest, contributions bundle, and per-kind spec types.
 pub mod manifest;
 pub use manifest::{
-    Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind,
-    ProviderSpec, ScreenLayout, ScreenSpec, SlashSpec, SlotSpec,
+    Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind, ProviderSpec, ScreenLayout,
+    ScreenSpec, SlashSpec, SlotSpec,
 };
 
 /// The [`Plugin`] trait — the WIT-portable entry point each plugin implements.
@@ -77,15 +76,30 @@ mod trait_smoke {
     async fn dummy_plugin_default_impls_do_nothing() {
         let mut p = DummyPlugin;
         assert!(p.handle_slash("noop", vec![]).await.unwrap().is_empty());
-        assert!(p.on_event(HostEvent::HostStarting).await.unwrap().is_empty());
+        assert!(
+            p.on_event(HostEvent::HostStarting)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert!(p.themes().is_empty());
 
         // create_screen default returns ScreenNotFound for the given id.
         let create_result = p.create_screen("anything", ScreenArgs::None);
-        assert!(matches!(create_result, Err(PluginError::ScreenNotFound(ref id)) if id == "anything"));
+        assert!(
+            matches!(create_result, Err(PluginError::ScreenNotFound(ref id)) if id == "anything")
+        );
 
         // render_slot default returns an empty Vec.
-        let lines = p.render_slot("home.tips", Region { x: 0, y: 0, width: 80, height: 1 });
+        let lines = p.render_slot(
+            "home.tips",
+            Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 1,
+            },
+        );
         assert!(lines.is_empty());
     }
 }
