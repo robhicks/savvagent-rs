@@ -51,7 +51,7 @@ pub fn render(frame: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
 
     let sandbox_cfg = SandboxConfig::load();
-    let (sandbox_text, sandbox_style) = if sandbox_cfg.enabled {
+    let (sandbox_text, sandbox_style) = if sandbox_cfg.is_enabled() {
         (
             "sandbox: on (use /sandbox off to disable)",
             sandbox_on_style,

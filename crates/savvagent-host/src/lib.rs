@@ -32,7 +32,9 @@ pub use permissions::{
     ArgPattern, BashNetworkChoice, BashNetworkPolicy, FrontMatterPermissions, PermissionDecision,
     PermissionPolicy, PermissionsToml, Rule, SerializableRule, Verdict,
 };
-pub use sandbox::{SandboxConfig, SandboxWrapper, ToolSandboxOverride, apply_sandbox};
+pub use sandbox::{
+    SCHEMA_VERSION, SandboxConfig, SandboxMode, SandboxWrapper, ToolSandboxOverride, apply_sandbox,
+};
 pub use savvagent_protocol::{ListModelsResponse, ModelInfo, ToolDef};
 pub use session::{
     BashNetResolveError, Host, HostError, TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus,

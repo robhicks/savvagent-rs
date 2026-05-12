@@ -56,8 +56,10 @@ pub struct HostConfig {
     ///
     /// When `None`, the host loads `~/.savvagent/sandbox.toml` via
     /// [`SandboxConfig::load`]. Sandboxing is enabled by default on Linux and
-    /// macOS as of v0.7 (`SandboxConfig::enabled = true`); set it to `false`
-    /// to disable, or run `/sandbox off` in the TUI.
+    /// macOS as of v0.7; set the mode to [`SandboxMode::Off`] to disable, or
+    /// run `/sandbox off` in the TUI.
+    ///
+    /// [`SandboxMode::Off`]: crate::SandboxMode::Off
     pub sandbox: Option<SandboxConfig>,
 }
 

@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use savvagent_host::{SandboxConfig, apply_sandbox};
+use savvagent_host::{SandboxConfig, SandboxMode, apply_sandbox};
 
 fn bwrap_available() -> bool {
     std::env::var_os("PATH")
@@ -39,7 +39,7 @@ async fn sandbox_blocks_reads_of_ssh_directory() {
     cmd.arg(&secret_path);
     let tool_bin = PathBuf::from("/usr/bin/cat");
     let config = SandboxConfig {
-        enabled: true,
+        mode: SandboxMode::On,
         ..SandboxConfig::default()
     };
     apply_sandbox(&mut cmd, &tool_bin, project_root.path(), &config);

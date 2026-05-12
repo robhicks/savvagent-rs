@@ -3,10 +3,22 @@
 //! Each tool child process can be wrapped in an OS sandbox so that it cannot
 //! access the network or write outside the project root even if the tool binary
 //! itself is compromised. Sandboxing is **default-on** as of v0.7.0 on Linux
-//! and macOS — set [`SandboxConfig::enabled`] to `false` (or run `/sandbox
-//! off`) to opt out. Existing configs that explicitly set `enabled = false`
-//! are preserved across upgrade via the struct-level `#[serde(default)]` on
-//! [`SandboxConfig`].
+//! and macOS — set [`SandboxConfig`]'s mode to [`SandboxMode::Off`] (or run
+//! `/sandbox off`) to opt out. Existing configs that explicitly set
+//! `enabled = false` are preserved across upgrade via the struct-level
+//! `#[serde(default)]` on [`SandboxConfig`].
+//!
+//! # 3-state mode (v0.8)
+//!
+//! [`SandboxMode`] distinguishes "no explicit preference" ([`Default`]) from
+//! explicit opt-in ([`On`]) and explicit opt-out ([`Off`]). Wire format is
+//! still the legacy `enabled = bool` key: absent → `Default`, `true` → `On`,
+//! `false` → `Off`. This lets the splash banner suppress the v0.7-style nag
+//! line for users who have explicitly chosen a state, regardless of which.
+//!
+//! [`Default`]: SandboxMode::Default
+//! [`On`]: SandboxMode::On
+//! [`Off`]: SandboxMode::Off
 //!
 //! # Platform support
 //!
@@ -47,8 +59,64 @@ use serde::{Deserialize, Serialize};
 // Config types
 // ---------------------------------------------------------------------------
 
+/// Schema version of the on-disk `sandbox.toml` format. Bumped when a field
+/// is renamed or removed; bumping is a load-path migration signal. Newer
+/// files (`version > SCHEMA_VERSION`) are rejected at load time and fall
+/// back to defaults with a loud warning, rather than silently dropping
+/// unrecognized keys.
+pub const SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    SCHEMA_VERSION
+}
+
+/// Tri-state sandbox preference. Distinguishes "no explicit choice" from an
+/// explicit on/off setting so the splash banner can honor the v0.7 "no-nag
+/// on opt-out" promise.
+///
+/// # Wire format
+///
+/// Serialized as the legacy `enabled = bool` TOML key for back-compat:
+///
+/// | TOML                | In-memory                |
+/// |---------------------|--------------------------|
+/// | (key absent)        | [`SandboxMode::Default`] |
+/// | `enabled = true`    | [`SandboxMode::On`]      |
+/// | `enabled = false`   | [`SandboxMode::Off`]     |
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SandboxMode {
+    /// User has not expressed a preference. Sandboxing is enabled at runtime;
+    /// the splash banner shows the v0.7 nag line ("use /sandbox off to
+    /// disable").
+    #[default]
+    Default,
+    /// User explicitly opted in. Sandboxing is enabled; the splash banner
+    /// suppresses the nag.
+    On,
+    /// User explicitly opted out. Sandboxing is disabled; the splash banner
+    /// suppresses the nag.
+    Off,
+}
+
+impl SandboxMode {
+    /// `true` when the user has explicitly set a preference (`On` or `Off`).
+    /// Used by the splash to decide whether to show the nag banner.
+    pub fn is_explicit(self) -> bool {
+        matches!(self, SandboxMode::On | SandboxMode::Off)
+    }
+
+    /// Effective enable bit: `Default` and `On` both enable; `Off` disables.
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, SandboxMode::Off)
+    }
+}
+
 /// Per-tool sandbox overrides. Applied on top of the global [`SandboxConfig`].
+///
+/// `deny_unknown_fields` makes typos (e.g. `allow_nett = true`) loud parse
+/// errors instead of silently inheriting from the global config.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ToolSandboxOverride {
     /// When `Some(true)`, allow network access for this tool regardless of
     /// the global `allow_net`. When `Some(false)`, deny even if global allows.
@@ -65,13 +133,33 @@ pub struct ToolSandboxOverride {
 ///
 /// The struct-level `#[serde(default)]` means any missing field is populated
 /// from `SandboxConfig::default()` — so a partial `sandbox.toml` (e.g. only
-/// `allow_net = false`) inherits the v0.7 default-on `enabled = true` rather
-/// than failing with a missing-field error or silently flipping to `false`.
+/// `allow_net = false`) inherits the v0.7 default-on mode rather than
+/// failing with a missing-field error.
+///
+/// `deny_unknown_fields` (added in v0.8) makes typos like `enabld = false`
+/// loud parse errors instead of silently dropping to defaults. Combined with
+/// the explicit `version` tag this also gives us a clear migration story
+/// for future field renames.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SandboxConfig {
-    /// Whether to apply OS-level sandboxing to tool spawns. Default (v0.7+): `true`.
-    pub enabled: bool,
+    /// Schema version of this config (see [`SCHEMA_VERSION`]). Missing key
+    /// defaults to the current version — files written by older binaries
+    /// without the field load as v1.
+    #[serde(default = "default_schema_version")]
+    pub version: u32,
+
+    /// Whether to apply OS-level sandboxing to tool spawns. Wire format is
+    /// the legacy `enabled = bool` key; in-memory it is a 3-state
+    /// [`SandboxMode`] so the splash can suppress the nag for explicit
+    /// opt-outs. Default (v0.7+): enabled.
+    #[serde(
+        rename = "enabled",
+        with = "mode_serde",
+        default,
+        skip_serializing_if = "is_default_mode"
+    )]
+    pub mode: SandboxMode,
 
     /// Allow network access for all tools when sandboxed. Default: `false`.
     ///
@@ -92,12 +180,18 @@ pub struct SandboxConfig {
     pub extra_binds: Vec<PathBuf>,
 }
 
+fn is_default_mode(m: &SandboxMode) -> bool {
+    matches!(m, SandboxMode::Default)
+}
+
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            version: SCHEMA_VERSION,
             // v0.7: default-on. Existing `enabled = false` configs are
             // preserved via `#[serde(default)]` on the struct (Task 14.3).
-            enabled: true,
+            // v0.8: distinguishes implicit Default from explicit On/Off.
+            mode: SandboxMode::Default,
             allow_net: false,
             tool_overrides: HashMap::new(),
             extra_binds: Vec::new(),
@@ -105,9 +199,38 @@ impl Default for SandboxConfig {
     }
 }
 
+/// Serde adapter mapping [`SandboxMode`] to the legacy `enabled = bool` wire
+/// format. Wire-level `Option<bool>` lets us round-trip the 3-state through
+/// a back-compat TOML key.
+mod mode_serde {
+    use super::SandboxMode;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(mode: &SandboxMode, ser: S) -> Result<S::Ok, S::Error> {
+        match mode {
+            // `skip_serializing_if = is_default_mode` short-circuits this branch
+            // in normal use; serializing `None` is the safe fallback if the
+            // skip is ever removed.
+            SandboxMode::Default => ser.serialize_none(),
+            SandboxMode::On => ser.serialize_bool(true),
+            SandboxMode::Off => ser.serialize_bool(false),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<SandboxMode, D::Error> {
+        let v: Option<bool> = Option::deserialize(de)?;
+        Ok(match v {
+            None => SandboxMode::Default,
+            Some(true) => SandboxMode::On,
+            Some(false) => SandboxMode::Off,
+        })
+    }
+}
+
 impl SandboxConfig {
     /// Load from `~/.savvagent/sandbox.toml`. Returns the default if the file
-    /// is absent or unparseable (with a debug log in the latter case).
+    /// is absent, unparseable, or written by a newer schema version (each
+    /// case is logged at `warn!` level).
     pub fn load() -> Self {
         let Some(path) = sandbox_toml_path() else {
             return Self::default();
@@ -117,16 +240,25 @@ impl SandboxConfig {
 
     /// Persist to `~/.savvagent/sandbox.toml`. Errors are propagated; the
     /// caller decides whether to surface them to the user.
+    ///
+    /// Returns an error when neither `$HOME` nor `$USERPROFILE` is set —
+    /// previously this silently no-op'd, making the TUI report a phantom
+    /// success even though nothing was written.
     pub async fn save(&self) -> std::io::Result<()> {
-        let Some(path) = sandbox_toml_path() else {
-            return Ok(());
-        };
-        let text = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&path, text).await
+        let path = sandbox_toml_path().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "neither $HOME nor $USERPROFILE is set; cannot locate sandbox.toml",
+            )
+        })?;
+        save_to_path(self, &path).await
+    }
+
+    /// Effective enable bit derived from [`SandboxMode`]. `true` for
+    /// [`SandboxMode::Default`] and [`SandboxMode::On`]; `false` for
+    /// [`SandboxMode::Off`].
+    pub fn is_enabled(&self) -> bool {
+        self.mode.is_enabled()
     }
 
     /// Resolve whether network should be allowed for a tool identified by its
@@ -177,7 +309,24 @@ impl SandboxConfig {
 fn load_from_path(path: &Path) -> SandboxConfig {
     match std::fs::read_to_string(path) {
         Ok(text) => match toml::from_str::<SandboxConfig>(&text) {
-            Ok(cfg) => cfg,
+            Ok(cfg) => {
+                if cfg.version > SCHEMA_VERSION {
+                    tracing::warn!(
+                        "sandbox.toml at {} declares version {} but this build \
+                         only understands schema versions up to {}. Falling back \
+                         to disabled to preserve any prior opt-out intent. \
+                         Upgrade savvagent or remove the file to dismiss.",
+                        path.display(),
+                        cfg.version,
+                        SCHEMA_VERSION,
+                    );
+                    return SandboxConfig {
+                        mode: SandboxMode::Off,
+                        ..SandboxConfig::default()
+                    };
+                }
+                cfg
+            }
             Err(e) => {
                 tracing::warn!(
                     "sandbox.toml at {} failed to parse: {e}. Falling back to \
@@ -186,13 +335,22 @@ fn load_from_path(path: &Path) -> SandboxConfig {
                     path.display()
                 );
                 SandboxConfig {
-                    enabled: false,
+                    mode: SandboxMode::Off,
                     ..SandboxConfig::default()
                 }
             }
         },
         Err(_) => SandboxConfig::default(),
     }
+}
+
+async fn save_to_path(cfg: &SandboxConfig, path: &Path) -> std::io::Result<()> {
+    let text = toml::to_string_pretty(cfg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    tokio::fs::write(path, text).await
 }
 
 /// `~/.savvagent/sandbox.toml`, or `None` if `$HOME` is unset.
@@ -230,7 +388,7 @@ pub fn apply_sandbox(
     project_root: &Path,
     config: &SandboxConfig,
 ) -> SandboxWrapper {
-    if !config.enabled {
+    if !config.is_enabled() {
         return SandboxWrapper::None;
     }
 
@@ -601,16 +759,9 @@ mod tests {
         tokio::process::Command::new(bin)
     }
 
-    #[cfg(target_os = "linux")]
-    fn config_on() -> SandboxConfig {
-        // v0.7 default-on: the new `SandboxConfig::default()` already has
-        // `enabled = true`, so this helper is equivalent to `default()`.
-        SandboxConfig::default()
-    }
-
     fn config_off() -> SandboxConfig {
         SandboxConfig {
-            enabled: false,
+            mode: SandboxMode::Off,
             ..SandboxConfig::default()
         }
     }
@@ -636,8 +787,17 @@ mod tests {
     fn default_config_has_sandboxing_enabled() {
         let cfg = SandboxConfig::default();
         assert!(
-            cfg.enabled,
-            "v0.7 default-on: SandboxConfig::default() must have enabled=true"
+            cfg.is_enabled(),
+            "v0.7 default-on: SandboxConfig::default() must enable sandboxing"
+        );
+        assert_eq!(
+            cfg.mode,
+            SandboxMode::Default,
+            "fresh default is the implicit Default mode, not an explicit On"
+        );
+        assert!(
+            !cfg.mode.is_explicit(),
+            "Default is not an explicit user choice — splash should still show the nag"
         );
     }
 
@@ -700,7 +860,7 @@ mod tests {
     #[test]
     fn non_bash_tool_inherits_global_net_setting() {
         let cfg = SandboxConfig {
-            enabled: true,
+            mode: SandboxMode::On,
             allow_net: false,
             ..SandboxConfig::default()
         };
@@ -762,7 +922,7 @@ mod tests {
                 return;
             }
             let mut cmd = make_cmd("/usr/local/bin/savvagent-tool-fs");
-            let cfg = config_on();
+            let cfg = SandboxConfig::default();
             let wrapper = apply_sandbox(
                 &mut cmd,
                 Path::new("/usr/local/bin/savvagent-tool-fs"),
@@ -797,8 +957,10 @@ mod tests {
             if !has_bwrap() {
                 return;
             }
-            let mut cfg = config_on();
-            cfg.allow_net = true;
+            let cfg = SandboxConfig {
+                allow_net: true,
+                ..SandboxConfig::default()
+            };
             let mut cmd = make_cmd("/usr/local/bin/savvagent-tool-fs");
             apply_sandbox(
                 &mut cmd,
@@ -829,7 +991,7 @@ mod tests {
             let mut cmd = make_cmd("/usr/local/bin/savvagent-tool-fs");
             cmd.env("SAVVAGENT_TOOL_FS_ROOT", "/foo");
             cmd.env("SAVVAGENT_TOOL_BASH_ROOT", "/bar");
-            let cfg = config_on();
+            let cfg = SandboxConfig::default();
             let wrapper = apply_sandbox(
                 &mut cmd,
                 Path::new("/usr/local/bin/savvagent-tool-fs"),
@@ -865,7 +1027,7 @@ mod tests {
             // v0.7 PR 15: built-in default for tool-bash is now deny.
             // Without a host-injected `tool_overrides[tool-bash]
             // .allow_net = true`, bash should get --unshare-net.
-            let cfg = config_on(); // allow_net = false globally
+            let cfg = SandboxConfig::default(); // allow_net = false globally
             let mut cmd = make_cmd("/usr/local/bin/savvagent-tool-bash");
             apply_sandbox(
                 &mut cmd,
@@ -893,7 +1055,7 @@ mod tests {
             // Simulates what the host's spawn path does once
             // `resolve_bash_network_async` returns `true`: insert a
             // per-spawn override granting bash network access.
-            let mut cfg = config_on();
+            let mut cfg = SandboxConfig::default();
             cfg.tool_overrides.insert(
                 "tool-bash".to_string(),
                 ToolSandboxOverride {
@@ -926,7 +1088,7 @@ mod tests {
         async fn bwrap_sandboxed_echo_runs() {
             let mut cmd = tokio::process::Command::new("echo");
             cmd.arg("hello-from-bwrap");
-            let cfg = config_on();
+            let cfg = SandboxConfig::default();
             let wrapper = apply_sandbox(&mut cmd, Path::new("echo"), Path::new("/tmp"), &cfg);
             assert_eq!(wrapper, SandboxWrapper::Bwrap);
             let output = cmd.output().await.expect("bwrap echo failed");
@@ -952,7 +1114,7 @@ mod tests {
             cmd.arg("-c")
                 .arg("echo hello > /tmp/savvagent_sandbox_test_write_outside");
             // project root is /tmp/project (doesn't exist but that's fine for the test)
-            let cfg = config_on();
+            let cfg = SandboxConfig::default();
             apply_sandbox(&mut cmd, Path::new("sh"), Path::new("/tmp/project"), &cfg);
             let output = cmd.output().await.expect("bwrap sh failed");
             // Writing outside the project root should fail — bwrap's ro-bind
@@ -1137,7 +1299,15 @@ mod tests {
         let td = tempfile::TempDir::new().unwrap();
         let missing = td.path().join("does-not-exist.toml");
         let cfg = load_from_path(&missing);
-        assert!(cfg.enabled, "absent file must default to enabled=true");
+        assert_eq!(
+            cfg.mode,
+            SandboxMode::Default,
+            "absent file must yield the implicit Default mode"
+        );
+        assert!(
+            cfg.is_enabled(),
+            "Default mode is enabled at runtime even without an on-disk preference"
+        );
     }
 
     #[test]
@@ -1146,42 +1316,145 @@ mod tests {
         let path = td.path().join("sandbox.toml");
         std::fs::write(&path, "enabled = false\n").unwrap();
         let cfg = load_from_path(&path);
+        assert_eq!(
+            cfg.mode,
+            SandboxMode::Off,
+            "explicit `enabled = false` must round-trip to SandboxMode::Off"
+        );
         assert!(
-            !cfg.enabled,
-            "explicit `enabled = false` must survive upgrade"
+            !cfg.is_enabled(),
+            "explicit Off must disable sandboxing at runtime"
+        );
+        assert!(
+            cfg.mode.is_explicit(),
+            "explicit Off must signal the splash to suppress the v0.7 nag"
         );
     }
 
     #[test]
-    fn load_from_path_partial_file_defaults_enabled_true() {
+    fn load_from_path_preserves_explicit_enabled_true() {
         let td = tempfile::TempDir::new().unwrap();
         let path = td.path().join("sandbox.toml");
-        // No `enabled` key — only an unrelated field.
-        std::fs::write(&path, "allow_net = false\n").unwrap();
+        std::fs::write(&path, "enabled = true\n").unwrap();
         let cfg = load_from_path(&path);
+        assert_eq!(
+            cfg.mode,
+            SandboxMode::On,
+            "explicit `enabled = true` must round-trip to SandboxMode::On"
+        );
         assert!(
-            cfg.enabled,
-            "partial file with no `enabled` key must default to enabled=true"
+            cfg.mode.is_explicit(),
+            "explicit On must signal the splash to suppress the v0.7 nag"
         );
     }
 
     #[test]
-    fn load_from_path_falls_back_to_disabled_on_parse_error() {
+    fn load_from_path_partial_file_defaults_to_default_mode() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        // No `enabled` key — only a non-default `allow_net = true` so that a
+        // serde-default regression (where every missing field silently resets)
+        // would be caught by the allow_net assertion.
+        std::fs::write(&path, "allow_net = true\n").unwrap();
+        let cfg = load_from_path(&path);
+        assert_eq!(
+            cfg.mode,
+            SandboxMode::Default,
+            "partial file with no `enabled` key must yield the implicit Default mode"
+        );
+        assert!(
+            cfg.allow_net,
+            "explicitly written `allow_net = true` must be preserved — if this \
+             flips to false a serde-default regression has silently reset every \
+             unmentioned field"
+        );
+        assert!(
+            cfg.is_enabled(),
+            "Default mode must still enable sandboxing at runtime"
+        );
+    }
+
+    #[test]
+    fn load_from_path_falls_back_to_off_on_parse_error() {
         let td = tempfile::TempDir::new().unwrap();
         let path = td.path().join("sandbox.toml");
         // Malformed TOML — unclosed string.
         std::fs::write(&path, "enabled = \"unclosed\n").unwrap();
         let cfg = load_from_path(&path);
         assert!(
-            !cfg.enabled,
+            !cfg.is_enabled(),
             "parse error must fall back to disabled (fail-safe), not default-on"
+        );
+        assert_eq!(
+            cfg.mode,
+            SandboxMode::Off,
+            "parse-error fallback must be the explicit Off mode (no splash nag)"
+        );
+    }
+
+    #[test]
+    fn load_from_path_rejects_future_schema_version() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        // File from a hypothetical future schema. Today's binary refuses to
+        // pretend it understood the contents and falls back to Off.
+        let future_version = SCHEMA_VERSION + 1;
+        std::fs::write(&path, format!("version = {future_version}\n")).unwrap();
+        let cfg = load_from_path(&path);
+        assert_eq!(
+            cfg.mode,
+            SandboxMode::Off,
+            "future-version file must fall back to Off (fail-safe), not silently \
+             load with possibly-misinterpreted fields"
+        );
+    }
+
+    #[test]
+    fn load_from_path_accepts_current_schema_version() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        let text = format!("version = {SCHEMA_VERSION}\nenabled = false\n");
+        std::fs::write(&path, text).unwrap();
+        let cfg = load_from_path(&path);
+        assert_eq!(cfg.mode, SandboxMode::Off);
+        assert_eq!(cfg.version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn deny_unknown_fields_at_struct_level() {
+        // Typo: `enabld` instead of `enabled` — must be a loud parse error,
+        // not a silent fall-through to Default.
+        let toml_str = "enabld = false\n";
+        let err = toml::from_str::<SandboxConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") || msg.contains("enabld"),
+            "expected unknown-field error for typo `enabld`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn deny_unknown_fields_on_tool_override() {
+        // Typo inside a per-tool override section.
+        let toml_str = r#"
+            enabled = true
+
+            [tool_overrides.tool-bash]
+            allow_nett = true
+        "#;
+        let err = toml::from_str::<SandboxConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") || msg.contains("allow_nett"),
+            "expected unknown-field error for typo `allow_nett`, got: {msg}"
         );
     }
 
     #[test]
     fn sandbox_config_roundtrips_toml() {
         let cfg = SandboxConfig {
-            enabled: true,
+            version: SCHEMA_VERSION,
+            mode: SandboxMode::On,
             allow_net: false,
             tool_overrides: {
                 let mut m = HashMap::new();
@@ -1198,11 +1471,68 @@ mod tests {
         };
         let text = toml::to_string_pretty(&cfg).unwrap();
         let roundtripped: SandboxConfig = toml::from_str(&text).unwrap();
-        assert_eq!(roundtripped.enabled, cfg.enabled);
+        assert_eq!(roundtripped.mode, cfg.mode);
         assert_eq!(roundtripped.allow_net, cfg.allow_net);
         assert_eq!(roundtripped.extra_binds, cfg.extra_binds);
+        assert_eq!(roundtripped.version, cfg.version);
         let bash_ov = roundtripped.tool_overrides.get("tool-bash").unwrap();
         assert_eq!(bash_ov.allow_net, Some(true));
         assert_eq!(bash_ov.extra_binds, vec![PathBuf::from("/var/cache")]);
+    }
+
+    #[test]
+    fn default_mode_is_omitted_from_serialized_toml() {
+        // A freshly defaulted config must NOT serialize `enabled = …` so the
+        // file stays a true tri-state: rewriting the file shouldn't promote
+        // Default into an explicit On/Off.
+        let cfg = SandboxConfig::default();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            !text.contains("enabled"),
+            "Default mode must omit the `enabled` key so the splash can still \
+             distinguish 'no preference' from 'explicit on': \n{text}"
+        );
+    }
+
+    #[test]
+    fn explicit_modes_roundtrip_via_enabled_key() {
+        let on = SandboxConfig {
+            mode: SandboxMode::On,
+            ..SandboxConfig::default()
+        };
+        let on_text = toml::to_string_pretty(&on).unwrap();
+        assert!(
+            on_text.contains("enabled = true"),
+            "On must serialize as `enabled = true`:\n{on_text}"
+        );
+        let on_back: SandboxConfig = toml::from_str(&on_text).unwrap();
+        assert_eq!(on_back.mode, SandboxMode::On);
+
+        let off = SandboxConfig {
+            mode: SandboxMode::Off,
+            ..SandboxConfig::default()
+        };
+        let off_text = toml::to_string_pretty(&off).unwrap();
+        assert!(
+            off_text.contains("enabled = false"),
+            "Off must serialize as `enabled = false`:\n{off_text}"
+        );
+        let off_back: SandboxConfig = toml::from_str(&off_text).unwrap();
+        assert_eq!(off_back.mode, SandboxMode::Off);
+    }
+
+    #[tokio::test]
+    async fn save_to_path_writes_toml() {
+        let td = tempfile::TempDir::new().unwrap();
+        let path = td.path().join("sandbox.toml");
+        let cfg = SandboxConfig {
+            mode: SandboxMode::Off,
+            ..SandboxConfig::default()
+        };
+        save_to_path(&cfg, &path).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("enabled = false"));
+        let back: SandboxConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.mode, SandboxMode::Off);
     }
 }
