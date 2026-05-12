@@ -6,6 +6,7 @@
 use savvagent_plugin::{Effect, HostEvent, PluginId, ScreenArgs};
 
 use crate::app::App;
+use crate::plugin::hooks::HookDispatcher;
 use crate::plugin::slash::SlashRouter;
 
 /// Maximum number of nested dispatch entries before an error is returned.
@@ -81,12 +82,26 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             if let Some(client) = client {
                 app.register_provider(id.clone(), display_name.clone(), client);
                 // Notify subscribers via HostEvent::ProviderRegistered so e.g.
-                // internal:connect can refresh its candidate list. Pass
-                // `depth + 1` so the shared dispatch-depth cap accounts for
-                // this recursion entry — see MAX_DISPATCH_DEPTH.
+                // internal:connect can refresh its candidate list, then fire
+                // HostEvent::Connect so HUD subscribers (notably
+                // internal:splash) flip to "connected". Both events go
+                // through the same depth-tracked path; using
+                // `depth.saturating_add(1)` keeps the shared
+                // MAX_DISPATCH_DEPTH cap honest across the two emissions.
                 Box::pin(dispatch_host_event(
                     app,
-                    HostEvent::ProviderRegistered { id, display_name },
+                    HostEvent::ProviderRegistered {
+                        id: id.clone(),
+                        display_name,
+                    },
+                    depth.saturating_add(1),
+                ))
+                .await?;
+                Box::pin(dispatch_host_event(
+                    app,
+                    HostEvent::Connect {
+                        provider_id: id.clone(),
+                    },
                     depth.saturating_add(1),
                 ))
                 .await?;
@@ -189,13 +204,29 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
 }
 
 /// Deliver a [`HostEvent`] to every plugin that subscribed to its
-/// [`savvagent_plugin::HookKind`], applying each plugin's returned effects
-/// in order. `depth` is forwarded so [`Effect::RunSlash`] re-entries and
+/// [`savvagent_plugin::HookKind`], applying their collective returned
+/// effects in subscriber-registration order.
+///
+/// `depth` is forwarded so [`Effect::RunSlash`] re-entries and
 /// `Effect::RegisterProvider`-triggered re-entries from hook handlers
-/// share one cap ([`MAX_DISPATCH_DEPTH`]). Errors from a single
-/// subscriber's effect-apply are logged and the loop continues, so one
-/// buggy subscriber cannot silently starve later subscribers of the event.
-/// PR 7 will replace this with the full Host-side dispatcher.
+/// share one cap ([`MAX_DISPATCH_DEPTH`]).
+///
+/// Subscriber lookup + `on_event` calls are delegated to
+/// [`HookDispatcher::emit`]; that layer already logs and skips plugins
+/// whose `on_event` errors, so one buggy subscriber cannot starve
+/// others of the event. The accumulated effects are then applied
+/// through [`apply_effects_with_depth`] — a single batch apply, but the
+/// outer event-loop driver of the dispatch sees a clean
+/// `Result<(), String>` it can warn-and-continue on.
+///
+/// Used by:
+///
+/// 1. [`apply_one`]'s `Effect::RegisterProvider` branch, to fire
+///    `ProviderRegistered` + `Connect` after a successful registration.
+/// 2. The TUI event loop, to forward host-originated events
+///    (`TurnStart`, `TurnEnd`, `ToolCallStart`, `ToolCallEnd`,
+///    `PromptSubmitted`, `TranscriptSaved`) translated from the host's
+///    existing [`savvagent_host::TurnEvent`] stream.
 pub(crate) async fn dispatch_host_event(
     app: &mut App,
     event: HostEvent,
@@ -220,38 +251,18 @@ pub(crate) async fn dispatch_host_event(
         (Some(r), Some(i)) => (r.clone(), i.clone()),
         _ => return Ok(()),
     };
-    let kind = event.kind();
-    let subscriber_ids = {
+    let effects = {
+        // Hold both guards only across the dispatcher's emit so the
+        // lock surface mirrors `open_screen` / `run_slash`. The
+        // HookDispatcher itself awaits each plugin's `on_event` while
+        // holding the per-plugin Mutex (one-at-a-time delivery); the
+        // outer RwLocks just gate the indexes/registry view.
+        let reg_guard = reg.read().await;
         let idx_guard = idx.read().await;
-        idx_guard.hooks.get(&kind).cloned().unwrap_or_default()
+        let dispatcher = HookDispatcher::new(&idx_guard, &reg_guard);
+        dispatcher.emit(event).await
     };
-    for pid in subscriber_ids {
-        let handle = {
-            let reg_guard = reg.read().await;
-            reg_guard.get(&pid)
-        };
-        let Some(handle) = handle else { continue };
-        let effects = {
-            let mut plugin = handle.lock().await;
-            match plugin.on_event(event.clone()).await {
-                Ok(effs) => effs,
-                Err(e) => {
-                    tracing::warn!(plugin_id = %pid.as_str(), error = %e,
-                        "plugin on_event returned an error; skipping");
-                    continue;
-                }
-            }
-        };
-        // Errors applying one subscriber's effects must NOT abort fan-out —
-        // a buggy effect from subscriber A would otherwise silently starve
-        // subscribers B/C/D of the event. Log + continue, mirroring the
-        // on_event error handling immediately above.
-        if let Err(e) = Box::pin(apply_effects_with_depth(app, effects, depth)).await {
-            tracing::warn!(plugin_id = %pid.as_str(), error = %e,
-                "applying effects from on_event failed; continuing dispatch");
-        }
-    }
-    Ok(())
+    Box::pin(apply_effects_with_depth(app, effects, depth)).await
 }
 
 async fn run_slash(

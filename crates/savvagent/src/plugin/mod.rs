@@ -39,6 +39,12 @@ pub mod screen_stack;
 #[allow(dead_code)]
 pub mod effects;
 
+/// Sequential awaited dispatch of [`savvagent_plugin::HostEvent`]s to subscribed
+/// plugins. The TUI event loop and `effects::dispatch_host_event` both go
+/// through this to fan out a single event to every plugin that subscribed
+/// to its [`savvagent_plugin::HookKind`].
+pub mod hooks;
+
 /// Re-export so callers don't have to reach into the registry submodule
 /// for the type returned from [`register_builtins`].
 pub(crate) use registry::BuiltinSet;
