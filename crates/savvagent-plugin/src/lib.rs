@@ -18,7 +18,7 @@ pub mod styled;
 
 pub use types::{
     ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, PluginId,
-    ProviderId, Region, ScreenInstanceId, Timestamp,
+    ProviderId, Region, ScreenInstanceId, ThemeEntry, ThemePalette, Timestamp,
 };
 
 pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};

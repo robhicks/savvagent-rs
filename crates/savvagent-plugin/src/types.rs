@@ -119,6 +119,47 @@ pub struct ChordPortable {
     pub key: KeyEventPortable,
 }
 
+use crate::styled::ThemeColor;
+
+/// A theme catalog entry exposed by the `internal:themes` plugin (and any
+/// third-party theme plugin).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeEntry {
+    /// Machine-readable identifier for this theme (e.g. `"light"`, `"dracula"`).
+    pub slug: String,
+    /// Human-readable display name shown in the theme picker UI.
+    pub label: String,
+    /// Whether this theme is considered a dark-background theme.
+    pub dark: bool,
+    /// Color palette associated with this theme.
+    pub palette: ThemePalette,
+}
+
+/// Minimal palette in PR 1. PR 6 (`internal:themes` extraction) ports the
+/// full field set from `crates/savvagent/src/theme.rs` into this struct.
+/// Extensions are additive — `non_exhaustive` reserves the ability to grow
+/// the palette without breaking trait-surface clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ThemePalette {
+    /// Primary background color of the theme.
+    pub bg: ThemeColor,
+    /// Primary foreground (text) color of the theme.
+    pub fg: ThemeColor,
+    /// Accent color used for highlights and active elements.
+    pub accent: ThemeColor,
+    /// Muted color used for less prominent text and borders.
+    pub muted: ThemeColor,
+}
+
+impl ThemePalette {
+    /// Constructor that prevents external code from depending on field order.
+    /// Required by `#[non_exhaustive]`.
+    pub fn new(bg: ThemeColor, fg: ThemeColor, accent: ThemeColor, muted: ThemeColor) -> Self {
+        Self { bg, fg, accent, muted }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +217,22 @@ mod tests {
             KeyCodePortable::Char(c) => assert_eq!(c, 's'),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn theme_entry_is_constructible() {
+        let entry = ThemeEntry {
+            slug: "light".to_string(),
+            label: "Light".to_string(),
+            dark: false,
+            palette: ThemePalette {
+                bg: crate::styled::ThemeColor::White,
+                fg: crate::styled::ThemeColor::Black,
+                accent: crate::styled::ThemeColor::Blue,
+                muted: crate::styled::ThemeColor::Gray,
+            },
+        };
+        assert_eq!(entry.slug, "light");
+        assert!(!entry.dark);
     }
 }
