@@ -22,6 +22,11 @@ pub mod slots;
 #[allow(dead_code)]
 pub mod slash;
 
+/// Keybinding routing: resolves a portable key event to its [`savvagent_plugin::BoundAction`]
+/// using scope precedence `OnScreen` > `OnHome` > `Global`.
+#[allow(dead_code)]
+pub mod keybindings;
+
 /// Returns the set of built-in plugin instances.
 ///
 /// PR 2 adds: home-footer, home-tips.
