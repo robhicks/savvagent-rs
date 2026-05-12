@@ -38,8 +38,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use app::{
-    App, BashCommandError, CommandSelection, Entry, InputMode, collect_transcript_entries,
-    parse_bash_command,
+    App, BashCommandError, Entry, InputMode, collect_transcript_entries, parse_bash_command,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
@@ -1161,6 +1160,34 @@ async fn run_app(
             continue;
         }
 
+        // Screen-stack routing: if any screen is on top, route the key there.
+        // Reserved shortcuts (Ctrl-C already caught above; Ctrl-D quits) are
+        // handled before forwarding to the screen.
+        if !app.screen_stack.is_empty() {
+            let portable = crate::plugin::convert::key_event_to_portable(*key);
+            if portable.modifiers.ctrl
+                && matches!(portable.code, savvagent_plugin::KeyCodePortable::Char('d'))
+            {
+                drain_pending_bash_net(app, &host_slot).await;
+                return Ok(());
+            }
+            let effs = {
+                let (top_screen, _layout) =
+                    app.screen_stack.top_mut().expect("just checked non-empty");
+                match top_screen.on_key(portable).await {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "screen on_key error");
+                        continue;
+                    }
+                }
+            };
+            if let Err(e) = crate::plugin::effects::apply_effects(app, effs).await {
+                tracing::warn!(error = %e, "apply_effects from screen failed");
+            }
+            continue;
+        }
+
         match app.input_mode {
             InputMode::Editing => {
                 if app.is_file_picker_active {
@@ -1181,6 +1208,48 @@ async fn run_app(
                 } else {
                     match key.code {
                         KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Legacy Ctrl-P: open palette via keybinding router for symmetry.
+                            let portable = crate::plugin::convert::key_event_to_portable(*key);
+                            if let (Some(reg), Some(idx)) =
+                                (&app.plugin_registry, &app.plugin_indexes)
+                            {
+                                let action = {
+                                    let idx_guard = idx.read().await;
+                                    let router = crate::plugin::keybindings::KeybindingRouter::new(
+                                        &idx_guard,
+                                    );
+                                    router.route(&portable, None)
+                                };
+                                if let Some(action) = action {
+                                    match action {
+                                        savvagent_plugin::BoundAction::EmitEffect(e) => {
+                                            let _ =
+                                                crate::plugin::effects::apply_effects(app, vec![e])
+                                                    .await;
+                                        }
+                                        savvagent_plugin::BoundAction::RunSlash { name, args } => {
+                                            let effs = {
+                                                let reg_guard = reg.read().await;
+                                                let idx_guard = idx.read().await;
+                                                let router = crate::plugin::slash::SlashRouter::new(
+                                                    &idx_guard, &reg_guard,
+                                                );
+                                                router
+                                                    .dispatch(&name, args)
+                                                    .await
+                                                    .ok()
+                                                    .unwrap_or_default()
+                                            };
+                                            let _ =
+                                                crate::plugin::effects::apply_effects(app, effs)
+                                                    .await;
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
+                            }
+                            // Fallback if plugin runtime not installed.
                             app.open_command_palette();
                         }
                         KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -1245,53 +1314,59 @@ async fn run_app(
                             app.input_textarea.input(evt);
                             app.open_file_picker();
                         }
-                        KeyCode::Char('/')
-                            if !key.modifiers.contains(KeyModifiers::CONTROL)
-                                && app.input_textarea.lines().iter().all(|l| l.is_empty()) =>
-                        {
-                            app.open_command_palette();
-                        }
                         _ => {
-                            app.input_textarea.input(evt);
+                            // Try keybinding router (OnHome → Global) before
+                            // falling through to the textarea. This is what
+                            // fires `/` → OpenScreen("palette") when the
+                            // prompt is empty.
+                            let portable = crate::plugin::convert::key_event_to_portable(*key);
+                            let mut handled = false;
+                            if let (Some(reg), Some(idx)) =
+                                (&app.plugin_registry, &app.plugin_indexes)
+                            {
+                                let action = {
+                                    let idx_guard = idx.read().await;
+                                    let router = crate::plugin::keybindings::KeybindingRouter::new(
+                                        &idx_guard,
+                                    );
+                                    router.route(&portable, None)
+                                };
+                                if let Some(action) = action {
+                                    match action {
+                                        savvagent_plugin::BoundAction::EmitEffect(e) => {
+                                            let _ =
+                                                crate::plugin::effects::apply_effects(app, vec![e])
+                                                    .await;
+                                        }
+                                        savvagent_plugin::BoundAction::RunSlash { name, args } => {
+                                            let effs = {
+                                                let reg_guard = reg.read().await;
+                                                let idx_guard = idx.read().await;
+                                                let router = crate::plugin::slash::SlashRouter::new(
+                                                    &idx_guard, &reg_guard,
+                                                );
+                                                router
+                                                    .dispatch(&name, args)
+                                                    .await
+                                                    .ok()
+                                                    .unwrap_or_default()
+                                            };
+                                            let _ =
+                                                crate::plugin::effects::apply_effects(app, effs)
+                                                    .await;
+                                        }
+                                        _ => {}
+                                    }
+                                    handled = true;
+                                }
+                            }
+                            if !handled {
+                                app.input_textarea.input(evt);
+                            }
                         }
                     }
                 }
             }
-            InputMode::CommandPalette => match key.code {
-                KeyCode::Esc => app.close_command_palette(),
-                KeyCode::Up if app.command_index > 0 => app.command_index -= 1,
-                KeyCode::Down => {
-                    let visible = app.filtered_command_indices().len();
-                    if app.command_index + 1 < visible {
-                        app.command_index += 1;
-                    }
-                }
-                KeyCode::Enter => {
-                    if let Some(CommandSelection::Execute(cmd)) = app.select_command() {
-                        dispatch_slash_command(
-                            app,
-                            &cmd,
-                            &host_slot,
-                            &project_root,
-                            &tool_bins,
-                            &worker_tx,
-                        )
-                        .await;
-                    }
-                }
-                KeyCode::Backspace if !app.palette_pop_char() => {
-                    // Empty filter — backspace past the implicit `/` closes
-                    // the palette and returns to a clean prompt.
-                    app.close_command_palette();
-                }
-                KeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                {
-                    app.palette_push_char(c);
-                }
-                _ => {}
-            },
             InputMode::SelectingProvider => match key.code {
                 KeyCode::Esc => app.input_mode = InputMode::Editing,
                 KeyCode::Up if app.provider_index > 0 => app.provider_index -= 1,
@@ -1674,7 +1749,8 @@ mod model_validation_tests {
 
 #[cfg(test)]
 mod theme_command_tests {
-    use super::{App, CommandSelection, Entry, InputMode, handle_theme_command, theme};
+    use super::{App, Entry, InputMode, handle_theme_command, theme};
+    use crate::app::CommandSelection;
     use crate::test_helpers::{HOME_LOCK, HomeGuard};
     use std::path::PathBuf;
 
@@ -1926,11 +2002,10 @@ mod theme_command_tests {
             .iter()
             .position(|c| c.name == "/theme")
             .expect("/theme must be registered");
-        // Simulate command-palette selection of /theme by setting palette
-        // state and calling select_command. The contract: /theme should
-        // resolve as Execute(...) (not Prefill) so the keypath runs
-        // handle_theme_command immediately and opens the picker.
-        app.input_mode = InputMode::CommandPalette;
+        // Simulate command-palette selection of /theme by setting the cursor
+        // and calling select_command. The contract: /theme should resolve as
+        // Execute(...) (not Prefill) so the keypath runs handle_theme_command
+        // immediately and opens the picker.
         app.command_index = theme_idx;
         let outcome = app.select_command();
         match outcome {

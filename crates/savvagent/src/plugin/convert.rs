@@ -3,11 +3,49 @@
 //! These are free functions rather than trait impls to keep the plugin crate
 //! free of any ratatui dependency.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use savvagent_plugin::{Region, StyledLine, StyledSpan, TextMods, ThemeColor};
+use savvagent_plugin::{
+    KeyCodePortable, KeyEventPortable, KeyMods, Region, StyledLine, StyledSpan, TextMods,
+    ThemeColor,
+};
+
+/// Convert a crossterm `KeyEvent` into the WIT-portable shape used by
+/// the plugin runtime. Unknown key codes map to `KeyCodePortable::Unknown`.
+pub fn key_event_to_portable(e: KeyEvent) -> KeyEventPortable {
+    KeyEventPortable {
+        code: match e.code {
+            KeyCode::Char(c) => KeyCodePortable::Char(c),
+            KeyCode::Backspace => KeyCodePortable::Backspace,
+            KeyCode::Enter => KeyCodePortable::Enter,
+            KeyCode::Esc => KeyCodePortable::Esc,
+            KeyCode::Tab => KeyCodePortable::Tab,
+            KeyCode::BackTab => KeyCodePortable::BackTab,
+            KeyCode::Insert => KeyCodePortable::Insert,
+            KeyCode::Delete => KeyCodePortable::Delete,
+            KeyCode::Up => KeyCodePortable::Up,
+            KeyCode::Down => KeyCodePortable::Down,
+            KeyCode::Left => KeyCodePortable::Left,
+            KeyCode::Right => KeyCodePortable::Right,
+            KeyCode::Home => KeyCodePortable::Home,
+            KeyCode::End => KeyCodePortable::End,
+            KeyCode::PageUp => KeyCodePortable::PageUp,
+            KeyCode::PageDown => KeyCodePortable::PageDown,
+            KeyCode::F(n) => KeyCodePortable::F(n),
+            KeyCode::Null => KeyCodePortable::Unknown,
+            _ => KeyCodePortable::Unknown,
+        },
+        modifiers: KeyMods {
+            ctrl: e.modifiers.contains(KeyModifiers::CONTROL),
+            alt: e.modifiers.contains(KeyModifiers::ALT),
+            shift: e.modifiers.contains(KeyModifiers::SHIFT),
+            meta: e.modifiers.contains(KeyModifiers::SUPER),
+        },
+    }
+}
 
 /// Convert a `savvagent_plugin::Region` into a `ratatui::layout::Rect`.
 #[allow(dead_code)] // used by screen-stack dispatch in PR 3
@@ -152,5 +190,26 @@ mod tests {
         let rline = styled_line_to_ratatui(line);
         assert_eq!(rline.spans.len(), 1);
         assert_eq!(rline.spans[0].content, "hello");
+    }
+
+    #[test]
+    fn key_event_to_portable_char_ctrl() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let evt = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let p = super::key_event_to_portable(evt);
+        assert!(matches!(
+            p.code,
+            savvagent_plugin::KeyCodePortable::Char('s')
+        ));
+        assert!(p.modifiers.ctrl);
+        assert!(!p.modifiers.alt);
+    }
+
+    #[test]
+    fn key_event_to_portable_null_maps_to_unknown() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let evt = KeyEvent::new(KeyCode::Null, KeyModifiers::NONE);
+        let p = super::key_event_to_portable(evt);
+        assert!(matches!(p.code, savvagent_plugin::KeyCodePortable::Unknown));
     }
 }

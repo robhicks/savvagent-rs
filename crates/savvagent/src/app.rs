@@ -22,8 +22,6 @@ pub enum InputMode {
     ViewingFile,
     /// Editing a file in the popup editor.
     EditingFile,
-    /// Command palette open.
-    CommandPalette,
     /// Provider selection list — first step of `/connect`.
     SelectingProvider,
     /// API-key input — second step of `/connect`. Masked.
@@ -100,6 +98,9 @@ pub enum Entry {
 }
 
 /// Slash command shown in the palette.
+// Fields are used by tests and will be wired into the plugin-driven
+// palette in PR 8. Suppress dead_code until then.
+#[allow(dead_code)]
 pub struct Command {
     /// Including the leading slash.
     pub name: String,
@@ -207,6 +208,9 @@ pub fn parse_bash_command(input: &str) -> Result<BashCommand, BashCommandError> 
 }
 
 /// Outcome of [`App::select_command`].
+// Used by tests and the legacy command-palette integration tests in main.rs.
+// Will be wired into the plugin-driven palette in PR 8.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandSelection {
     /// The command takes no argument — caller should run it now.
@@ -606,16 +610,19 @@ impl App {
         ];
     }
 
-    /// Open the command palette.
+    /// Open the command palette. Resets the legacy filter state; actual
+    /// screen opening is handled by `apply_effects(OpenScreen("palette"))`.
+    /// This method is kept for the Ctrl-P fallback path when the plugin
+    /// runtime is not yet installed.
     pub fn open_command_palette(&mut self) {
         self.refresh_commands();
-        self.input_mode = InputMode::CommandPalette;
         self.command_index = 0;
         self.palette_filter.clear();
     }
 
     /// Indices into `self.commands` that match the current filter. If the
     /// filter is empty, returns every index.
+    #[allow(dead_code)]
     pub fn filtered_command_indices(&self) -> Vec<usize> {
         if self.palette_filter.is_empty() {
             return (0..self.commands.len()).collect();
@@ -735,6 +742,7 @@ impl App {
     }
 
     /// Append a char to the palette filter and reset the cursor.
+    #[allow(dead_code)]
     pub fn palette_push_char(&mut self, c: char) {
         self.palette_filter.push(c);
         self.command_index = 0;
@@ -743,15 +751,17 @@ impl App {
     /// Pop one char from the palette filter. Returns `false` if it was already
     /// empty (the caller can use this to close the palette on Backspace past
     /// the leading `/`).
+    #[allow(dead_code)]
     pub fn palette_pop_char(&mut self) -> bool {
         let popped = self.palette_filter.pop().is_some();
         self.command_index = 0;
         popped
     }
 
-    /// Close the palette without selecting anything.
+    /// Close the legacy command palette state (filter + cursor). With the
+    /// screen-stack redesign, actual screen closure is via `Effect::CloseScreen`.
+    #[allow(dead_code)]
     pub fn close_command_palette(&mut self) {
-        self.input_mode = InputMode::Editing;
         self.palette_filter.clear();
         self.command_index = 0;
     }
@@ -761,6 +771,7 @@ impl App {
     /// `self.commands`. Closes the palette either way; returns whether the
     /// caller should execute the command now or just leave the prefilled
     /// prompt for the user to finish typing arguments.
+    #[allow(dead_code)]
     pub fn select_command(&mut self) -> Option<CommandSelection> {
         let filtered = self.filtered_command_indices();
         let real_idx = match filtered.get(self.command_index).copied() {
@@ -1658,7 +1669,6 @@ mod tests {
     #[test]
     fn select_no_arg_command_returns_execute_with_empty_input() {
         let mut app = fresh_app();
-        app.input_mode = InputMode::CommandPalette;
         app.palette_filter = "c".into();
         // Two visible commands at this point: /connect (0) and /clear (1).
         app.command_index = 1;
@@ -1672,7 +1682,6 @@ mod tests {
     #[test]
     fn select_arg_command_returns_prefill_with_seeded_input() {
         let mut app = fresh_app();
-        app.input_mode = InputMode::CommandPalette;
         app.palette_filter = "vi".into();
         app.command_index = 0;
         let outcome = app.select_command();
@@ -1683,7 +1692,6 @@ mod tests {
     #[test]
     fn select_with_no_match_closes_palette() {
         let mut app = fresh_app();
-        app.input_mode = InputMode::CommandPalette;
         app.palette_filter = "zzz".into();
         let outcome = app.select_command();
         assert!(outcome.is_none());
@@ -1825,7 +1833,6 @@ mod tests {
             InputMode::Editing => "Editing",
             InputMode::ViewingFile => "ViewingFile",
             InputMode::EditingFile => "EditingFile",
-            InputMode::CommandPalette => "CommandPalette",
             InputMode::SelectingProvider => "SelectingProvider",
             InputMode::EnteringApiKey => "EnteringApiKey",
             InputMode::PermissionPrompt => "PermissionPrompt",
