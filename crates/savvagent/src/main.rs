@@ -23,6 +23,7 @@
 mod app;
 mod creds;
 mod palette;
+mod plugin;
 mod providers;
 mod splash;
 #[cfg(test)]
