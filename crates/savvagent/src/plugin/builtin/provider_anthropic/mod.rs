@@ -31,19 +31,25 @@ const PROVIDER_ID: &str = "anthropic";
 const DISPLAY_NAME: &str = "Anthropic";
 
 /// Anthropic provider shim.
-pub struct ProviderAnthropicPlugin {
+pub(crate) struct ProviderAnthropicPlugin {
     client: Option<Box<dyn ProviderClient>>,
 }
 
 impl ProviderAnthropicPlugin {
     /// Construct a new shim with no client yet.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { client: None }
     }
 
     /// Try to read the API key from the keyring and, on success, build an
     /// in-process [`ProviderClient`]. Returns `Some(())` when a client was
     /// installed, `None` when credentials were unavailable.
+    ///
+    /// Keyring backend errors (Secret Service daemon down, locked macOS
+    /// Keychain, etc.) and provider client `BuildError`s (TLS init failure,
+    /// broken proxy env vars, fd exhaustion) are surfaced via `tracing` so
+    /// the user can distinguish "no credentials" from "credentials present
+    /// but plumbing failed."
     fn try_connect_from_keyring(&mut self) -> Option<()> {
         if self.client.is_some() {
             // Already connected; nothing to do.
@@ -51,16 +57,39 @@ impl ProviderAnthropicPlugin {
         }
         let key = match crate::creds::load(PROVIDER_ID) {
             Ok(Some(k)) => k,
-            _ => return None,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(provider = PROVIDER_ID, error = %e,
+                    "keyring read failed; treating as missing credentials");
+                return None;
+            }
         };
-        let provider = provider_anthropic::AnthropicProvider::builder()
+        let provider = match provider_anthropic::AnthropicProvider::builder()
             .api_key(&key)
             .build()
-            .ok()?;
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(provider = PROVIDER_ID, error = %e,
+                    "provider client build failed despite credentials present");
+                return None;
+            }
+        };
         let client: Box<dyn ProviderClient> =
             Box::new(InProcessProviderClient::new(Arc::new(provider)));
         self.client = Some(client);
         Some(())
+    }
+
+    /// Test-only helper that pre-installs a stub client without going
+    /// through the keyring. Used by the end-to-end registry-wiring test
+    /// to exercise the slash → register → take chain without touching
+    /// the user's credential store.
+    #[cfg(test)]
+    pub(crate) fn with_test_client(client: Box<dyn ProviderClient>) -> Self {
+        Self {
+            client: Some(client),
+        }
     }
 }
 

@@ -18,13 +18,13 @@ const PROVIDER_ID: &str = "openai";
 const DISPLAY_NAME: &str = "OpenAI";
 
 /// OpenAI provider shim.
-pub struct ProviderOpenAiPlugin {
+pub(crate) struct ProviderOpenAiPlugin {
     client: Option<Box<dyn ProviderClient>>,
 }
 
 impl ProviderOpenAiPlugin {
     /// Construct a new shim with no client yet.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { client: None }
     }
 
@@ -34,12 +34,24 @@ impl ProviderOpenAiPlugin {
         }
         let key = match crate::creds::load(PROVIDER_ID) {
             Ok(Some(k)) => k,
-            _ => return None,
+            Ok(None) => return None,
+            Err(e) => {
+                tracing::warn!(provider = PROVIDER_ID, error = %e,
+                    "keyring read failed; treating as missing credentials");
+                return None;
+            }
         };
-        let provider = provider_openai::OpenAiProvider::builder()
+        let provider = match provider_openai::OpenAiProvider::builder()
             .api_key(&key)
             .build()
-            .ok()?;
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(provider = PROVIDER_ID, error = %e,
+                    "provider client build failed despite credentials present");
+                return None;
+            }
+        };
         let client: Box<dyn ProviderClient> =
             Box::new(InProcessProviderClient::new(Arc::new(provider)));
         self.client = Some(client);

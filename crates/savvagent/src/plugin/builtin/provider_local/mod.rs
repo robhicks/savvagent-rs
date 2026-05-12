@@ -28,17 +28,19 @@ const PROVIDER_ID: &str = "local";
 const DISPLAY_NAME: &str = "Local (Ollama)";
 
 /// Local (Ollama) provider shim. Keyless.
-pub struct ProviderLocalPlugin {
+pub(crate) struct ProviderLocalPlugin {
     client: Option<Box<dyn ProviderClient>>,
     /// Sticky bit set when a previous build attempt failed; the slash and
     /// hook re-entry then take the "endpoint unreachable" branch instead of
-    /// emitting a `RegisterProvider` for a dead client.
+    /// repeatedly retrying a known-bad build and emitting `RegisterProvider`
+    /// for a dead client. Cleared on a successful build, so `/connect local`
+    /// after the user starts `ollama serve` can succeed.
     last_build_failed: bool,
 }
 
 impl ProviderLocalPlugin {
     /// Construct a new shim with no client yet.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             client: None,
             last_build_failed: false,
@@ -48,9 +50,19 @@ impl ProviderLocalPlugin {
     /// Try to construct an in-process Ollama client. Returns `Some(())` on
     /// success. v0.9 ships without a true health-check — TODO is wired in
     /// PR 7 alongside the rest of the Host integration.
+    ///
+    /// A previously-failed build short-circuits this call. The user can
+    /// retry via `/connect local`, which clears the sticky bit on success
+    /// once `ollama serve` is reachable.
     fn try_connect_local(&mut self) -> Option<()> {
         if self.client.is_some() {
             return Some(());
+        }
+        if self.last_build_failed {
+            // A prior call set the sticky bit; surface "endpoint unreachable"
+            // again rather than spinning the builder per slash/hook re-entry.
+            // PR 7's real health-check will replace this with a timed probe.
+            return None;
         }
         let provider = match provider_local::OllamaProvider::builder().build() {
             Ok(p) => p,
@@ -65,6 +77,15 @@ impl ProviderLocalPlugin {
         self.client = Some(client);
         self.last_build_failed = false;
         Some(())
+    }
+
+    /// Test-only: clear the sticky-failure bit. Lets unit tests drive
+    /// the same plugin through "fail then succeed" sequences if the
+    /// underlying builder is ever made injectable.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn reset_last_build_failed(&mut self) {
+        self.last_build_failed = false;
     }
 }
 

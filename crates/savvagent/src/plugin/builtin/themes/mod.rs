@@ -104,7 +104,13 @@ impl Plugin for ThemesPlugin {
     fn create_screen(&self, id: &str, args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
         match (id, args) {
             ("themes.picker", ScreenArgs::ThemePicker { current_slug }) => {
-                let current = Theme::from_name(&current_slug).unwrap_or_default();
+                let current = Theme::from_name(&current_slug).unwrap_or_else(|| {
+                    tracing::warn!(
+                        slug = %current_slug,
+                        "themes.picker received unknown slug; defaulting to Dark"
+                    );
+                    Theme::default()
+                });
                 Ok(Box::new(ThemePickerScreen::new(ThemePicker::new(current))))
             }
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
