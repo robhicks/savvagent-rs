@@ -41,7 +41,7 @@ pub use session::{
     BASH_NETWORK_PROMPT_SUMMARY, BashNetResolveError, Host, HostError, TRANSCRIPT_SCHEMA_VERSION,
     ToolCall, ToolCallStatus, TranscriptError, TranscriptFile, TurnEvent, TurnOutcome,
 };
-pub use tools::{BashNetResolver, NetOverride};
+pub use tools::{BashNetContext, BashNetResolver, NetOverride};
 
 #[doc(hidden)]
 pub use provider::RmcpProviderClient;
