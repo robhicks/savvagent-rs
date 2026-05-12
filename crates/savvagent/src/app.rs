@@ -314,6 +314,10 @@ pub struct App {
     /// Indexes built from each enabled plugin's manifest.
     pub plugin_indexes:
         Option<std::sync::Arc<tokio::sync::RwLock<crate::plugin::manifests::Indexes>>>,
+
+    /// LIFO stack of active plugin-provided screens. Driven by
+    /// `Effect::OpenScreen` / `Effect::CloseScreen` via `apply_effects`.
+    pub screen_stack: crate::plugin::screen_stack::ScreenStack,
 }
 
 impl App {
@@ -382,6 +386,7 @@ impl App {
             },
             plugin_registry: None,
             plugin_indexes: None,
+            screen_stack: crate::plugin::screen_stack::ScreenStack::new(),
         };
         app.refresh_commands();
         app
@@ -1047,6 +1052,63 @@ impl App {
         self.pending_provider = None;
         self.api_key_textarea = TextArea::default();
         self.input_mode = InputMode::Editing;
+    }
+
+    // ---- Effect mutation surface (called by `plugin::effects::apply_effects`) ----
+
+    /// Append a styled-line note to the conversation log. Flattens the
+    /// `StyledLine`'s spans into plain text; styling is dropped for now
+    /// (preserved in the effect payload for future log-styling work).
+    pub fn push_styled_note(&mut self, line: savvagent_plugin::StyledLine) {
+        let text: String = line.spans.iter().map(|s| s.text.as_str()).collect();
+        self.push_note(text);
+    }
+
+    /// Clear the conversation log.
+    pub fn clear_log(&mut self) {
+        self.entries.clear();
+        self.live_text.clear();
+        self.update_metrics();
+    }
+
+    /// Request that the event loop exit on the next tick.
+    pub fn request_quit(&mut self) {
+        self.should_quit = true;
+    }
+
+    /// Set the active theme by slug. Stub — full wiring in PR 6.
+    #[allow(unused_variables)]
+    pub fn set_active_theme_by_slug(&mut self, slug: String) {
+        tracing::debug!("set_active_theme effect ignored in PR 3");
+    }
+
+    /// Persist the current configuration to disk. Stub — full wiring in PR 6.
+    pub fn persist_config(&mut self) {
+        tracing::debug!("persist_config effect ignored in PR 3");
+    }
+
+    /// Set the active LLM provider. Stub — full wiring in PR 5.
+    #[allow(unused_variables)]
+    pub fn set_active_provider(&mut self, id: savvagent_plugin::ProviderId) {
+        tracing::debug!("set_active_provider effect ignored in PR 3");
+    }
+
+    /// Register a provider announced by a plugin. Stub — full wiring in PR 5.
+    #[allow(unused_variables)]
+    pub fn register_provider(&mut self, id: savvagent_plugin::ProviderId, display_name: String) {
+        tracing::debug!("register_provider effect ignored in PR 3");
+    }
+
+    /// Save transcript to the given path. Stub — full wiring in PR 5.
+    #[allow(unused_variables)]
+    pub fn save_transcript_to(&mut self, path: String) {
+        tracing::debug!("save_transcript_to effect ignored in PR 3");
+    }
+
+    /// Submit a prompt to the active provider. Stub — full wiring in PR 5.
+    #[allow(unused_variables)]
+    pub fn submit_prompt(&mut self, text: String) {
+        tracing::debug!("submit_prompt effect ignored in PR 3");
     }
 }
 

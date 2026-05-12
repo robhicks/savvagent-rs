@@ -33,6 +33,12 @@ pub mod keybindings;
 #[allow(dead_code)]
 pub mod screen_stack;
 
+/// Single mutation surface: maps each `Effect` variant to the corresponding
+/// `App` method. The event loop calls this after dispatching key events, hook
+/// events, or slash commands.
+#[allow(dead_code)]
+pub mod effects;
+
 /// Returns the set of built-in plugin instances.
 ///
 /// PR 2 adds: home-footer, home-tips.
