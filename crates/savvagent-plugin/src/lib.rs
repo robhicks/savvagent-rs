@@ -13,7 +13,12 @@
 /// ID newtypes and small structural types that cross plugin boundaries.
 pub mod types;
 
+/// Owned styled-text types returned by plugin render methods.
+pub mod styled;
+
 pub use types::{
     ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, PluginId,
     ProviderId, Region, ScreenInstanceId, Timestamp,
 };
+
+pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};
