@@ -227,6 +227,11 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         frame.render_widget_ref(app.file_explorer.widget(), popup);
     }
 
+    // Screen-stack: if any screen is on top, paint it over the home chrome.
+    if let Some((top_screen, layout)) = app.screen_stack.top() {
+        paint_screen(frame, area, top_screen, layout);
+    }
+
     if matches!(
         app.input_mode,
         InputMode::ViewingFile | InputMode::EditingFile
@@ -263,49 +268,6 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
             frame.render_widget(block, popup);
             frame.render_widget(editor, inner);
         }
-    }
-
-    if matches!(app.input_mode, InputMode::CommandPalette) {
-        let popup = centered_rect(50, 30, area);
-        frame.render_widget(Clear, popup);
-        let filtered = app.filtered_command_indices();
-        let items: Vec<ListItem> = filtered
-            .iter()
-            .enumerate()
-            .map(|(visible_idx, &cmd_idx)| {
-                let cmd = &app.commands[cmd_idx];
-                let style = if visible_idx == app.command_index {
-                    palette
-                        .base_style()
-                        .fg(palette.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    palette.base_style()
-                };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:<10} ", cmd.name), style),
-                    Span::styled(&cmd.description, palette.base_style().fg(palette.muted)),
-                ]))
-            })
-            .collect();
-        let title = if app.palette_filter.is_empty() {
-            " Commands ".to_string()
-        } else {
-            format!(" Commands · /{} ", app.palette_filter)
-        };
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                    .title(title)
-                    .title_bottom(
-                        Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ").right_aligned(),
-                    ),
-            )
-            .style(palette.base_style())
-            .highlight_symbol("> ");
-        frame.render_widget(list, popup);
     }
 
     if matches!(app.input_mode, InputMode::EditingFile) {
@@ -727,6 +689,127 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
         Span::styled(prefix.to_string(), style.add_modifier(Modifier::BOLD)),
         Span::styled(text.to_string(), style),
     ])
+}
+
+/// Paint a plugin-provided screen over `area`, using the screen's declared
+/// [`savvagent_plugin::ScreenLayout`] to position it.
+///
+/// For `CenteredModal`, the host draws the border and title so the
+/// screen's `render` output fills the inner content area.
+/// For `Fullscreen` and `BottomSheet`, content fills the computed area
+/// directly.
+fn paint_screen(
+    f: &mut Frame,
+    area: Rect,
+    screen: &dyn savvagent_plugin::Screen,
+    layout: &savvagent_plugin::ScreenLayout,
+) {
+    use savvagent_plugin::ScreenLayout;
+
+    match layout {
+        ScreenLayout::Fullscreen { .. } => {
+            // Full-frame overlay: paint content directly.
+            f.render_widget(Clear, area);
+            let region = crate::plugin::convert::rect_to_region(area);
+            let lines: Vec<Line<'static>> = screen
+                .render(region)
+                .into_iter()
+                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .collect();
+            let para = Paragraph::new(lines);
+            f.render_widget(para, area);
+
+            // Tips row at the very bottom of the frame.
+            let tips = screen.tips();
+            if !tips.is_empty() && area.height > 0 {
+                let tips_row = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
+                let tips_lines: Vec<Line<'static>> = tips
+                    .into_iter()
+                    .map(crate::plugin::convert::styled_line_to_ratatui)
+                    .collect();
+                f.render_widget(Paragraph::new(tips_lines), tips_row);
+            }
+        }
+        ScreenLayout::CenteredModal {
+            width_pct,
+            height_pct,
+            title,
+        } => {
+            // Compute the outer rect for the modal border.
+            let w = ((area.width as u32 * (*width_pct as u32)) / 100)
+                .max(20)
+                .min(area.width as u32) as u16;
+            let h = ((area.height as u32 * (*height_pct as u32)) / 100)
+                .max(5)
+                .min(area.height as u32) as u16;
+            let x = area.x + area.width.saturating_sub(w) / 2;
+            let y = area.y + area.height.saturating_sub(h) / 2;
+            let outer = Rect::new(x, y, w, h);
+
+            f.render_widget(Clear, outer);
+
+            // Border + optional title.
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(title.as_deref().unwrap_or(""));
+
+            // Tips as a bottom title if present.
+            let tips = screen.tips();
+            let block = if let Some(tip_line) = tips.into_iter().next() {
+                let tip_text: String = tip_line.spans.iter().map(|s| s.text.as_str()).collect();
+                block.title_bottom(Line::from(tip_text).right_aligned())
+            } else {
+                block
+            };
+
+            let inner = outer.inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            f.render_widget(block, outer);
+
+            let region = crate::plugin::convert::rect_to_region(inner);
+            let lines: Vec<Line<'static>> = screen
+                .render(region)
+                .into_iter()
+                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .collect();
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        ScreenLayout::BottomSheet { height } => {
+            let h = (*height).min(area.height);
+            let sheet = Rect::new(area.x, area.y + area.height - h, area.width, h);
+            f.render_widget(Clear, sheet);
+            let region = crate::plugin::convert::rect_to_region(sheet);
+            let lines: Vec<Line<'static>> = screen
+                .render(region)
+                .into_iter()
+                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .collect();
+            f.render_widget(Paragraph::new(lines), sheet);
+
+            let tips = screen.tips();
+            if !tips.is_empty() && sheet.height > 0 {
+                let tips_row = Rect::new(sheet.x, sheet.y + sheet.height - 1, sheet.width, 1);
+                let tips_lines: Vec<Line<'static>> = tips
+                    .into_iter()
+                    .map(crate::plugin::convert::styled_line_to_ratatui)
+                    .collect();
+                f.render_widget(Paragraph::new(tips_lines), tips_row);
+            }
+        }
+        // Future layout variants are silently treated as fullscreen.
+        _ => {
+            f.render_widget(Clear, area);
+            let region = crate::plugin::convert::rect_to_region(area);
+            let lines: Vec<Line<'static>> = screen
+                .render(region)
+                .into_iter()
+                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .collect();
+            f.render_widget(Paragraph::new(lines), area);
+        }
+    }
 }
 
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

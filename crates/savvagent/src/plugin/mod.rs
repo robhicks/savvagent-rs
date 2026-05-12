@@ -17,6 +17,28 @@ pub mod manifests;
 /// and concatenates each contributor's rendered lines.
 pub mod slots;
 
+/// Slash command routing: resolves bare command names to their owning plugin
+/// and dispatches `handle_slash`, with a re-entrancy depth cap.
+#[allow(dead_code)]
+pub mod slash;
+
+/// Keybinding routing: resolves a portable key event to its [`savvagent_plugin::BoundAction`]
+/// using scope precedence `OnScreen` > `OnHome` > `Global`.
+#[allow(dead_code)]
+pub mod keybindings;
+
+/// LIFO stack of `(Box<dyn Screen>, ScreenLayout)` pairs driven by
+/// `Effect::OpenScreen` / `Effect::CloseScreen`; replaces the v0.8
+/// `InputMode` flat-field state machine.
+#[allow(dead_code)]
+pub mod screen_stack;
+
+/// Single mutation surface: maps each `Effect` variant to the corresponding
+/// `App` method. The event loop calls this after dispatching key events, hook
+/// events, or slash commands.
+#[allow(dead_code)]
+pub mod effects;
+
 /// Returns the set of built-in plugin instances.
 ///
 /// PR 2 adds: home-footer, home-tips.
@@ -27,30 +49,28 @@ pub mod slots;
 /// PR 8 adds: plugins-manager.
 pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
     vec![
+        Box::new(builtin::command_palette::CommandPalettePlugin::new()),
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
+        Box::new(builtin::splash::SplashPlugin::new()),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use savvagent_plugin::PluginKind;
 
     #[tokio::test]
-    async fn register_builtins_returns_pr2_pair() {
+    async fn register_builtins_pr3_partial() {
         let plugins = register_builtins();
         let ids: Vec<_> = plugins
             .iter()
             .map(|p| p.manifest().id.as_str().to_string())
             .collect();
+        assert!(ids.contains(&"internal:command-palette".to_string()));
         assert!(ids.contains(&"internal:home-footer".to_string()));
         assert!(ids.contains(&"internal:home-tips".to_string()));
-        assert_eq!(plugins.len(), 2);
-
-        // Both must be Core in PR 2.
-        for p in &plugins {
-            assert_eq!(p.manifest().kind, PluginKind::Core);
-        }
+        assert!(ids.contains(&"internal:splash".to_string()));
+        assert_eq!(plugins.len(), 4);
     }
 }
