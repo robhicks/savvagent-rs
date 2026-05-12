@@ -3,6 +3,9 @@
 /// Filterable slash-command picker; opened via `/` from the home view.
 pub mod command_palette;
 
+/// Basic in-TUI file editor; opened via `/edit <path>`.
+pub mod edit_file;
+
 /// Footer widget: sandbox state + turn state + working dir + key reminder.
 pub mod home_footer;
 
