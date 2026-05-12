@@ -604,6 +604,17 @@ impl App {
             .collect()
     }
 
+    /// Filter [`crate::theme::Theme::all`] by case-sensitive substring
+    /// match on the theme slug. Returns only selectable rows — section
+    /// headers are render-time decoration handled in `ui.rs`.
+    pub fn theme_picker_filtered_themes(&self) -> Vec<crate::theme::Theme> {
+        let filter = self.theme_picker_filter.as_str();
+        crate::theme::Theme::all()
+            .into_iter()
+            .filter(|t| t.name().contains(filter))
+            .collect()
+    }
+
     /// Append a char to the palette filter and reset the cursor.
     pub fn palette_push_char(&mut self, c: char) {
         self.palette_filter.push(c);
@@ -1141,6 +1152,48 @@ mod tests {
         assert_eq!(app.theme_picker_filter, "");
         assert_eq!(app.theme_picker_index, 0);
         assert_eq!(app.theme_picker_pre_theme, crate::theme::Theme::default());
+    }
+
+    #[test]
+    fn theme_picker_filtered_themes_empty_filter_returns_all() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let app = fresh_app();
+        let filtered = app.theme_picker_filtered_themes();
+        // 3 built-ins + 15 upstream = 18.
+        assert_eq!(filtered.len(), crate::theme::Theme::all().len());
+        assert_eq!(filtered.len(), 18);
+    }
+
+    #[test]
+    fn theme_picker_filtered_themes_substring_narrows_to_match() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.theme_picker_filter = "drac".to_string();
+        let filtered = app.theme_picker_filtered_themes();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name(), "dracula");
+    }
+
+    #[test]
+    fn theme_picker_filtered_themes_no_match_returns_empty() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.theme_picker_filter = "totally-bogus".to_string();
+        assert!(app.theme_picker_filtered_themes().is_empty());
+    }
+
+    #[test]
+    fn theme_picker_filtered_themes_filter_matches_built_in() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.theme_picker_filter = "high".to_string();
+        let filtered = app.theme_picker_filtered_themes();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name(), "high-contrast");
     }
 
     #[test]
