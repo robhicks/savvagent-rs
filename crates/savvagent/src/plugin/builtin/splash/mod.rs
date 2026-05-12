@@ -81,7 +81,9 @@ impl Plugin for SplashPlugin {
     async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
         match event {
             HostEvent::HostStarting => {
-                // PR 7: kick off connect probe. PR 3 just records nothing.
+                // No-op — provider plugins fire HostEvent::Connect when
+                // they bring up a client; PR 7's apply_effects emits the
+                // Connect event after a successful RegisterProvider.
             }
             HostEvent::Connect { provider_id } => {
                 self.last_render = Some(CachedHud {
@@ -92,5 +94,52 @@ impl Plugin for SplashPlugin {
             _ => {}
         }
         Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use savvagent_plugin::ProviderId;
+
+    /// Splash starts disconnected; receiving a `Connect` event must flip
+    /// the cached HUD state so the next `SplashScreen` instance renders
+    /// "Connected to <provider>." instead of the spinner.
+    #[tokio::test]
+    async fn splash_flips_to_connected_on_connect() {
+        let mut plugin = SplashPlugin::new();
+        assert!(plugin.last_render.is_none(), "starts disconnected");
+        plugin
+            .on_event(HostEvent::Connect {
+                provider_id: ProviderId::new("anthropic").expect("valid id"),
+            })
+            .await
+            .expect("on_event returns Ok");
+        let hud = plugin
+            .last_render
+            .as_ref()
+            .expect("HUD state populated after Connect");
+        assert!(hud.connected, "connected flag must be true");
+        assert_eq!(
+            hud.last_provider.as_ref().map(|p| p.as_str()),
+            Some("anthropic"),
+            "provider id propagates from event to cached HUD"
+        );
+    }
+
+    /// `HostStarting` is the no-op partner of `Connect`: it tells the
+    /// plugin the host is alive but no provider has come up yet, so the
+    /// HUD must stay in the spinner state.
+    #[tokio::test]
+    async fn splash_host_starting_does_not_flip_to_connected() {
+        let mut plugin = SplashPlugin::new();
+        plugin
+            .on_event(HostEvent::HostStarting)
+            .await
+            .expect("on_event returns Ok");
+        assert!(
+            plugin.last_render.is_none(),
+            "HostStarting alone must not mark the HUD connected"
+        );
     }
 }

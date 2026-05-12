@@ -6,6 +6,7 @@
 use savvagent_plugin::{Effect, HostEvent, PluginId, ScreenArgs};
 
 use crate::app::App;
+use crate::plugin::hooks::HookDispatcher;
 use crate::plugin::slash::SlashRouter;
 
 /// Maximum number of nested dispatch entries before an error is returned.
@@ -64,13 +65,24 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                 Err(e) => {
                     tracing::warn!(error = %e, provider_id = %id.as_str(),
                         "RegisterProvider with invalid provider id; skipping");
+                    app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                        "Invalid provider id from plugin: {}",
+                        id.as_str()
+                    )));
                     return Ok(());
                 }
             };
             let registry = match &app.plugin_registry {
                 Some(r) => r.clone(),
                 None => {
-                    tracing::error!("RegisterProvider before plugin runtime installed");
+                    tracing::error!(
+                        "RegisterProvider before plugin runtime installed; \
+                         the user-facing /connect flow cannot complete until \
+                         app startup finishes installing the runtime."
+                    );
+                    app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                        "Plugin runtime not yet installed; /connect requires app startup to complete.",
+                    ));
                     return Ok(());
                 }
             };
@@ -81,16 +93,36 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             if let Some(client) = client {
                 app.register_provider(id.clone(), display_name.clone(), client);
                 // Notify subscribers via HostEvent::ProviderRegistered so e.g.
-                // internal:connect can refresh its candidate list. Pass
-                // `depth + 1` so the shared dispatch-depth cap accounts for
-                // this recursion entry — see MAX_DISPATCH_DEPTH.
+                // internal:connect can refresh its candidate list, then fire
+                // HostEvent::Connect so HUD subscribers (notably
+                // internal:splash) flip to "connected". Both events go
+                // through the same depth-tracked path; using
+                // `depth.saturating_add(1)` keeps the shared
+                // MAX_DISPATCH_DEPTH cap honest across the two emissions.
                 Box::pin(dispatch_host_event(
                     app,
-                    HostEvent::ProviderRegistered { id, display_name },
+                    HostEvent::ProviderRegistered {
+                        id: id.clone(),
+                        display_name,
+                    },
+                    depth.saturating_add(1),
+                ))
+                .await?;
+                Box::pin(dispatch_host_event(
+                    app,
+                    HostEvent::Connect {
+                        provider_id: id.clone(),
+                    },
                     depth.saturating_add(1),
                 ))
                 .await?;
             } else {
+                tracing::error!(
+                    provider_id = %id.as_str(),
+                    plugin_id = %plugin_id.as_str(),
+                    "Effect::RegisterProvider: take_provider_client returned None — \
+                     possible dual-instance bug or plugin lifecycle issue."
+                );
                 app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
                     "provider `{}` announced but no client was constructed",
                     id.as_str()
@@ -102,6 +134,22 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                 app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
                     "Transcript saved to {path}"
                 )));
+                // Notify subscribers (e.g. `internal:resume`) that a
+                // transcript was just persisted. The autosave path in
+                // `main.rs` already dispatches `TranscriptSaved` after
+                // each `TurnComplete`; user-initiated saves via `/save`
+                // must do the same so `/resume`'s candidate list
+                // refreshes without waiting for the next autosave.
+                if let Err(err) = Box::pin(dispatch_host_event(
+                    app,
+                    HostEvent::TranscriptSaved { path: path.clone() },
+                    depth.saturating_add(1),
+                ))
+                .await
+                {
+                    tracing::warn!(error = %err, path = %path,
+                        "TranscriptSaved dispatch from Effect::SaveTranscript failed");
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, path = %path, "save_transcript failed");
@@ -189,13 +237,36 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
 }
 
 /// Deliver a [`HostEvent`] to every plugin that subscribed to its
-/// [`savvagent_plugin::HookKind`], applying each plugin's returned effects
-/// in order. `depth` is forwarded so [`Effect::RunSlash`] re-entries and
+/// [`savvagent_plugin::HookKind`], then apply each subscriber's returned
+/// effects independently in subscriber-registration order.
+///
+/// `depth` is forwarded so [`Effect::RunSlash`] re-entries and
 /// `Effect::RegisterProvider`-triggered re-entries from hook handlers
-/// share one cap ([`MAX_DISPATCH_DEPTH`]). Errors from a single
-/// subscriber's effect-apply are logged and the loop continues, so one
-/// buggy subscriber cannot silently starve later subscribers of the event.
-/// PR 7 will replace this with the full Host-side dispatcher.
+/// share one cap ([`MAX_DISPATCH_DEPTH`]).
+///
+/// Subscriber lookup + `on_event` calls are delegated to
+/// [`HookDispatcher::emit`]; that layer already logs and skips plugins
+/// whose `on_event` errors. We then iterate the returned
+/// `Vec<(PluginId, Vec<Effect>)>` and run [`apply_effects_with_depth`]
+/// once per subscriber, warn-logging on failure and continuing — so a
+/// single subscriber's bad effect (e.g. `Effect::OpenScreen { id:
+/// "unknown" }`) cannot starve later subscribers' effects. The function
+/// itself still returns `Ok(())` in that case; only depth-limit errors
+/// propagate up.
+///
+/// Ordering: every subscriber's `on_event` sees the same pre-event app
+/// state (fan-out happens before any apply). Effect application then
+/// runs in subscriber-registration order, so later subscribers' effects
+/// observe earlier subscribers' mutations.
+///
+/// Used by:
+///
+/// 1. [`apply_one`]'s `Effect::RegisterProvider` branch, to fire
+///    `ProviderRegistered` + `Connect` after a successful registration.
+/// 2. The TUI event loop, to forward host-originated events
+///    (`TurnStart`, `TurnEnd`, `ToolCallStart`, `ToolCallEnd`,
+///    `PromptSubmitted`, `TranscriptSaved`) translated from the host's
+///    existing [`savvagent_host::TurnEvent`] stream.
 pub(crate) async fn dispatch_host_event(
     app: &mut App,
     event: HostEvent,
@@ -220,35 +291,24 @@ pub(crate) async fn dispatch_host_event(
         (Some(r), Some(i)) => (r.clone(), i.clone()),
         _ => return Ok(()),
     };
-    let kind = event.kind();
-    let subscriber_ids = {
+    let batches = {
+        // Hold both guards only across the dispatcher's emit so the
+        // lock surface mirrors `open_screen` / `run_slash`. The
+        // HookDispatcher itself awaits each plugin's `on_event` while
+        // holding the per-plugin Mutex (one-at-a-time delivery); the
+        // outer RwLocks just gate the indexes/registry view.
+        let reg_guard = reg.read().await;
         let idx_guard = idx.read().await;
-        idx_guard.hooks.get(&kind).cloned().unwrap_or_default()
+        let dispatcher = HookDispatcher::new(&idx_guard, &reg_guard);
+        dispatcher.emit(event).await
     };
-    for pid in subscriber_ids {
-        let handle = {
-            let reg_guard = reg.read().await;
-            reg_guard.get(&pid)
-        };
-        let Some(handle) = handle else { continue };
-        let effects = {
-            let mut plugin = handle.lock().await;
-            match plugin.on_event(event.clone()).await {
-                Ok(effs) => effs,
-                Err(e) => {
-                    tracing::warn!(plugin_id = %pid.as_str(), error = %e,
-                        "plugin on_event returned an error; skipping");
-                    continue;
-                }
-            }
-        };
-        // Errors applying one subscriber's effects must NOT abort fan-out —
-        // a buggy effect from subscriber A would otherwise silently starve
-        // subscribers B/C/D of the event. Log + continue, mirroring the
-        // on_event error handling immediately above.
-        if let Err(e) = Box::pin(apply_effects_with_depth(app, effects, depth)).await {
-            tracing::warn!(plugin_id = %pid.as_str(), error = %e,
-                "applying effects from on_event failed; continuing dispatch");
+    for (pid, effs) in batches {
+        if let Err(e) = Box::pin(apply_effects_with_depth(app, effs, depth)).await {
+            tracing::warn!(
+                plugin_id = %pid.as_str(),
+                error = %e,
+                "applying effects from on_event failed; continuing dispatch"
+            );
         }
     }
     Ok(())
@@ -458,6 +518,353 @@ mod tests {
             app.registered_providers.contains_key("anthropic"),
             "expected anthropic provider to be registered end-to-end; got keys: {:?}",
             app.registered_providers.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// PR 7 wired `Effect::RegisterProvider` to emit BOTH
+    /// `HostEvent::ProviderRegistered` (so `internal:connect` refreshes
+    /// its candidate list) AND `HostEvent::Connect` (so `internal:splash`
+    /// flips its HUD). This test pins that dual emission by installing a
+    /// counter plugin subscribed to each `HookKind` and asserting both
+    /// fired exactly once after one `RegisterProvider`.
+    #[tokio::test]
+    async fn register_provider_apply_effects_emits_both_provider_registered_and_connect() {
+        use crate::plugin::builtin::provider_anthropic::ProviderAnthropicPlugin;
+        use crate::plugin::builtin::provider_common::ProviderEntry;
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_mcp::ProviderClient;
+        use savvagent_plugin::{
+            Contributions, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
+            PluginKind, ProviderId,
+        };
+        use savvagent_protocol::{
+            CompleteRequest, CompleteResponse, ListModelsResponse, ProviderError, StreamEvent,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use tokio::sync::mpsc;
+
+        // Same stub client shape as the previous end-to-end test.
+        struct StubClient;
+        #[async_trait]
+        impl ProviderClient for StubClient {
+            async fn complete(
+                &self,
+                _: CompleteRequest,
+                _: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                unreachable!("stub client never invoked in this test")
+            }
+            async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+                unreachable!("stub client never invoked in this test")
+            }
+        }
+
+        // Test plugin: subscribes to ProviderRegistered + Connect and
+        // increments a shared counter whenever each variant arrives, so
+        // the test can assert the dual emission without rooting around
+        // in splash internals.
+        struct DualCounter {
+            id: String,
+            registered_calls: Arc<AtomicU32>,
+            connect_calls: Arc<AtomicU32>,
+        }
+
+        #[async_trait]
+        impl Plugin for DualCounter {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.hooks = vec![HookKind::ProviderRegistered, HookKind::Connect];
+                Manifest {
+                    id: PluginId::new(&self.id).expect("valid id"),
+                    name: self.id.clone(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+
+            async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
+                match event {
+                    HostEvent::ProviderRegistered { .. } => {
+                        self.registered_calls.fetch_add(1, Ordering::SeqCst);
+                    }
+                    HostEvent::Connect { .. } => {
+                        self.connect_calls.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+                Ok(vec![])
+            }
+        }
+
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+
+        let registered_calls = Arc::new(AtomicU32::new(0));
+        let connect_calls = Arc::new(AtomicU32::new(0));
+
+        let counter = DualCounter {
+            id: "internal:test-dual-counter".into(),
+            registered_calls: registered_calls.clone(),
+            connect_calls: connect_calls.clone(),
+        };
+
+        // Pair the counter with the anthropic provider plugin so
+        // RegisterProvider has a valid take_provider_client target.
+        let provider_entry = ProviderEntry::new(ProviderAnthropicPlugin::with_test_client(
+            Box::new(StubClient),
+        ));
+        let set = BuiltinSet {
+            plugins: vec![Box::new(counter)],
+            providers: vec![provider_entry],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        // Drive a single RegisterProvider effect — the same shape
+        // ConnectPlugin emits after handle_slash succeeds.
+        let effects = vec![Effect::RegisterProvider {
+            id: ProviderId::new("anthropic").expect("valid id"),
+            display_name: "Anthropic".into(),
+        }];
+        apply_effects(&mut app, effects)
+            .await
+            .expect("RegisterProvider must succeed");
+
+        assert_eq!(
+            registered_calls.load(Ordering::SeqCst),
+            1,
+            "ProviderRegistered should fire exactly once"
+        );
+        assert_eq!(
+            connect_calls.load(Ordering::SeqCst),
+            1,
+            "Connect should fire exactly once after RegisterProvider"
+        );
+        assert!(
+            app.registered_providers.contains_key("anthropic"),
+            "provider client travels into App as part of the same chain"
+        );
+    }
+
+    /// Per-subscriber error isolation regression test (post-review fix).
+    ///
+    /// Before the fix, `dispatch_host_event` batched every subscriber's
+    /// effects into one `Vec<Effect>` and called
+    /// `apply_effects_with_depth` once. The `?` short-circuit on the
+    /// first failing effect (e.g. `Effect::OpenScreen { id: "unknown" }`)
+    /// silently starved every later subscriber's effects of being
+    /// applied. The dispatcher now applies per-subscriber with
+    /// log-and-continue on apply failure.
+    ///
+    /// This test installs two subscribers on `HostStarting`:
+    ///   - "bad" returns `Effect::OpenScreen { id: "definitely-unknown" }`
+    ///     — apply fails with "unknown screen id".
+    ///   - "good" returns `Effect::PushNote { line: "made it" }`.
+    /// After dispatch, the good subscriber's note must be present in the
+    /// app's entries despite the bad subscriber's apply failure.
+    #[tokio::test]
+    async fn dispatch_continues_when_one_subscribers_effect_fails() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_plugin::{
+            Contributions, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
+            PluginKind, ScreenArgs,
+        };
+
+        /// Subscriber whose effect always fails to apply.
+        struct BadEffectSub {
+            id: String,
+        }
+        #[async_trait]
+        impl Plugin for BadEffectSub {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.hooks = vec![HookKind::HostStarting];
+                Manifest {
+                    id: PluginId::new(&self.id).expect("valid id"),
+                    name: self.id.clone(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+            async fn on_event(&mut self, _: HostEvent) -> Result<Vec<Effect>, PluginError> {
+                Ok(vec![Effect::OpenScreen {
+                    id: "definitely-unknown-screen".into(),
+                    args: ScreenArgs::None,
+                }])
+            }
+        }
+
+        /// Subscriber whose effect always succeeds — pushes a note we
+        /// can look for in `app.entries`.
+        struct GoodNoteSub {
+            id: String,
+            note: String,
+        }
+        #[async_trait]
+        impl Plugin for GoodNoteSub {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.hooks = vec![HookKind::HostStarting];
+                Manifest {
+                    id: PluginId::new(&self.id).expect("valid id"),
+                    name: self.id.clone(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+            async fn on_event(&mut self, _: HostEvent) -> Result<Vec<Effect>, PluginError> {
+                Ok(vec![Effect::PushNote {
+                    line: StyledLine::plain(self.note.clone()),
+                }])
+            }
+        }
+
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+
+        let bad = BadEffectSub {
+            id: "internal:test-bad-effect".into(),
+        };
+        let good = GoodNoteSub {
+            id: "internal:test-good-note".into(),
+            note: "good-subscriber-fired".into(),
+        };
+
+        let set = BuiltinSet {
+            plugins: vec![Box::new(bad), Box::new(good)],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        // Dispatch HostStarting. The dispatcher itself must return Ok(()),
+        // and the good subscriber's note must be present even though the
+        // bad subscriber's effect failed to apply.
+        dispatch_host_event(&mut app, HostEvent::HostStarting, 0)
+            .await
+            .expect("dispatch_host_event must return Ok despite a subscriber's apply failure");
+
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => text.contains("good-subscriber-fired"),
+            _ => false,
+        });
+        assert!(
+            found,
+            "good subscriber's note must be applied despite earlier subscriber's apply failure; \
+             entries: {:?}",
+            app.entries
+        );
+    }
+
+    /// `Effect::SaveTranscript` must fire `HostEvent::TranscriptSaved`
+    /// from its Ok arm so subscribers (notably `internal:resume`) see
+    /// user-initiated saves, not just autosaves. Regression test for the
+    /// post-review fix.
+    #[tokio::test]
+    async fn save_transcript_effect_emits_transcript_saved_event() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_plugin::{
+            Contributions, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId, PluginKind,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        /// Counts TranscriptSaved invocations and records the most
+        /// recent path so the test can assert payload pass-through.
+        struct SavedCounter {
+            id: String,
+            calls: Arc<AtomicU32>,
+            last_path: Arc<std::sync::Mutex<Option<String>>>,
+        }
+        #[async_trait]
+        impl Plugin for SavedCounter {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.hooks = vec![HookKind::TranscriptSaved];
+                Manifest {
+                    id: PluginId::new(&self.id).expect("valid id"),
+                    name: self.id.clone(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+            async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
+                if let HostEvent::TranscriptSaved { path } = event {
+                    self.calls.fetch_add(1, Ordering::SeqCst);
+                    *self.last_path.lock().unwrap() = Some(path);
+                }
+                Ok(vec![])
+            }
+        }
+
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let last_path = Arc::new(std::sync::Mutex::new(None));
+        let counter = SavedCounter {
+            id: "internal:test-transcript-saved".into(),
+            calls: calls.clone(),
+            last_path: last_path.clone(),
+        };
+
+        let set = BuiltinSet {
+            plugins: vec![Box::new(counter)],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        // Save somewhere in a tempdir so we don't pollute the working tree.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("test-transcript.md");
+        let path_str = path.to_string_lossy().into_owned();
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SaveTranscript {
+                path: path_str.clone(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "TranscriptSaved must fire exactly once for one Effect::SaveTranscript"
+        );
+        assert_eq!(
+            last_path.lock().unwrap().as_deref(),
+            Some(path_str.as_str()),
+            "TranscriptSaved payload must carry the saved path"
         );
     }
 }
