@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/savvagent",
+    "crates/savvagent-plugin",
     "crates/savvagent-protocol",
     "crates/savvagent-mcp",
     "crates/savvagent-host",
@@ -24,6 +25,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Local crates
+savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.8.0" }
 savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.8.0" }
 savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.8.0" }
 savvagent-host = { path = "crates/savvagent-host", version = "0.8.0" }

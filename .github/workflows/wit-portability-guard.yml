@@ -1,0 +1,38 @@
+name: WIT portability dep-guard
+
+on:
+  pull_request:
+    paths:
+      - 'crates/savvagent-plugin/**'
+  push:
+    branches: [master]
+    paths:
+      - 'crates/savvagent-plugin/**'
+
+jobs:
+  forbid-non-portable-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Forbid non-portable deps under [dependencies]
+        run: |
+          set -euo pipefail
+          MANIFEST=crates/savvagent-plugin/Cargo.toml
+
+          # Extract just the [dependencies] section (until the next [section]).
+          DEPS=$(awk '/^\[dependencies\]$/{flag=1;next}/^\[/{flag=0}flag' "$MANIFEST")
+
+          FORBIDDEN=$(printf '%s\n' "$DEPS" \
+            | grep -E '^[[:space:]]*(ratatui|crossterm|tokio|anyhow)[[:space:]]*=' \
+            | grep -v 'wit-portable: justified' \
+            || true)
+
+          if [ -n "$FORBIDDEN" ]; then
+            echo "::error::Forbidden non-portable dep(s) under [dependencies] in $MANIFEST:"
+            echo "$FORBIDDEN"
+            echo "These crates are forbidden by spec section 9 (WIT portability)."
+            echo "If you have a justified exception, add a '# wit-portable: justified'"
+            echo "comment on the same line."
+            exit 1
+          fi

@@ -3104,6 +3104,7 @@ dependencies = [
  "rmcp",
  "savvagent-host",
  "savvagent-mcp",
+ "savvagent-plugin",
  "savvagent-protocol",
  "serde",
  "serde_json",
@@ -3151,6 +3152,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "savvagent-plugin"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "tokio",
 ]
 
 [[package]]
