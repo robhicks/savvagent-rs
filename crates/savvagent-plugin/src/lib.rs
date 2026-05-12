@@ -10,6 +10,11 @@
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
 
+/// Concrete error type returned by plugin trait methods.
+pub mod error;
+
+pub use error::PluginError;
+
 /// ID newtypes and small structural types that cross plugin boundaries.
 pub mod types;
 
