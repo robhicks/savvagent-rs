@@ -21,6 +21,10 @@ pub mod home_tips;
 /// Cycles to the next model on the active provider; registered as `/model`.
 pub mod model;
 
+/// Transcript picker; opened via `/resume` with an in-memory cache backed
+/// by the [`HookKind::TranscriptSaved`] hook.
+pub mod resume;
+
 /// Saves the active transcript to disk; registered as `/save [path]`.
 pub mod save;
 
