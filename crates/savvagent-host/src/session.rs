@@ -22,7 +22,9 @@ use crate::permissions::{
 use crate::project;
 use crate::provider::RmcpProviderClient;
 use crate::sandbox::SandboxConfig;
-use crate::tools::{BashNetResolver, BashNetResolverHandle, NetOverride, ToolRegistry};
+use crate::tools::{
+    BashNetContext, BashNetResolver, BashNetResolverHandle, NetOverride, ToolRegistry,
+};
 
 /// Current transcript file schema version.
 ///
@@ -926,7 +928,7 @@ struct BootstrapBashNetResolver;
 
 #[async_trait::async_trait]
 impl BashNetResolver for BootstrapBashNetResolver {
-    async fn resolve_policy(&self) -> bool {
+    async fn resolve_policy(&self, _context: BashNetContext<'_>) -> bool {
         false
     }
 }
@@ -948,18 +950,19 @@ struct HostBashNetResolver {
 
 #[async_trait::async_trait]
 impl BashNetResolver for HostBashNetResolver {
-    async fn resolve_policy(&self) -> bool {
+    async fn resolve_policy(&self, context: BashNetContext<'_>) -> bool {
         let events = self
             .current_events
             .lock()
             .expect("current_turn_events poisoned")
             .clone();
+        let summary = format_bash_network_prompt_summary(context.command);
         match resolve_bash_network_with_state(
             &self.policy,
             &self.pending,
             &self.next_id,
             events.as_ref(),
-            BASH_NETWORK_PROMPT_SUMMARY.to_string(),
+            summary,
         )
         .await
         {
@@ -974,6 +977,30 @@ impl BashNetResolver for HostBashNetResolver {
                 false
             }
         }
+    }
+}
+
+/// Maximum length of a bash command included in the network-prompt
+/// summary. Commands longer than this are truncated with an ellipsis so
+/// the modal stays readable on narrow terminals.
+const BASH_PROMPT_COMMAND_TRUNCATE: usize = 80;
+
+/// Compose the prompt summary text shown in the bash-network modal.
+/// When the call provided a command, embed a truncated copy on a second
+/// line so the user sees *what* is being asked about rather than only
+/// the generic [`BASH_NETWORK_PROMPT_SUMMARY`] line.
+fn format_bash_network_prompt_summary(command: Option<&str>) -> String {
+    match command {
+        Some(cmd) => {
+            let truncated = if cmd.chars().count() > BASH_PROMPT_COMMAND_TRUNCATE {
+                let head: String = cmd.chars().take(BASH_PROMPT_COMMAND_TRUNCATE - 1).collect();
+                format!("{head}…")
+            } else {
+                cmd.to_string()
+            };
+            format!("{BASH_NETWORK_PROMPT_SUMMARY}\n  $ {truncated}")
+        }
+        None => BASH_NETWORK_PROMPT_SUMMARY.to_string(),
     }
 }
 
@@ -1344,7 +1371,11 @@ mod policy_tests {
         // Spawn the first resolve in a task so we can pump events and
         // call resolve_bash_network_decision concurrently.
         let resolver_clone = resolver.clone();
-        let first = tokio::spawn(async move { resolver_clone.resolve(NetOverride::Inherit).await });
+        let first = tokio::spawn(async move {
+            resolver_clone
+                .resolve(NetOverride::Inherit, BashNetContext::default())
+                .await
+        });
 
         // We expect a single BashNetworkRequested. Pluck its id, then
         // answer AlwaysThisSession so the cache populates.
@@ -1362,7 +1393,9 @@ mod policy_tests {
         assert!(allow_first, "AlwaysThisSession must resolve allow_net=true");
 
         // Second resolve: should NOT emit another prompt (cache hit).
-        let allow_second = resolver.resolve(NetOverride::Inherit).await;
+        let allow_second = resolver
+            .resolve(NetOverride::Inherit, BashNetContext::default())
+            .await;
         assert!(
             allow_second,
             "second resolve must reuse the cached AlwaysThisSession decision"
@@ -1421,7 +1454,9 @@ mod policy_tests {
             current_events: host.current_turn_events.clone(),
         });
 
-        let allow = resolver.resolve(NetOverride::ForceAllow).await;
+        let allow = resolver
+            .resolve(NetOverride::ForceAllow, BashNetContext::default())
+            .await;
         assert!(allow);
         assert_eq!(
             host.policy.bash_network_cached(),
@@ -1429,7 +1464,9 @@ mod policy_tests {
             "ForceAllow must NOT update the cache"
         );
 
-        let allow = resolver.resolve(NetOverride::ForceDeny).await;
+        let allow = resolver
+            .resolve(NetOverride::ForceDeny, BashNetContext::default())
+            .await;
         assert!(!allow);
         assert_eq!(
             host.policy.bash_network_cached(),
@@ -1457,6 +1494,47 @@ mod policy_tests {
                 .contains("non-interactive turn"),
             "{}",
             outcome.tool_calls[0].result
+        );
+    }
+
+    #[test]
+    fn format_prompt_summary_without_command_is_static() {
+        let s = super::format_bash_network_prompt_summary(None);
+        assert_eq!(s, super::BASH_NETWORK_PROMPT_SUMMARY);
+    }
+
+    #[test]
+    fn format_prompt_summary_with_short_command_includes_command_line() {
+        let s = super::format_bash_network_prompt_summary(Some("curl https://example.com"));
+        assert!(
+            s.starts_with(super::BASH_NETWORK_PROMPT_SUMMARY),
+            "summary must still lead with the static line: {s}"
+        );
+        assert!(
+            s.contains("$ curl https://example.com"),
+            "summary must show the command after a $ prompt: {s}"
+        );
+        assert!(
+            !s.contains("…"),
+            "short commands must not be truncated: {s}"
+        );
+    }
+
+    #[test]
+    fn format_prompt_summary_truncates_long_command_with_ellipsis() {
+        let long = "x".repeat(super::BASH_PROMPT_COMMAND_TRUNCATE + 50);
+        let s = super::format_bash_network_prompt_summary(Some(&long));
+        assert!(
+            s.contains('…'),
+            "commands longer than the truncate limit must end with an ellipsis: {s}"
+        );
+        // The truncated portion must respect the limit (limit-1 chars + '…' = limit chars total).
+        let body_line = s.lines().nth(1).expect("summary should have a 2nd line");
+        let visible: String = body_line.chars().skip_while(|c| *c != 'x').collect();
+        assert_eq!(
+            visible.chars().count(),
+            super::BASH_PROMPT_COMMAND_TRUNCATE,
+            "truncated body must be exactly the truncate limit in chars: {visible:?}"
         );
     }
 }

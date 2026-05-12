@@ -34,7 +34,7 @@
 //!
 //! # `tool-bash` and network access
 //!
-//! As of v0.7 PR 15, `tool-bash` is denied network by default. The host's
+//! Since v0.7, `tool-bash` is denied network by default. The host's
 //! spawn path resolves bash network access at runtime via the permission
 //! layer (see `tools::LazyBash` and the bash-net resolver closure
 //! installed by `Host::wire_self_into_resolver`) and injects a
@@ -196,7 +196,7 @@ pub struct SandboxConfig {
 
     /// Allow network access for all tools when sandboxed. Default: `false`.
     ///
-    /// As of v0.7 PR 15 `tool-bash` is denied network by default; the
+    /// `tool-bash` is denied network by default since v0.7; the
     /// host's spawn path injects a per-spawn override based on the
     /// runtime permission decision. To unconditionally grant net access
     /// to bash, set `[tool_overrides.tool-bash] allow_net = true` in
@@ -320,7 +320,8 @@ impl SandboxConfig {
         }
 
         // Built-in per-tool default: `tool-bash` is denied network by
-        // default as of v0.7 PR 15. The host's spawn path injects a
+        // default since v0.7. The host's spawn path (see `tools::LazyBash`)
+        // injects a
         // per-spawn override based on the runtime permission decision
         // (see `tools::LazyBash`). User configs can also
         // pin allow/deny via `[tool_overrides.tool-bash] allow_net = ...`
@@ -484,7 +485,12 @@ fn apply_linux(
     let bwrap = match which_binary("bwrap") {
         Some(p) => p,
         None => {
-            tracing::warn!(
+            // `error!` — not `warn!`. Sandboxing is opted-in via config;
+            // a missing wrapper silently downgrades the security posture
+            // and operators need to see this at a louder level than
+            // generic warnings. Per-spawn surfacing in the TUI is handled
+            // by `tools::log_sandbox_wrapper`'s `sandbox_enabled` arm.
+            tracing::error!(
                 "sandbox: `bwrap` not found on PATH — tool `{}` will run unwrapped",
                 tool_bin.display()
             );
@@ -588,7 +594,8 @@ fn apply_macos(
     let sandbox_exec = match which_binary("sandbox-exec") {
         Some(p) => p,
         None => {
-            tracing::warn!(
+            // `error!` — not `warn!`. See the bwrap branch for rationale.
+            tracing::error!(
                 "sandbox: `sandbox-exec` not found — tool `{}` will run unwrapped",
                 tool_bin.display()
             );
@@ -864,7 +871,7 @@ mod tests {
         );
         assert!(
             !cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-bash")),
-            "v0.7 PR 15 default-deny: bash gets no net unless host injects an override"
+            "v0.7 default-deny: bash gets no net unless host injects an override"
         );
         assert!(
             !cfg.net_allowed_for(Path::new("/usr/bin/savvagent-tool-fs")),
@@ -1074,11 +1081,11 @@ mod tests {
         }
 
         #[test]
-        fn tool_bash_unshares_net_by_default_post_pr15() {
+        fn tool_bash_unshares_net_by_default() {
             if !has_bwrap() {
                 return;
             }
-            // v0.7 PR 15: built-in default for tool-bash is now deny.
+            // Since v0.7: built-in default for tool-bash is deny.
             // Without a host-injected `tool_overrides[tool-bash]
             // .allow_net = true`, bash should get --unshare-net.
             let cfg = SandboxConfig::default(); // allow_net = false globally
@@ -1096,7 +1103,7 @@ mod tests {
                 .collect();
             assert!(
                 args.contains(&"--unshare-net".to_string()),
-                "v0.7 PR 15 deny-by-default: tool-bash must get --unshare-net \
+                "v0.7+ deny-by-default: tool-bash must get --unshare-net \
                  absent a host override: {args:?}"
             );
         }

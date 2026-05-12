@@ -917,6 +917,19 @@ async fn handle_bash_slash_command(
         app.push_note("Not connected — `/connect` first, then `/bash <command>`.");
         return;
     };
+    // Pre-flight: confirm tool-bash is actually configured. Without this
+    // check the call falls through to `call_with_bash_net_override` and
+    // surfaces as the opaque "unknown tool: run" error, which gives the
+    // user no actionable repair path. The `run` tool is the contract
+    // surface tool-bash advertises.
+    let bash_configured = host.tool_defs().await.iter().any(|t| t.name == "run");
+    if !bash_configured {
+        app.push_note(
+            "tool-bash isn't configured — set SAVVAGENT_TOOL_BASH_BIN or run `cargo build` \
+             so the `savvagent-tool-bash` binary is available, then `/connect` again.",
+        );
+        return;
+    }
     if app.is_loading {
         app.push_note("Cannot /bash during an in-flight turn — wait for it to finish.");
         return;
@@ -1391,7 +1404,11 @@ async fn run_app(
                     | KeyCode::Char('F')
                     | KeyCode::Char('n')
                     | KeyCode::Char('N') => Some(BashNetworkChoice::DenyAlways),
-                    KeyCode::Esc => Some(BashNetworkChoice::DenyOnce),
+                    // Esc → Cancelled (policy-equivalent to DenyOnce, but
+                    // labelled distinctly so the user sees that backing
+                    // out implied a deny rather than reading their Esc
+                    // as an active "deny" decision.
+                    KeyCode::Esc => Some(BashNetworkChoice::Cancelled),
                     _ => None,
                 };
                 if let Some(choice) = choice {
@@ -1409,6 +1426,9 @@ async fn run_app(
                         }
                         BashNetworkChoice::DenyOnce => "bash net: denied once",
                         BashNetworkChoice::DenyAlways => "bash net: never (this session)",
+                        BashNetworkChoice::Cancelled => {
+                            "bash net: cancelled (via Esc — defaulted to deny)"
+                        }
                     };
                     app.push_note(label);
                 }

@@ -54,6 +54,14 @@ const TOOL_BASH_MARKER: &str = "tool-bash";
 ///
 /// Explicit overrides never touch the resolver cache — see
 /// [`BashNetResolver::resolve`] for the short-circuit guarantee.
+///
+/// # `Default`
+///
+/// [`NetOverride::Inherit`] is the `Default`. It models the "no flag" /
+/// "no override" case. Do NOT rely on `..Default::default()` in a context
+/// that requires an explicit user choice — the silent default would let
+/// the policy/prompt path run when the call site expected an explicit
+/// pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetOverride {
     /// Defer to the resolver's policy. The resolver may emit a
@@ -64,6 +72,30 @@ pub enum NetOverride {
     ForceAllow,
     /// Bypass the resolver and deny network access for this call's spawn.
     ForceDeny,
+}
+
+/// Per-call context passed to [`BashNetResolver`]. Today the only field
+/// is the bash command itself, which the host uses to populate the prompt
+/// summary so the user can see *what* they're being asked about (rather
+/// than the static "tool-bash spawn requests network access" line). The
+/// struct is non-exhaustive so we can grow it (e.g. tool name, working
+/// directory) without breaking implementors.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct BashNetContext<'a> {
+    /// The shell command the spawn will execute, or `None` if the
+    /// caller can't supply it (e.g. test fixtures). Truncated by the
+    /// resolver before display.
+    pub command: Option<&'a str>,
+}
+
+impl<'a> BashNetContext<'a> {
+    /// Construct a context referencing the given command string.
+    pub fn with_command(command: &'a str) -> Self {
+        Self {
+            command: Some(command),
+        }
+    }
 }
 
 /// Resolver invoked by [`ToolRegistry::call_with_bash_net_override`] when a
@@ -82,7 +114,9 @@ pub enum NetOverride {
 #[async_trait]
 pub trait BashNetResolver: Send + Sync + 'static {
     /// Resolve the policy-level `allow_net`. May park on a user prompt.
-    async fn resolve_policy(&self) -> bool;
+    /// `context` carries per-call info (e.g. the bash command being
+    /// spawned) used to render a meaningful prompt.
+    async fn resolve_policy(&self, context: BashNetContext<'_>) -> bool;
 
     /// Resolve with override consideration. The default implementation
     /// short-circuits explicit overrides; `Inherit` defers to
@@ -99,11 +133,11 @@ pub trait BashNetResolver: Send + Sync + 'static {
     /// behavior, change [`resolve_policy`].
     ///
     /// [`resolve_policy`]: BashNetResolver::resolve_policy
-    async fn resolve(&self, over: NetOverride) -> bool {
+    async fn resolve(&self, over: NetOverride, context: BashNetContext<'_>) -> bool {
         match over {
             NetOverride::ForceAllow => true,
             NetOverride::ForceDeny => false,
-            NetOverride::Inherit => self.resolve_policy().await,
+            NetOverride::Inherit => self.resolve_policy(context).await,
         }
     }
 }
@@ -280,9 +314,16 @@ impl ToolRegistry {
                             });
                         }
                         // Probe done — shut it down so the lazy spawn gets
-                        // a clean slate at first call.
+                        // a clean slate at first call. A failure here
+                        // leaks the probe child until process exit, so
+                        // log loudly even though we proceed: the lazy
+                        // dispatch path can still spawn a fresh server
+                        // and serve calls.
                         if let Err(e) = service.cancel().await {
-                            tracing::warn!("tool-bash probe shutdown error (ignored): {e}");
+                            tracing::error!(
+                                "tool-bash probe shutdown failed for {label}: {e} \
+                                 (probe child may linger until process exit)"
+                            );
                         }
                         if lazy_bash.is_some() {
                             anyhow::bail!(
@@ -402,10 +443,20 @@ impl ToolRegistry {
     /// handles to the host's permission state and emit
     /// [`crate::session::TurnEvent::BashNetworkRequested`].
     ///
-    /// No-op when no `tool-bash` endpoint is configured.
+    /// No-op when no `tool-bash` endpoint is configured. Logged at
+    /// `debug!` so a misconfigured host (caller expects bash but no
+    /// endpoint was wired) leaves a trail rather than a silent drop.
     pub(crate) fn install_bash_net_resolver(&self, resolver: BashNetResolverHandle) {
-        if let Some(lazy) = self.lazy_bash.as_ref() {
-            *lazy.resolver.write().expect("resolver lock poisoned") = resolver;
+        match self.lazy_bash.as_ref() {
+            Some(lazy) => {
+                *lazy.resolver.write().expect("resolver lock poisoned") = resolver;
+            }
+            None => {
+                tracing::debug!(
+                    "install_bash_net_resolver called on a host without a configured \
+                     tool-bash endpoint — no-op; bash-network prompts will not fire"
+                );
+            }
         }
     }
 
@@ -449,7 +500,16 @@ impl LazyBash {
             .read()
             .expect("resolver lock poisoned")
             .clone();
-        let allow_net = resolver.resolve(net_override).await;
+        // Extract the bash `command` arg (if present) so the resolver
+        // can put it in the prompt summary. Non-bash tools don't reach
+        // this dispatch path; bash's `run` tool spec defines `command`
+        // as a string. Other shapes (missing key, non-string) fall back
+        // to None and the static summary line.
+        let command_for_prompt = args.get("command").and_then(Value::as_str);
+        let context = BashNetContext {
+            command: command_for_prompt,
+        };
+        let allow_net = resolver.resolve(net_override, context).await;
         let new_key = BashSpawnKey { allow_net };
 
         // Step 2: lock the active server slot so we get a single
@@ -677,7 +737,15 @@ impl ToolCallOutcome {
                     Self::success(payload)
                 }
             }
-            Err(e) => Self::error(format!("tool transport error on {name}: {e}")),
+            Err(e) => {
+                // Preserve the structured `ServiceError` (variant kind,
+                // backtrace if any) for operators *before* we flatten
+                // it into the LLM-facing payload. The model-facing
+                // string is identical to before; this just adds an
+                // operator-side trail.
+                tracing::error!(tool = name, error = ?e, "tool transport error");
+                Self::error(format!("tool transport error on {name}: {e}"))
+            }
         }
     }
 }
@@ -701,7 +769,7 @@ mod lazy_bash_tests {
 
     #[async_trait]
     impl BashNetResolver for FixedResolver {
-        async fn resolve_policy(&self) -> bool {
+        async fn resolve_policy(&self, _context: BashNetContext<'_>) -> bool {
             self.invocations.fetch_add(1, Ordering::SeqCst);
             self.policy
         }
@@ -730,7 +798,9 @@ mod lazy_bash_tests {
     impl CountingBash {
         async fn dispatch(&self, net_override: NetOverride) -> bool {
             let resolver = self.resolver.clone();
-            let allow_net = resolver.resolve(net_override).await;
+            let allow_net = resolver
+                .resolve(net_override, BashNetContext::default())
+                .await;
             let new_key = BashSpawnKey { allow_net };
             let mut guard = self.active.lock().await;
             let must_respawn = guard.as_ref() != Some(&new_key);

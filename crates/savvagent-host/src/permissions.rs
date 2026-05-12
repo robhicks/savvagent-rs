@@ -99,6 +99,11 @@ pub enum BashNetworkChoice {
     DenyOnce,
     /// Deny network for the rest of the session. Updates the cache.
     DenyAlways,
+    /// User explicitly backed out of the prompt (e.g. pressed Esc).
+    /// Effectively deny-once at the policy level, but distinct in the
+    /// transcript so the user sees the implicit deny they triggered
+    /// rather than reading it as an active "deny" decision they made.
+    Cancelled,
 }
 
 /// A normalized argument pattern attached to a [`Rule`].
@@ -380,7 +385,10 @@ impl PermissionPolicy {
                         *self.bash_network_decision.write().unwrap() = Some(true);
                         true
                     }
-                    BashNetworkChoice::DenyOnce => false,
+                    // Cancelled and DenyOnce are policy-equivalent (deny
+                    // without caching). They differ only in how the TUI
+                    // labels the outcome in the transcript.
+                    BashNetworkChoice::DenyOnce | BashNetworkChoice::Cancelled => false,
                     BashNetworkChoice::DenyAlways => {
                         *self.bash_network_decision.write().unwrap() = Some(false);
                         false
