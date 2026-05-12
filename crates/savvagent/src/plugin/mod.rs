@@ -5,6 +5,10 @@
 #[allow(dead_code)] // wired into the event loop in Task 2.8
 pub mod registry;
 
+/// Derived indexes over enabled-plugin manifests (slash/slots/hooks/keybindings/screens).
+#[allow(dead_code)] // consumed by the router/dispatcher in later PRs
+pub mod manifests;
+
 /// Returns the set of built-in plugin instances. Empty in PR 1.
 ///
 /// PR 2 adds: home-footer, home-tips.
