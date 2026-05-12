@@ -12,6 +12,7 @@
 
 use crate::theme::Theme;
 use ratatui::style::{Color, Style};
+use ratatui_themes::ThemePalette;
 
 /// Render-path color palette derived from an active [`Theme`].
 ///
@@ -41,12 +42,11 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// Resolve the palette for a built-in [`Theme`].
+    /// Resolve the palette for a [`Theme`].
     ///
-    /// Mappings are hand-tuned to keep the existing color story intact
-    /// (cyan/green/yellow for the three log roles, red for errors,
-    /// blue for header chrome) while making the light/high-contrast
-    /// themes legible on their respective backgrounds.
+    /// Built-in themes (Dark / Light / HighContrast) are hand-tuned
+    /// to keep the v0.7 color story intact. Upstream themes are mapped
+    /// from `ratatui_themes::ThemePalette` via [`Palette::from_upstream`].
     #[must_use]
     pub fn for_theme(theme: Theme) -> Self {
         match theme {
@@ -83,6 +83,41 @@ impl Palette {
                 warning: Color::LightYellow,
                 secondary: Color::LightCyan,
             },
+            Theme::Upstream(name) => Self::from_upstream(name.palette()),
+        }
+    }
+
+    /// Map a `ratatui_themes::ThemePalette` into our slot layout.
+    ///
+    /// Slot correspondences:
+    ///
+    /// | Our slot   | Upstream field | Notes                                  |
+    /// |------------|----------------|----------------------------------------|
+    /// | `fg`       | `fg`           | direct                                 |
+    /// | `bg`       | `bg`           | direct                                 |
+    /// | `accent`   | `accent`       | direct                                 |
+    /// | `muted`    | `muted`        | direct                                 |
+    /// | `error`    | `error`        | direct                                 |
+    /// | `warning`  | `warning`      | direct                                 |
+    /// | `success`  | `success`      | direct                                 |
+    /// | `secondary`| `secondary`    | direct                                 |
+    /// | `border`   | `selection`    | upstream's selection bg reads as chrome|
+    ///
+    /// Upstream's `info` slot has no direct counterpart in our layout
+    /// (we don't render "info"-flavored chrome). It is intentionally
+    /// dropped; new slots can map to it if a need appears.
+    #[must_use]
+    pub fn from_upstream(p: ThemePalette) -> Self {
+        Self {
+            fg: p.fg,
+            bg: p.bg,
+            border: p.selection,
+            accent: p.accent,
+            muted: p.muted,
+            error: p.error,
+            success: p.success,
+            warning: p.warning,
+            secondary: p.secondary,
         }
     }
 
@@ -96,6 +131,7 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui_themes::ThemeName;
 
     #[test]
     fn for_theme_returns_distinct_palettes() {
@@ -114,5 +150,50 @@ mod tests {
         let s = p.base_style();
         assert_eq!(s.fg, Some(Color::Black));
         assert_eq!(s.bg, Some(Color::White));
+    }
+
+    #[test]
+    fn for_theme_handles_every_upstream_theme() {
+        for upstream in ThemeName::all() {
+            let p = Palette::for_theme(Theme::Upstream(*upstream));
+            // The minimum invariant: fg != bg. If a future upstream
+            // theme regresses to fg == bg the whole palette is unusable.
+            assert_ne!(
+                p.fg,
+                p.bg,
+                "{}'s palette must have a legible fg/bg pair",
+                upstream.slug()
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_themes_differ_from_each_other_at_the_bg() {
+        // Two different upstream themes must produce different
+        // backgrounds — otherwise from_upstream is collapsing them.
+        let mut seen = std::collections::HashSet::new();
+        for upstream in ThemeName::all() {
+            let bg = Palette::for_theme(Theme::Upstream(*upstream)).bg;
+            seen.insert(format!("{bg:?}"));
+        }
+        assert!(
+            seen.len() >= 10,
+            "expected the 15-theme catalog to yield at least 10 distinct \
+             backgrounds, got {}: {seen:?}",
+            seen.len()
+        );
+    }
+
+    #[test]
+    fn from_upstream_threads_every_slot() {
+        // Smoke-test the field plumbing using Dracula's known values.
+        let p = Palette::from_upstream(ThemeName::Dracula.palette());
+        // Dracula's bg is RGB(40, 42, 54).
+        assert_eq!(p.bg, Color::Rgb(40, 42, 54));
+        // Dracula's accent is purple, RGB(189, 147, 249).
+        assert_eq!(p.accent, Color::Rgb(189, 147, 249));
+        // border comes from upstream's `selection`, which Dracula sets
+        // to RGB(68, 71, 90).
+        assert_eq!(p.border, Color::Rgb(68, 71, 90));
     }
 }

@@ -840,18 +840,36 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
 ///
 /// The theme change is applied at the next [`ui::render`] call — no
 /// host reconnect or widget rebuild needed.
+/// Push one indented row per theme to the conversation, marking the
+/// active theme. Used by both `/theme list` sections.
+fn push_theme_section<I>(app: &mut App, themes: I)
+where
+    I: IntoIterator<Item = theme::Theme>,
+{
+    for t in themes {
+        let marker = if t == app.active_theme {
+            " (active)"
+        } else {
+            ""
+        };
+        app.push_note(format!("    {}{}", t.name(), marker));
+    }
+}
+
 fn handle_theme_command(app: &mut App, args: &str) {
     let trimmed = args.trim();
     if trimmed.is_empty() || trimmed == "list" {
         app.push_note("themes:");
-        for t in theme::Theme::all() {
-            let marker = if t == app.active_theme {
-                " (active)"
-            } else {
-                ""
-            };
-            app.push_note(format!("  {}{}", t.name(), marker));
-        }
+        // Built-ins first, then the upstream catalog. Grouping keeps the
+        // 18-theme list (3 built-in + 15 catalog) scannable as the
+        // upstream catalog grows.
+        app.push_note("  built-in:");
+        push_theme_section(
+            app,
+            theme::Theme::all().into_iter().filter(|t| t.is_builtin()),
+        );
+        app.push_note("  catalog (ratatui-themes):");
+        push_theme_section(app, theme::Theme::catalog());
         return;
     }
 
@@ -871,12 +889,12 @@ fn handle_theme_command(app: &mut App, args: &str) {
             }
         }
         None => {
-            let names: Vec<&str> = theme::Theme::all().iter().map(|t| t.name()).collect();
+            // Don't reproduce the entire 18-theme catalog inline on every
+            // typo — point at `/theme list` instead.
             app.push_note(format!(
-                "theme `{}` not found — keeping `{}`. Available: {}",
+                "theme `{}` not found — keeping `{}`. Run `/theme list` to see available themes.",
                 trimmed,
                 app.active_theme.name(),
-                names.join(", ")
             ));
         }
     }
@@ -1732,10 +1750,9 @@ mod theme_command_tests {
         let last = notes.last().unwrap();
         assert!(last.contains("totally-bogus"), "last note: {last}");
         assert!(last.contains("not found"), "last note: {last}");
-        // The error message must enumerate the legal names.
-        for t in theme::Theme::all() {
-            assert!(last.contains(t.name()), "last note: {last}");
-        }
+        // The 18-theme catalog is too long to dump inline; the error
+        // line points at `/theme list` instead.
+        assert!(last.contains("/theme list"), "last note: {last}");
     }
 
     #[test]
@@ -1759,5 +1776,43 @@ mod theme_command_tests {
         // A brand-new App should now load the saved value.
         let app2 = fresh_app();
         assert_eq!(app2.active_theme, theme::Theme::HighContrast);
+    }
+
+    #[test]
+    fn list_renders_built_in_and_catalog_sections() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        let initial_notes = note_lines(&app).len();
+        handle_theme_command(&mut app, "list");
+        let notes = note_lines(&app);
+        let new_notes: Vec<&&str> = notes.iter().skip(initial_notes).collect();
+        assert!(
+            new_notes.iter().any(|l| l.contains("built-in:")),
+            "expected `built-in:` group header, got: {new_notes:?}"
+        );
+        assert!(
+            new_notes.iter().any(|l| l.contains("catalog")),
+            "expected catalog group header, got: {new_notes:?}"
+        );
+        // At least one upstream theme should appear under catalog.
+        assert!(
+            new_notes.iter().any(|l| l.contains("dracula")),
+            "expected `dracula` to appear under catalog, got: {new_notes:?}"
+        );
+    }
+
+    #[test]
+    fn upstream_theme_name_is_accepted_and_persisted() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        handle_theme_command(&mut app, "tokyo-night");
+        match app.active_theme {
+            theme::Theme::Upstream(t) => assert_eq!(t.slug(), "tokyo-night"),
+            other => panic!("expected upstream tokyo-night, got {other:?}"),
+        }
+        let app2 = fresh_app();
+        assert_eq!(app2.active_theme, app.active_theme);
     }
 }
