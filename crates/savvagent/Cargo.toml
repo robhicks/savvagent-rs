@@ -41,6 +41,7 @@ path = "src/bin/savvagent-openai.rs"
 
 [dependencies]
 savvagent-host = { workspace = true }
+savvagent-plugin = { workspace = true }
 savvagent-protocol = { workspace = true }
 savvagent-mcp = { workspace = true }
 provider-anthropic = { workspace = true }
