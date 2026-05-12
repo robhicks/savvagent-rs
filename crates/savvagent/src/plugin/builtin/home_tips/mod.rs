@@ -15,7 +15,6 @@ use savvagent_plugin::{
 /// Renders a one-line hint above the prompt in the `home.tips` slot.
 /// Shows `"Connecting…  Press / for commands"` until the first `Connect`
 /// host event fires, then switches to `"Press / for commands"`.
-#[allow(dead_code)] // wired into register_builtins in a later task
 pub struct HomeTipsPlugin {
     connected: bool,
 }

@@ -127,6 +127,19 @@ async fn main() -> Result<()> {
     }));
 
     let mut app = App::new(header_model, transcript_dir);
+
+    {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::PluginRegistry;
+
+        let plugins = plugin::register_builtins();
+        let registry = PluginRegistry::new(plugins);
+        let indexes = Indexes::build(&registry)
+            .await
+            .expect("plugin manifest conflict at startup");
+        app.install_plugin_runtime(registry, indexes);
+    }
+
     app.connected = host_slot.read().await.is_some();
     app.active_provider_id = initial_provider;
     // If we already have a host (e.g. saved-credentials bootstrap), align
@@ -1089,7 +1102,9 @@ async fn run_app(
     let (worker_tx, mut worker_rx) = mpsc::channel::<WorkerMsg>(128);
 
     loop {
-        terminal.draw(|f| ui::render(app, f))?;
+        let frame_area = terminal.get_frame().area();
+        let frame_data = ui::compute_home_frame_data(app, frame_area).await;
+        terminal.draw(|f| ui::render(app, f, &frame_data))?;
 
         while let Ok(msg) = worker_rx.try_recv() {
             match msg {

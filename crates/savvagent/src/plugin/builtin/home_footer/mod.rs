@@ -16,7 +16,6 @@ use savvagent_plugin::{
 /// Renders sandbox + turn state in `home.footer.center` and the working
 /// directory + key reminder in `home.footer.right`. Tracks the active turn
 /// by listening to `TurnStart` / `TurnEnd` host events.
-#[allow(dead_code)] // wired into register_builtins in a later task
 pub struct HomeFooterPlugin {
     turn_active: Option<u32>,
     working_dir: String,

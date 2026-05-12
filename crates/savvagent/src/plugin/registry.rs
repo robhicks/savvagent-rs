@@ -32,11 +32,13 @@ impl PluginRegistry {
     }
 
     /// Returns the total number of registered plugins (enabled and disabled).
+    #[allow(dead_code)] // used by the plugins-manager screen in PR 8
     pub fn len(&self) -> usize {
         self.plugins.len()
     }
 
     /// Returns `true` if no plugins are registered.
+    #[allow(dead_code)] // satisfies the is_empty/len lint pair; used in PR 8
     pub fn is_empty(&self) -> bool {
         self.plugins.is_empty()
     }
@@ -52,6 +54,7 @@ impl PluginRegistry {
     }
 
     /// Returns `true` if `id` is in the enabled set.
+    #[allow(dead_code)] // used by the plugins-manager screen in PR 8
     pub fn is_enabled(&self, id: &PluginId) -> bool {
         self.enabled.contains(id)
     }
@@ -59,6 +62,7 @@ impl PluginRegistry {
     /// Adds or removes `id` from the enabled set. Enabling an unregistered id
     /// is a no-op at query time but is otherwise stored; callers should only
     /// enable ids that are registered.
+    #[allow(dead_code)] // used by the plugins-manager screen in PR 8
     pub fn set_enabled(&mut self, id: &PluginId, enabled: bool) {
         if enabled {
             self.enabled.insert(id.clone());

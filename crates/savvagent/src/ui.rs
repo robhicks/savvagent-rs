@@ -1,5 +1,9 @@
 //! Render pass: paint the current [`App`] state into the frame.
 
+use crate::app::{App, Entry, InputMode, TranscriptEntry};
+use crate::palette::Palette;
+use crate::providers::PROVIDERS;
+use crate::splash;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
@@ -9,12 +13,79 @@ use ratatui::{
 };
 use savvagent_host::ToolCallStatus;
 
-use crate::app::{App, Entry, InputMode, TranscriptEntry};
-use crate::palette::Palette;
-use crate::providers::PROVIDERS;
-use crate::splash;
+/// Pre-computed plugin slot output for one render frame. Built async from
+/// `compute_home_frame_data` before `terminal.draw` runs so the draw closure
+/// stays synchronous and never touches plugin mutexes.
+pub struct HomeFrameData {
+    pub tips: Vec<savvagent_plugin::StyledLine>,
+    pub footer_left: Vec<savvagent_plugin::StyledLine>,
+    pub footer_center: Vec<savvagent_plugin::StyledLine>,
+    pub footer_right: Vec<savvagent_plugin::StyledLine>,
+}
 
-pub fn render(app: &mut App, frame: &mut Frame) {
+impl HomeFrameData {
+    /// Empty fallback used when plugins are not installed yet.
+    pub fn empty() -> Self {
+        Self {
+            tips: vec![],
+            footer_left: vec![],
+            footer_center: vec![],
+            footer_right: vec![],
+        }
+    }
+}
+
+/// Resolve every slot's lines for the current frame. Locks plugin mutexes
+/// briefly per contributor.
+pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeFrameData {
+    use crate::plugin::convert::rect_to_region;
+    use crate::plugin::slots::SlotRouter;
+
+    let Some(reg) = app.plugin_registry.as_ref().cloned() else {
+        return HomeFrameData::empty();
+    };
+    let Some(idx) = app.plugin_indexes.as_ref().cloned() else {
+        return HomeFrameData::empty();
+    };
+    let reg_guard = reg.read().await;
+    let idx_guard = idx.read().await;
+    let router = SlotRouter::new(&idx_guard, &reg_guard);
+
+    // Give each footer slot ~1/3 of the terminal width for budgeting.
+    let footer_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
+        .split(Rect::new(area.x, area.y, area.width, 1));
+
+    let tips = router
+        .render(
+            "home.tips",
+            rect_to_region(Rect::new(area.x, area.y, area.width, 1)),
+        )
+        .await;
+    let footer_left = router
+        .render("home.footer.left", rect_to_region(footer_cols[0]))
+        .await;
+    let footer_center = router
+        .render("home.footer.center", rect_to_region(footer_cols[1]))
+        .await;
+    let footer_right = router
+        .render("home.footer.right", rect_to_region(footer_cols[2]))
+        .await;
+
+    HomeFrameData {
+        tips,
+        footer_left,
+        footer_center,
+        footer_right,
+    }
+}
+
+pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     let area = frame.area();
 
     if app.show_splash {
@@ -33,9 +104,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .constraints([
             Constraint::Length(3), // header
             Constraint::Min(1),    // log
-            Constraint::Length(1), // status
+            Constraint::Length(1), // tips (plugin slot: home.tips)
             Constraint::Length(3), // input
-            Constraint::Length(1), // metrics
+            Constraint::Length(1), // footer (plugin slots: home.footer.*)
         ])
         .split(area);
 
@@ -75,24 +146,15 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     render_log(app, frame, chunks[1], palette);
 
-    let status = if app.is_loading {
-        Paragraph::new(" ● thinking…").style(
-            palette
-                .base_style()
-                .fg(palette.warning)
-                .add_modifier(Modifier::ITALIC),
-        )
-    } else {
-        Paragraph::new(" ○ ready").style(palette.base_style().fg(palette.accent))
-    };
-    frame.render_widget(
-        status.block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(palette.border).bg(palette.bg)),
-        ),
-        chunks[2],
-    );
+    // Tips row — one-line hints above the prompt, rendered from plugin slot.
+    let tips_lines: Vec<Line<'static>> = frame_data
+        .tips
+        .iter()
+        .cloned()
+        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .collect();
+    let tips_para = Paragraph::new(tips_lines).style(palette.base_style());
+    frame.render_widget(tips_para, chunks[2]);
 
     let mut textarea = app.input_textarea.clone();
     textarea.set_block(
@@ -103,29 +165,52 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     textarea.set_style(palette.base_style());
     frame.render_widget(&textarea, chunks[3]);
 
-    let transcript_label = match &app.last_transcript {
-        Some(p) => format!(" · transcript: {}", p.display()),
-        None => String::new(),
-    };
-    let version_text = format!("v{} ", env!("CARGO_PKG_VERSION"));
-    let metrics_chunks = Layout::default()
+    // Footer row — three horizontal segments from plugin slots.
+    let footer_cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(0),
-            Constraint::Length(version_text.len() as u16),
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
         ])
         .split(chunks[4]);
-    let metrics = Paragraph::new(format!(
-        " ctx≈{} tokens · entries: {}{}",
-        app.context_size,
-        app.entries.len(),
-        transcript_label
-    ))
-    .style(palette.base_style().fg(palette.accent));
-    frame.render_widget(metrics, metrics_chunks[0]);
-    let version = Paragraph::new(Line::from(version_text).right_aligned())
-        .style(palette.base_style().fg(palette.accent));
-    frame.render_widget(version, metrics_chunks[1]);
+
+    let footer_left_lines: Vec<Line<'static>> = frame_data
+        .footer_left
+        .iter()
+        .cloned()
+        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .collect();
+    frame.render_widget(
+        Paragraph::new(footer_left_lines).style(palette.base_style()),
+        footer_cols[0],
+    );
+
+    let footer_center_lines: Vec<Line<'static>> = frame_data
+        .footer_center
+        .iter()
+        .cloned()
+        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .collect();
+    frame.render_widget(
+        Paragraph::new(footer_center_lines)
+            .style(palette.base_style())
+            .centered(),
+        footer_cols[1],
+    );
+
+    let footer_right_lines: Vec<Line<'static>> = frame_data
+        .footer_right
+        .iter()
+        .cloned()
+        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .collect();
+    frame.render_widget(
+        Paragraph::new(footer_right_lines)
+            .style(palette.base_style())
+            .right_aligned(),
+        footer_cols[2],
+    );
 
     if app.is_file_picker_active {
         let popup = centered_rect(60, 40, area);
