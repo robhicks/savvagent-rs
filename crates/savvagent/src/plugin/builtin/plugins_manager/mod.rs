@@ -223,4 +223,39 @@ mod tests {
         let s = summarize_contributions(&Contributions::default());
         assert_eq!(s, "");
     }
+
+    /// Confirm the plural-form branches: two slashes + two screens + one
+    /// theme. Pins the exact wording so a future refactor that drops
+    /// the pluralization (e.g. "2 slash") is caught here, not via UI
+    /// review. Singular forms are already covered by
+    /// `summarize_contributions_lists_each_populated_field`.
+    #[test]
+    fn summarize_contributions_pluralizes_correctly() {
+        let mut c = Contributions::default();
+        c.slash_commands = vec![
+            savvagent_plugin::SlashSpec {
+                name: "a".into(),
+                summary: "".into(),
+                args_hint: None,
+            },
+            savvagent_plugin::SlashSpec {
+                name: "b".into(),
+                summary: "".into(),
+                args_hint: None,
+            },
+        ];
+        c.screens = vec![
+            savvagent_plugin::ScreenSpec {
+                id: "a".into(),
+                layout: ScreenLayout::Fullscreen { hide_chrome: false },
+            },
+            savvagent_plugin::ScreenSpec {
+                id: "b".into(),
+                layout: ScreenLayout::Fullscreen { hide_chrome: false },
+            },
+        ];
+        let s = summarize_contributions(&c);
+        assert!(s.contains("2 slashes"), "got: {s}");
+        assert!(s.contains("2 screens"), "got: {s}");
+    }
 }

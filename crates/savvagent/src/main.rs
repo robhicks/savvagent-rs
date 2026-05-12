@@ -138,13 +138,29 @@ async fn main() -> Result<()> {
         // ~/.savvagent/plugins.toml so the initial Indexes::build picks
         // up the user's saved choices. Core plugins are always enabled
         // regardless of what the file says; unknown ids are skipped.
+        //
+        // Both skip branches warn-log so the user can diagnose two
+        // otherwise-silent scenarios:
+        //   - downgrade: a previously-disabled plugin no longer exists
+        //     in this binary.
+        //   - hand-edit: someone added a Core plugin to plugins.toml
+        //     (which the spec forbids the runtime to honour).
         let persisted = plugin::builtin::plugins_manager::persistence::load();
         for (pid, enabled) in persisted {
-            if let Some(plugin) = registry.get(&pid) {
-                let kind = plugin.lock().await.manifest().kind;
-                if matches!(kind, PluginKind::Optional) {
-                    registry.set_enabled(&pid, enabled);
-                }
+            let Some(plugin) = registry.get(&pid) else {
+                tracing::warn!(
+                    plugin = %pid.as_str(),
+                    "plugins.toml: unknown plugin id; entry ignored (downgrade or removed plugin?)"
+                );
+                continue;
+            };
+            let kind = plugin.lock().await.manifest().kind;
+            match kind {
+                PluginKind::Optional => registry.set_enabled(&pid, enabled),
+                PluginKind::Core => tracing::warn!(
+                    plugin = %pid.as_str(),
+                    "plugins.toml: Core plugins cannot be disabled; ignoring entry"
+                ),
             }
         }
 

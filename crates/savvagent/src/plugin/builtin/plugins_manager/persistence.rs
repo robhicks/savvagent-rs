@@ -17,9 +17,13 @@ use std::path::PathBuf;
 use savvagent_plugin::PluginId;
 use serde::{Deserialize, Serialize};
 
-/// On-disk shape of `~/.savvagent/plugins.toml`.
+/// On-disk shape of `~/.savvagent/plugins.toml`. Internal to the
+/// persistence layer — the public surface is [`load`] and [`save`],
+/// which deal in `HashMap<PluginId, bool>`. Tightened from `pub` to
+/// `pub(crate)` so the file format isn't part of the crate's public
+/// API.
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct PluginsToml {
+pub(crate) struct PluginsToml {
     /// Forward-compatibility marker. Bump when the file shape changes
     /// incompatibly so older binaries can refuse to interpret it.
     pub schema_version: u32,
@@ -28,9 +32,10 @@ pub struct PluginsToml {
     pub plugins: HashMap<String, PluginEntry>,
 }
 
-/// One row in the `[plugins.<id>]` table.
+/// One row in the `[plugins.<id>]` table. See [`PluginsToml`] for the
+/// crate-internal visibility rationale.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PluginEntry {
+pub(crate) struct PluginEntry {
     /// Whether this Optional plugin should be enabled at startup.
     pub enabled: bool,
 }
@@ -129,7 +134,14 @@ pub fn save(entries: &HashMap<PluginId, bool>) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    std::fs::rename(&tmp, &path)?;
+    // Best-effort cleanup if rename fails so we don't leave a stale
+    // `plugins.toml.tmp` next to the real file. The original rename error
+    // is what the caller cares about; deliberately don't shadow it with a
+    // cleanup error.
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(())
 }
 

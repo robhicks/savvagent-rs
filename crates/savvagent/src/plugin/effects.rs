@@ -215,16 +215,32 @@ async fn apply_toggle_plugin(app: &mut App, id: PluginId, enabled: bool) -> Resu
     // registry's write lock. The lock is released before we rebuild
     // indexes so Indexes::build's per-plugin manifest locks don't fight
     // the outer write guard.
+    //
+    // Defense-in-depth: the plugins-manager screen already refuses Core
+    // toggles + surfaces a note before emitting TogglePlugin, and the
+    // command palette filters Core plugins out of its action list. But
+    // any other path that synthesises TogglePlugin (a future
+    // slash-driven `/plugin disable <id>` flow, a hook subscriber, a
+    // misbehaving plugin) would silently no-op here. Both branches now
+    // push a user-visible note in addition to the warn-log.
     {
         let mut reg = reg_handle.write().await;
         if let Some(plugin) = reg.get(&id) {
             let kind = plugin.lock().await.manifest().kind;
             if matches!(kind, PluginKind::Core) {
                 tracing::warn!(plugin = %id.as_str(), "refusing to toggle Core plugin");
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "Cannot disable Core plugin: {}",
+                    id.as_str()
+                )));
                 return Ok(());
             }
         } else {
             tracing::warn!(plugin = %id.as_str(), "TogglePlugin: unknown plugin id");
+            app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                "Cannot toggle unknown plugin: {}",
+                id.as_str()
+            )));
             return Ok(());
         }
         reg.set_enabled(&id, enabled);
@@ -232,13 +248,43 @@ async fn apply_toggle_plugin(app: &mut App, id: PluginId, enabled: bool) -> Resu
 
     // Phase 2: rebuild the derived indexes so the new enabled set is
     // visible to slash/screen/hook dispatch.
-    {
-        let reg = reg_handle.read().await;
-        let new_idx = Indexes::build(&reg).await.map_err(|e| e.to_string())?;
-        if let Some(idx_handle) = app.plugin_indexes.as_ref() {
-            let mut idx = idx_handle.write().await;
-            *idx = new_idx;
+    //
+    // If `Indexes::build` fails (e.g. enabling this plugin introduces a
+    // slash/screen/keybinding conflict with another enabled plugin),
+    // Phase 1's registry mutation has already committed. Propagating
+    // the error via `?` would leave the registry diverged from the
+    // indexes AND skip Phase 3 (persistence) — so the user would see a
+    // toggle that "worked" in the row state but didn't actually take
+    // effect, with no visibility beyond a tracing line. Instead, we
+    // explicitly roll the registry mutation back to the prior state,
+    // log at error level, surface a user-visible note, and return Ok —
+    // leaving the indexes (which were never replaced) coherent with
+    // the rolled-back registry.
+    let new_idx = {
+        let reg_read = reg_handle.read().await;
+        match Indexes::build(&reg_read).await {
+            Ok(i) => i,
+            Err(e) => {
+                drop(reg_read);
+                let mut reg = reg_handle.write().await;
+                reg.set_enabled(&id, !enabled);
+                tracing::error!(
+                    plugin = %id.as_str(),
+                    error = %e,
+                    "TogglePlugin: Indexes::build failed; rolled back registry mutation",
+                );
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "Couldn't toggle {}: rebuilding plugin indexes failed ({}); change reverted.",
+                    id.as_str(),
+                    e
+                )));
+                return Ok(());
+            }
         }
+    };
+    if let Some(idx_handle) = app.plugin_indexes.as_ref() {
+        let mut idx = idx_handle.write().await;
+        *idx = new_idx;
     }
 
     // Phase 3: persist Optional rows. Core plugins are never written, so
@@ -259,9 +305,10 @@ async fn apply_toggle_plugin(app: &mut App, id: PluginId, enabled: bool) -> Resu
             }
         }
         if let Err(e) = persistence::save(&entries) {
-            tracing::warn!(error = %e, "failed to save plugins.toml");
+            tracing::error!(error = %e, "plugins.toml save failed");
             app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                "plugins.toml save failed: {e}"
+                "Could not save plugins.toml ({e}); toggle applied for this session only — \
+                 will revert at next start."
             )));
         }
     }
@@ -300,7 +347,31 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
     drop(reg_guard);
     drop(idx_guard);
 
-    let (screen, layout) = {
+    // For screens whose row/data list lives in `App`/the registry rather
+    // than in `ScreenArgs`, build the populated screen ourselves and skip
+    // the plugin's `create_screen` (which would just allocate an empty
+    // placeholder we'd immediately discard). Today that's only
+    // `plugins.manager`; future screens with the same shape (e.g. a
+    // hooks inspector) should follow the same pattern rather than
+    // smuggling state through ScreenArgs.
+    let (screen, layout) = if id == "plugins.manager" {
+        let layout = {
+            let plugin = handle.lock().await;
+            let manifest = plugin.manifest();
+            manifest
+                .contributions
+                .screens
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| format!("plugin {} doesn't declare screen {id}", pid.as_str()))?
+                .layout
+                .clone()
+        };
+        let rows = build_plugins_manager_rows(&reg).await;
+        let screen: Box<dyn savvagent_plugin::Screen> =
+            Box::new(PluginsManagerScreen::with_rows(rows));
+        (screen, layout)
+    } else {
         let plugin = handle.lock().await;
         let manifest = plugin.manifest();
         let layout = manifest
@@ -313,19 +384,6 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
             .clone();
         let screen = plugin.create_screen(id, args).map_err(|e| e.to_string())?;
         (screen, layout)
-    };
-
-    // For screens whose row/data list lives in `App`/the registry rather
-    // than in `ScreenArgs`, swap the plugin's just-built empty screen for
-    // a populated one. Today that's only `plugins.manager`; future
-    // screens with the same shape (e.g. a hooks inspector) should follow
-    // the same pattern rather than smuggling state through ScreenArgs.
-    let screen: Box<dyn savvagent_plugin::Screen> = match id {
-        "plugins.manager" => {
-            let rows = build_plugins_manager_rows(&reg).await;
-            Box::new(PluginsManagerScreen::with_rows(rows))
-        }
-        _ => screen,
     };
 
     app.screen_stack.push(screen, layout);
@@ -1074,6 +1132,120 @@ mod tests {
         assert_eq!(loaded.get(&pid), Some(&false));
     }
 
+    /// Regression test for the CRITICAL post-review fix: if Phase 2's
+    /// `Indexes::build` fails after Phase 1's registry mutation has
+    /// committed, the previous code returned the error via `?` —
+    /// leaving the registry diverged from the indexes AND skipping
+    /// Phase 3 (persistence). The user saw a successful-looking toggle
+    /// that didn't take effect.
+    ///
+    /// Setup: two Optional plugins that contribute the same slash name
+    /// (`dup`). At install time only one is enabled, so
+    /// `Indexes::build` succeeds. We then emit
+    /// `TogglePlugin { id: B, enabled: true }`; that flip would make
+    /// `Indexes::build` fail with a `SlashConflict`. The handler must
+    /// roll the registry's enabled bit on B back to `false`, surface a
+    /// note, and return `Ok(())`.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn toggle_plugin_rolls_back_on_indexes_build_failure() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_plugin::{Contributions, Manifest, Plugin, PluginId, PluginKind, SlashSpec};
+
+        /// Two distinct plugin types that contribute the same slash name
+        /// `dup` so enabling both at once causes `Indexes::build` to
+        /// fail with `SlashConflict`.
+        struct SlashDup {
+            id: String,
+        }
+        #[async_trait]
+        impl Plugin for SlashDup {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.slash_commands = vec![SlashSpec {
+                    name: "dup".into(),
+                    summary: "".into(),
+                    args_hint: None,
+                }];
+                Manifest {
+                    id: PluginId::new(&self.id).expect("valid id"),
+                    name: self.id.clone(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+        }
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+
+        let a = SlashDup {
+            id: "internal:test-slash-dup-a".into(),
+        };
+        let b = SlashDup {
+            id: "internal:test-slash-dup-b".into(),
+        };
+
+        let set = BuiltinSet {
+            plugins: vec![Box::new(a), Box::new(b)],
+            providers: vec![],
+        };
+        let mut registry = PluginRegistry::new(set);
+
+        // Disable B before the initial Indexes::build so it succeeds —
+        // only A's `dup` is in the slash index at install time.
+        let pid_b = PluginId::new("internal:test-slash-dup-b").expect("valid");
+        registry.set_enabled(&pid_b, false);
+
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        // Sanity: pre-toggle, B is disabled.
+        {
+            let reg = app.plugin_registry.as_ref().unwrap().read().await;
+            assert!(!reg.is_enabled(&pid_b), "precondition: B starts disabled");
+        }
+
+        // Drive the toggle. Phase 1 sets B enabled; Phase 2's
+        // Indexes::build fails on the dup-slash conflict; the handler
+        // must roll Phase 1 back. Returns Ok(()) because the rollback
+        // path surfaces the failure via a PushNote, not an error.
+        apply_effects(
+            &mut app,
+            vec![Effect::TogglePlugin {
+                id: pid_b.clone(),
+                enabled: true,
+            }],
+        )
+        .await
+        .expect("apply_effects must return Ok despite the build failure");
+
+        // Post: B is still disabled (rollback worked). Without the
+        // rollback, the registry would now hold B as enabled while the
+        // indexes still reflected the prior (working) state.
+        let reg = app.plugin_registry.as_ref().unwrap().read().await;
+        assert!(
+            !reg.is_enabled(&pid_b),
+            "registry must be rolled back to disabled after Indexes::build failure"
+        );
+
+        // And a user-visible note explaining the revert was pushed.
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => text.contains("change reverted"),
+            _ => false,
+        });
+        assert!(
+            found,
+            "expected a 'change reverted' note after the failed toggle; entries: {:?}",
+            app.entries
+        );
+    }
+
     /// Toggling a Core plugin is a no-op at the apply_effects level: the
     /// registry remains unchanged and nothing is written.
     #[tokio::test(flavor = "current_thread")]
@@ -1124,10 +1296,74 @@ mod tests {
         .expect("apply_effects must succeed");
 
         // Registry should still mark the Core plugin enabled.
-        let reg = app.plugin_registry.as_ref().unwrap().read().await;
+        {
+            let reg = app.plugin_registry.as_ref().unwrap().read().await;
+            assert!(
+                reg.is_enabled(&pid),
+                "Core plugin must remain enabled after a refused TogglePlugin"
+            );
+        }
+
+        // Defense-in-depth: the apply layer pushes a user-visible note
+        // so a non-screen-driven `TogglePlugin` for a Core plugin
+        // (future slash-driven flow, hook subscriber, etc.) doesn't
+        // silently no-op.
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => text.contains("Cannot disable Core plugin"),
+            _ => false,
+        });
         assert!(
-            reg.is_enabled(&pid),
-            "Core plugin must remain enabled after a refused TogglePlugin"
+            found,
+            "expected a 'Cannot disable Core plugin' note; entries: {:?}",
+            app.entries
+        );
+    }
+
+    /// Defense-in-depth for fix #5: an unknown id in `TogglePlugin`
+    /// must push a user-visible note in addition to the warn-log. The
+    /// plugins-manager screen only emits TogglePlugin for ids it
+    /// already knows about, so this branch is exercised only by
+    /// non-screen-driven emitters; we still pin the user feedback so
+    /// future emitters don't silently no-op.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn toggle_plugin_unknown_id_pushes_note() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use savvagent_plugin::PluginId;
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+
+        let set = BuiltinSet {
+            plugins: vec![],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        let pid = PluginId::new("internal:nonexistent").expect("valid id");
+
+        apply_effects(
+            &mut app,
+            vec![Effect::TogglePlugin {
+                id: pid.clone(),
+                enabled: false,
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed even for unknown id");
+
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => text.contains("Cannot toggle unknown plugin"),
+            _ => false,
+        });
+        assert!(
+            found,
+            "expected a 'Cannot toggle unknown plugin' note; entries: {:?}",
+            app.entries
         );
     }
 }
