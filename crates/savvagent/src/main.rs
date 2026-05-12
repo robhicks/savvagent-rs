@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
         let registry = PluginRegistry::new(plugins);
         let indexes = Indexes::build(&registry)
             .await
-            .expect("plugin manifest conflict at startup");
+            .unwrap_or_else(|e| panic!("plugin manifest conflict at startup: {e}"));
         app.install_plugin_runtime(registry, indexes);
     }
 

@@ -38,13 +38,22 @@ impl HomeFrameData {
 /// Resolve every slot's lines for the current frame. Locks plugin mutexes
 /// briefly per contributor.
 pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeFrameData {
+    use std::sync::Once;
+
     use crate::plugin::convert::rect_to_region;
     use crate::plugin::slots::SlotRouter;
 
-    let Some(reg) = app.plugin_registry.as_ref().cloned() else {
-        return HomeFrameData::empty();
-    };
-    let Some(idx) = app.plugin_indexes.as_ref().cloned() else {
+    static WARNED_NO_RUNTIME: Once = Once::new();
+
+    let (Some(reg), Some(idx)) = (
+        app.plugin_registry.as_ref().cloned(),
+        app.plugin_indexes.as_ref().cloned(),
+    ) else {
+        WARNED_NO_RUNTIME.call_once(|| {
+            tracing::warn!(
+                "compute_home_frame_data called before install_plugin_runtime — TUI is rendering with no plugin output"
+            );
+        });
         return HomeFrameData::empty();
     };
     let reg_guard = reg.read().await;

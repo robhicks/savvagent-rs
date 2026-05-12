@@ -98,7 +98,13 @@ impl Indexes {
         let mut idx = Indexes::default();
 
         for id in reg.enabled_ids().cloned().collect::<Vec<_>>() {
-            let Some(handle) = reg.get(&id) else { continue };
+            let Some(handle) = reg.get(&id) else {
+                tracing::error!(
+                    plugin_id = %id.as_str(),
+                    "enabled plugin id not present in registry — index/registry divergence at build time"
+                );
+                continue;
+            };
             let manifest = {
                 let plugin = handle.lock().await;
                 plugin.manifest()
@@ -250,6 +256,83 @@ mod tests {
                 contributions,
             }
         }
+    }
+
+    struct WithScreen(String, String);
+
+    #[async_trait]
+    impl Plugin for WithScreen {
+        fn manifest(&self) -> Manifest {
+            use savvagent_plugin::ScreenLayout;
+            let mut contributions = Contributions::default();
+            contributions.screens = vec![ScreenSpec {
+                id: self.1.clone(),
+                layout: ScreenLayout::Fullscreen { hide_chrome: false },
+            }];
+            Manifest {
+                id: PluginId::new(&self.0).expect("valid test id"),
+                name: self.0.clone(),
+                version: "0".into(),
+                description: "t".into(),
+                kind: PluginKind::Optional,
+                contributions,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn screen_conflict_is_hard_error() {
+        let reg = PluginRegistry::new(vec![
+            Box::new(WithScreen("test:a".into(), "themes.picker".into())),
+            Box::new(WithScreen("test:b".into(), "themes.picker".into())),
+        ]);
+        let err = Indexes::build(&reg).await.unwrap_err();
+        assert!(
+            matches!(err, IndexBuildError::ScreenConflict { ref id, .. } if id == "themes.picker")
+        );
+    }
+
+    struct WithBinding(String, KeybindingSpec);
+
+    #[async_trait]
+    impl Plugin for WithBinding {
+        fn manifest(&self) -> Manifest {
+            let mut contributions = Contributions::default();
+            contributions.keybindings = vec![self.1.clone()];
+            Manifest {
+                id: PluginId::new(&self.0).expect("valid test id"),
+                name: self.0.clone(),
+                version: "0".into(),
+                description: "t".into(),
+                kind: PluginKind::Optional,
+                contributions,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn keybinding_conflict_is_hard_error() {
+        use savvagent_plugin::{Effect, KeyCodePortable, KeyEventPortable, KeyMods};
+        let chord = ChordPortable::new(KeyEventPortable {
+            code: KeyCodePortable::Char('s'),
+            modifiers: KeyMods {
+                ctrl: true,
+                alt: false,
+                shift: false,
+                meta: false,
+            },
+        });
+        let spec = KeybindingSpec {
+            scope: KeyScope::Global,
+            chord: chord.clone(),
+            action: BoundAction::EmitEffect(Effect::Quit),
+        };
+        let reg = PluginRegistry::new(vec![
+            Box::new(WithBinding("test:a".into(), spec.clone())),
+            Box::new(WithBinding("test:b".into(), spec)),
+        ]);
+        let err = Indexes::build(&reg).await.unwrap_err();
+        assert!(matches!(err, IndexBuildError::KeybindingConflict { .. }));
     }
 
     #[tokio::test]

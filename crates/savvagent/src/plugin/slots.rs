@@ -40,6 +40,11 @@ impl<'a> SlotRouter<'a> {
         let mut out = Vec::new();
         for pid in self.contributors(slot_id) {
             let Some(handle) = self.registry.get(pid) else {
+                tracing::error!(
+                    plugin_id = %pid.as_str(),
+                    slot_id,
+                    "contributor in slot index but missing from registry — index/registry divergence"
+                );
                 continue;
             };
             let plugin = handle.lock().await;
