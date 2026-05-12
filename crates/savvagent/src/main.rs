@@ -1476,6 +1476,10 @@ async fn run_app(
                 }
                 _ => {}
             },
+            // Theme picker key handling is wired up in a later commit; the
+            // arm exists here so the match stays exhaustive after the
+            // `InputMode::SelectingTheme` variant was added.
+            InputMode::SelectingTheme => {}
         }
     }
 }

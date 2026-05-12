@@ -41,6 +41,11 @@ pub enum InputMode {
         /// Human-readable summary from the policy.
         summary: String,
     },
+    /// Theme picker modal open. Up/Down navigates the filtered list,
+    /// printable chars edit the filter, Enter commits + persists, Esc
+    /// reverts to the pre-open theme. See
+    /// `docs/superpowers/specs/2026-05-12-v0.8.0-theme-picker-design.md`.
+    SelectingTheme,
     /// Transcript picker open — selecting a file for `/resume`.
     SelectingTranscript,
 }
@@ -281,6 +286,18 @@ pub struct App {
     /// and persisted on every successful set.
     pub active_theme: crate::theme::Theme,
 
+    /// Cursor row in the picker's filtered theme list — never into
+    /// render rows. Section headers are not represented here.
+    pub theme_picker_index: usize,
+
+    /// Substring filter narrowing the picker's catalog. Empty means
+    /// "show every theme". Matched case-sensitively against slugs.
+    pub theme_picker_filter: String,
+
+    /// Snapshot of [`App::active_theme`] at picker-open time. Restored
+    /// on Esc so live preview is fully undoable; ignored on Enter.
+    pub theme_picker_pre_theme: crate::theme::Theme,
+
     /// Cached classification of the sandbox state for the startup splash.
     /// Loaded once at `App::new` via `SandboxConfig::load_with_status` so
     /// the splash render path doesn't re-read disk on every frame; refreshed
@@ -347,6 +364,9 @@ impl App {
             transcript_index: 0,
             resumed_at: None,
             active_theme: crate::theme::load(),
+            theme_picker_index: 0,
+            theme_picker_filter: String::new(),
+            theme_picker_pre_theme: crate::theme::Theme::default(),
             splash_sandbox: {
                 let (cfg, status) = SandboxConfig::load_with_status();
                 crate::splash::SandboxSplashState::from_load(&cfg, &status)
@@ -1070,9 +1090,57 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    // `theme::save` writes to `$HOME/.savvagent/theme.toml`, and `App::new`
+    // reads it. We point `$HOME` at a per-test temp dir to avoid touching
+    // the developer's real theme. Env vars are process-global, so any test
+    // that constructs `App::new` runs under this mutex.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    struct HomeGuard {
+        _td: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn new() -> Self {
+            let td = tempfile::TempDir::new().expect("tempdir");
+            let prev = std::env::var_os("HOME");
+            // SAFETY: env mutation guarded by HOME_LOCK across this module's tests.
+            unsafe { std::env::set_var("HOME", td.path()) };
+            Self { _td: td, prev }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: env mutation guarded by HOME_LOCK across this module's tests.
+            unsafe {
+                match &self.prev {
+                    Some(p) => std::env::set_var("HOME", p),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
 
     fn fresh_app() -> App {
         App::new("test-model".into(), PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    fn fresh_app_initializes_theme_picker_state_with_defaults() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let app = fresh_app();
+        assert!(
+            !matches!(app.input_mode, InputMode::SelectingTheme),
+            "fresh app must not start in the theme picker"
+        );
+        assert_eq!(app.theme_picker_filter, "");
+        assert_eq!(app.theme_picker_index, 0);
+        assert_eq!(app.theme_picker_pre_theme, crate::theme::Theme::default());
     }
 
     #[test]
@@ -1285,6 +1353,7 @@ mod tests {
             InputMode::EnteringApiKey => "EnteringApiKey",
             InputMode::PermissionPrompt => "PermissionPrompt",
             InputMode::BashNetworkPrompt { .. } => "BashNetworkPrompt",
+            InputMode::SelectingTheme => "SelectingTheme",
             InputMode::SelectingTranscript => "SelectingTranscript",
         }
     }
