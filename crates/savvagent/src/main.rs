@@ -1455,10 +1455,29 @@ async fn run_app(
                 }
                 _ => {}
             },
-            // Theme picker key handling is wired up in a later commit; the
-            // arm exists here so the match stays exhaustive after the
-            // `InputMode::SelectingTheme` variant was added.
-            InputMode::SelectingTheme => {}
+            InputMode::SelectingTheme => match key.code {
+                KeyCode::Esc => app.theme_picker_cancel(),
+                KeyCode::Up => app.theme_picker_cursor_up(),
+                KeyCode::Down => app.theme_picker_cursor_down(),
+                KeyCode::Backspace => app.theme_picker_backspace(),
+                KeyCode::Enter => {
+                    let chosen = app.active_theme;
+                    app.theme_picker_confirm();
+                    match theme::save(chosen) {
+                        Ok(()) => {
+                            app.push_note(format!("theme set to `{}`", chosen.name()));
+                        }
+                        Err(e) => {
+                            app.push_note(format!(
+                                "theme `{}` applied for this session, but persistence failed: {e}",
+                                chosen.name()
+                            ));
+                        }
+                    }
+                }
+                KeyCode::Char(c) => app.theme_picker_typed_char(c),
+                _ => {}
+            },
         }
     }
 }
@@ -1773,6 +1792,50 @@ mod theme_command_tests {
             last.contains("in-flight") || last.contains("wait"),
             "last note must explain the refusal: {last}"
         );
+    }
+
+    #[test]
+    fn theme_picker_enter_persists_chosen_theme() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // Open picker.
+        handle_theme_command(&mut app, "");
+        assert!(matches!(app.input_mode, InputMode::SelectingTheme));
+        // Simulate scrolling to a specific theme.
+        app.theme_picker_filter = "tokyo".to_string();
+        app.theme_picker_index = 0;
+        // Live preview should have moved active_theme; ensure it.
+        let filtered = app.theme_picker_filtered_themes();
+        let chosen = filtered[0];
+        app.active_theme = chosen;
+        // Simulate the Enter handler.
+        app.theme_picker_confirm();
+        let _ = theme::save(app.active_theme);
+
+        let app2 = fresh_app();
+        assert_eq!(app2.active_theme, chosen);
+    }
+
+    #[test]
+    fn theme_picker_esc_does_not_persist() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        // Pre-save Dark so theme.toml has a known starting value.
+        let mut app = fresh_app();
+        handle_theme_command(&mut app, "dark");
+        assert_eq!(app.active_theme, theme::Theme::Dark);
+
+        // Open picker, live-preview, then cancel.
+        handle_theme_command(&mut app, "");
+        app.theme_picker_cursor_down();
+        assert_ne!(app.active_theme, theme::Theme::Dark);
+        app.theme_picker_cancel();
+        assert_eq!(app.active_theme, theme::Theme::Dark);
+
+        // Reload: theme.toml should still say dark.
+        let app2 = fresh_app();
+        assert_eq!(app2.active_theme, theme::Theme::Dark);
     }
 
     #[test]
