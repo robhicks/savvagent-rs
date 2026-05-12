@@ -43,11 +43,7 @@ impl Plugin for ClearPlugin {
         }
     }
 
-    async fn handle_slash(
-        &mut self,
-        _: &str,
-        _: Vec<String>,
-    ) -> Result<Vec<Effect>, PluginError> {
+    async fn handle_slash(&mut self, _: &str, _: Vec<String>) -> Result<Vec<Effect>, PluginError> {
         Ok(vec![Effect::ClearLog])
     }
 }

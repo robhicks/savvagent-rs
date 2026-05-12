@@ -15,6 +15,9 @@ pub mod home_footer;
 /// Tips widget: one-line hint above the prompt; switches text after Connect.
 pub mod home_tips;
 
+/// Cycles to the next model on the active provider; registered as `/model`.
+pub mod model;
+
 /// Saves the active transcript to disk; registered as `/save [path]`.
 pub mod save;
 

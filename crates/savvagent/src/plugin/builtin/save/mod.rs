@@ -51,7 +51,10 @@ impl Plugin for SavePlugin {
         _: &str,
         args: Vec<String>,
     ) -> Result<Vec<Effect>, PluginError> {
-        let path = args.into_iter().next().unwrap_or_else(default_transcript_path);
+        let path = args
+            .into_iter()
+            .next()
+            .unwrap_or_else(default_transcript_path);
         Ok(vec![Effect::Stack(vec![
             Effect::SaveTranscript { path: path.clone() },
             Effect::PushNote {
@@ -79,10 +82,15 @@ mod tests {
     #[tokio::test]
     async fn save_with_explicit_path_uses_it() {
         let mut p = SavePlugin::new();
-        let effs = p.handle_slash("save", vec!["/tmp/x.json".into()]).await.unwrap();
+        let effs = p
+            .handle_slash("save", vec!["/tmp/x.json".into()])
+            .await
+            .unwrap();
         match &effs[0] {
             Effect::Stack(children) => {
-                assert!(matches!(&children[0], Effect::SaveTranscript { path } if path == "/tmp/x.json"));
+                assert!(
+                    matches!(&children[0], Effect::SaveTranscript { path } if path == "/tmp/x.json")
+                );
             }
             _ => panic!(),
         }
