@@ -43,3 +43,49 @@ pub use manifest::{
     Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind,
     ProviderSpec, ScreenLayout, ScreenSpec, SlashSpec, SlotSpec,
 };
+
+/// The [`Plugin`] trait — the WIT-portable entry point each plugin implements.
+pub mod plugin;
+pub use plugin::Plugin;
+
+/// The [`Screen`] trait — per-open instances pushed onto the runtime's screen stack.
+pub mod screen;
+pub use screen::Screen;
+
+#[cfg(test)]
+mod trait_smoke {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct DummyPlugin;
+
+    #[async_trait]
+    impl Plugin for DummyPlugin {
+        fn manifest(&self) -> Manifest {
+            Manifest {
+                id: PluginId("test:dummy".into()),
+                name: "Dummy".into(),
+                version: "0.0.0".into(),
+                description: "Trait smoke".into(),
+                kind: PluginKind::Optional,
+                contributions: Contributions::default(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dummy_plugin_default_impls_do_nothing() {
+        let mut p = DummyPlugin;
+        assert!(p.handle_slash("noop", vec![]).await.unwrap().is_empty());
+        assert!(p.on_event(HostEvent::HostStarting).await.unwrap().is_empty());
+        assert!(p.themes().is_empty());
+
+        // create_screen default returns ScreenNotFound for the given id.
+        let create_result = p.create_screen("anything", ScreenArgs::None);
+        assert!(matches!(create_result, Err(PluginError::ScreenNotFound(ref id)) if id == "anything"));
+
+        // render_slot default returns an empty Vec.
+        let lines = p.render_slot("home.tips", Region { x: 0, y: 0, width: 80, height: 1 });
+        assert!(lines.is_empty());
+    }
+}
