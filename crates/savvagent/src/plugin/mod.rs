@@ -53,6 +53,7 @@ pub fn register_builtins() -> Vec<Box<dyn savvagent_plugin::Plugin>> {
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
+        Box::new(builtin::view_file::ViewFilePlugin::new()),
     ]
 }
 
@@ -61,7 +62,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn register_builtins_pr3_partial() {
+    async fn register_builtins_pr4_partial() {
         let plugins = register_builtins();
         let ids: Vec<_> = plugins
             .iter()
@@ -71,6 +72,7 @@ mod tests {
         assert!(ids.contains(&"internal:home-footer".to_string()));
         assert!(ids.contains(&"internal:home-tips".to_string()));
         assert!(ids.contains(&"internal:splash".to_string()));
-        assert_eq!(plugins.len(), 4);
+        assert!(ids.contains(&"internal:view-file".to_string()));
+        assert_eq!(plugins.len(), 5);
     }
 }

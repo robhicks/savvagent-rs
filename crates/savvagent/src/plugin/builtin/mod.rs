@@ -11,3 +11,6 @@ pub mod home_tips;
 
 /// Startup HUD screen with connect status; responds to HostStarting + Connect.
 pub mod splash;
+
+/// Fullscreen read-only file viewer; opened via `/view <path>`.
+pub mod view_file;
