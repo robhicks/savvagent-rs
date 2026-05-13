@@ -1,11 +1,5 @@
 //! `internal:language` — language catalog + `/language` slash + language picker screen.
 
-// Task 13 wires LanguagePlugin into register_builtins, making the whole
-// module reachable from non-test code. Until that lands everything here
-// (and the picker/screen types it transitively uses) would otherwise
-// trigger dead_code warnings under -D warnings.
-#![allow(dead_code)]
-
 pub mod catalog;
 pub mod picker;
 pub mod screen;

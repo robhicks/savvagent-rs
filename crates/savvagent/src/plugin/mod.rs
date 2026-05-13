@@ -83,6 +83,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::edit_file::EditFilePlugin::new()),
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
+        Box::new(builtin::language::LanguagePlugin::new()),
         Box::new(builtin::model::ModelPlugin::new()),
         Box::new(builtin::plugins_manager::PluginsManagerPlugin::new()),
         Box::new(builtin::quit::QuitPlugin::new()),
@@ -118,6 +119,7 @@ mod tests {
             "internal:edit-file",
             "internal:home-footer",
             "internal:home-tips",
+            "internal:language",
             "internal:model",
             "internal:plugins-manager",
             "internal:quit",
@@ -132,7 +134,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 14);
+        assert_eq!(set.plugins.len(), 15);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -165,8 +167,8 @@ mod tests {
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            18,
-            "registry should have 14 non-provider + 4 provider plugins"
+            19,
+            "registry should have 15 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),
