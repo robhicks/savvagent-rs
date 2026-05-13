@@ -189,6 +189,7 @@ provider-anthropic-description = "Anthropic प्रदाता (Claude पर
 quit-description          = "एप्लिकेशन को साफ़-सुथरे ढंग से बंद करें"
 resume-description        = "पुनः प्रारंभ के लिए सहेजी हुई ट्रांसक्रिप्ट चुनें"
 save-description          = "सक्रिय वार्तालाप को डिस्क पर सहेजें"
+self-update-description   = "नई रिलीज़ खोजें और /update से लागू करें"
 splash-description        = "स्टार्टअप HUD + पार्स-त्रुटि स्क्रीन"
 themes-description        = "रंग थीम + /theme पिकर"
 view-file-description     = "केवल पठनीय फ़ाइल व्यूअर"
