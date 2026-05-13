@@ -111,6 +111,9 @@ ctx-kilo       = "~%{k}k ctx"
 connecting   = "कनेक्ट हो रहा है…  कमांड के लिए / दबाएं"
 press-slash  = "कमांड के लिए / दबाएं"
 
+[self-update]
+banner-available = "अपडेट उपलब्ध: v%{current} → v%{latest}  (/update चलाएँ)"
+
 [picker.themes]
 filter-label    = "फ़िल्टर: %{filter}"
 listing         = "थीम (%{count}): %{names}"
