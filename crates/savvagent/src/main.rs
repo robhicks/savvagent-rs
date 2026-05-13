@@ -135,8 +135,9 @@ async fn main() -> Result<()> {
         original_hook(info);
     }));
 
-    // TODO: Task 18 wires detect_initial() here to read ~/.savvagent/language.toml.
-    let mut app = App::new(header_model, transcript_dir, "en".to_string());
+    let initial_locale = crate::plugin::builtin::language::catalog::detect_initial();
+    rust_i18n::set_locale(&initial_locale);
+    let mut app = App::new(header_model, transcript_dir, initial_locale);
 
     {
         use crate::plugin::manifests::Indexes;

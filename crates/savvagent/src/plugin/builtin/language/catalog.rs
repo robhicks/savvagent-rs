@@ -3,12 +3,6 @@
 //! Mirrors `crates/savvagent/src/plugin/builtin/themes/catalog.rs`.
 //! Persistence and env detection land in later tasks.
 
-// Temporary: LANGUAGES + supported() + lookup() are now consumed by the
-// LanguagePlugin (PR 3), but load()/save()/detect_initial(),
-// LanguageConfig, and is_supported() remain test-only until PR 4 wires
-// them into App. Remove this attribute once PR 4 lands.
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
