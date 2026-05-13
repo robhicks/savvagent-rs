@@ -30,6 +30,13 @@ pub enum Effect {
         /// Whether to persist the selection across sessions.
         persist: bool,
     },
+    /// Switch the active UI locale.
+    SetActiveLocale {
+        /// Locale code from the shipped catalog (e.g. "en", "es", "pt", "hi").
+        code: String,
+        /// Whether to persist the selection to ~/.savvagent/language.toml.
+        persist: bool,
+    },
     /// Switch the active LLM provider.
     SetActiveProvider {
         /// Stable identifier of the provider to activate.
@@ -165,6 +172,21 @@ mod tests {
                 assert!(!enabled);
             }
             _ => panic!("expected TogglePlugin"),
+        }
+    }
+
+    #[test]
+    fn set_active_locale_carries_code_and_persist() {
+        let eff = Effect::SetActiveLocale {
+            code: "es".into(),
+            persist: true,
+        };
+        match eff {
+            Effect::SetActiveLocale { code, persist } => {
+                assert_eq!(code, "es");
+                assert!(persist);
+            }
+            _ => panic!("expected SetActiveLocale"),
         }
     }
 }
