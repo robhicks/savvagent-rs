@@ -69,6 +69,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "http2"
 anyhow = "1"
 thiserror = "2"
 
+# SemVer comparisons (used by `internal:self-update` to decide whether the
+# latest GitHub release is newer than the running binary).
+semver = "1"
+
 # Code search / walker (shared by tool-grep and the rewritten tool-fs glob)
 grep-matcher = "0.1"
 grep-regex = "0.1"
