@@ -63,6 +63,7 @@ dotenvy.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 ratatui-themes.workspace = true
+rust-i18n.workspace = true
 tui-textarea.workspace = true
 ratatui-explorer.workspace = true
 ratatui-code-editor.workspace = true

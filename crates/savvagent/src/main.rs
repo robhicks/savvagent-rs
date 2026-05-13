@@ -20,6 +20,17 @@
 //! - `SAVVAGENT_TOOL_BASH_BIN`  (default `savvagent-tool-bash` on $PATH)
 //! - `SAVVAGENT_TOOL_GREP_BIN`  (default `savvagent-tool-grep` on $PATH)
 
+rust_i18n::i18n!("locales", fallback = "en");
+
+#[cfg(test)]
+mod i18n_smoke {
+    #[test]
+    fn smoke_key_resolves_in_en() {
+        rust_i18n::set_locale("en");
+        assert_eq!(rust_i18n::t!("smoke.hello"), "hello, world");
+    }
+}
+
 mod app;
 mod creds;
 mod palette;
