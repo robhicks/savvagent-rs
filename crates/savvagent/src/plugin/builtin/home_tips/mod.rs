@@ -87,6 +87,10 @@ mod tests {
 
     #[test]
     fn renders_connecting_before_first_connect() {
+        use crate::test_helpers::HOME_LOCK;
+        let _lock = HOME_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
         let p = HomeTipsPlugin::new();
         let lines = p.render_slot(
             "home.tips",

@@ -2106,6 +2106,10 @@ mod model_validation_tests {
 
     #[test]
     fn resolve_rejects_unknown_id_with_known_set() {
+        use crate::test_helpers::HOME_LOCK;
+        let _lock = HOME_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
         let r = resp(&["a", "b"]);
         let outcome = resolve_model_change("c", Ok(&r));
         match outcome {
@@ -2119,6 +2123,10 @@ mod model_validation_tests {
 
     #[test]
     fn resolve_empty_list_proceeds_with_warning() {
+        use crate::test_helpers::HOME_LOCK;
+        let _lock = HOME_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
         let r = resp(&[]);
         let outcome = resolve_model_change("anything", Ok(&r));
         match outcome {
@@ -2139,6 +2147,10 @@ mod model_validation_tests {
 
     #[test]
     fn resolve_network_error_proceeds_with_warning() {
+        use crate::test_helpers::HOME_LOCK;
+        let _lock = HOME_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
         let e = err(ErrorKind::Network, "HTTP 401: invalid_api_key");
         let outcome = resolve_model_change("gpt-x", Err(&e));
         match outcome {

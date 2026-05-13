@@ -1553,11 +1553,16 @@ mod tests {
 
     #[test]
     fn set_active_language_known_code_updates_rust_i18n() {
+        use crate::test_helpers::HOME_LOCK;
+        let _lock = HOME_LOCK.lock().unwrap();
+
         let mut app = fresh_app();
         let changed = app.set_active_language("es".to_string());
         assert!(changed, "known code must return true");
         assert_eq!(app.active_language, "es");
         assert_eq!(&*rust_i18n::locale(), "es");
+
+        rust_i18n::set_locale("en");
     }
 
     #[test]
@@ -1599,5 +1604,7 @@ mod tests {
             last.contains("Português"),
             "expected native name in note, got: {last}"
         );
+
+        rust_i18n::set_locale("en");
     }
 }
