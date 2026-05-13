@@ -18,6 +18,9 @@ pub mod home_footer;
 /// Tips widget: one-line hint above the prompt; switches text after Connect.
 pub mod home_tips;
 
+/// Language plugin: rust-i18n catalog + /language picker.
+pub mod language;
+
 /// Cycles to the next model on the active provider; registered as `/model`.
 pub mod model;
 
