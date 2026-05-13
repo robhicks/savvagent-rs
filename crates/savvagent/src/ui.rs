@@ -17,6 +17,7 @@ use savvagent_host::ToolCallStatus;
 /// `compute_home_frame_data` before `terminal.draw` runs so the draw closure
 /// stays synchronous and never touches plugin mutexes.
 pub struct HomeFrameData {
+    pub banner: Vec<savvagent_plugin::StyledLine>,
     pub tips: Vec<savvagent_plugin::StyledLine>,
     pub footer_left: Vec<savvagent_plugin::StyledLine>,
     pub footer_center: Vec<savvagent_plugin::StyledLine>,
@@ -27,6 +28,7 @@ impl HomeFrameData {
     /// Empty fallback used when plugins are not installed yet.
     pub fn empty() -> Self {
         Self {
+            banner: vec![],
             tips: vec![],
             footer_left: vec![],
             footer_center: vec![],
@@ -70,6 +72,12 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
         ])
         .split(Rect::new(area.x, area.y, area.width, 1));
 
+    let banner = router
+        .render(
+            "home.banner",
+            rect_to_region(Rect::new(area.x, area.y, area.width, 1)),
+        )
+        .await;
     let tips = router
         .render(
             "home.tips",
@@ -87,6 +95,7 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
         .await;
 
     HomeFrameData {
+        banner,
         tips,
         footer_left,
         footer_center,
@@ -121,6 +130,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         .constraints([
             Constraint::Length(3), // header
             Constraint::Min(1),    // log
+            Constraint::Length(1), // banner (plugin slot: home.banner)
             Constraint::Length(1), // tips (plugin slot: home.tips)
             Constraint::Length(3), // input
             Constraint::Length(1), // footer (plugin slots: home.footer.*)
@@ -163,6 +173,18 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
     render_log(app, frame, chunks[1], palette);
 
+    // Banner row — one-line update banner, rendered from plugin slot.
+    // The slot returns nothing when there is no update available, so the
+    // row paints as theme background only.
+    let banner_lines: Vec<Line<'static>> = frame_data
+        .banner
+        .iter()
+        .cloned()
+        .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
+        .collect();
+    let banner_para = Paragraph::new(banner_lines).style(palette.base_style());
+    frame.render_widget(banner_para, chunks[2]);
+
     // Tips row — one-line hints above the prompt, rendered from plugin slot.
     let tips_lines: Vec<Line<'static>> = frame_data
         .tips
@@ -171,7 +193,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
         .collect();
     let tips_para = Paragraph::new(tips_lines).style(palette.base_style());
-    frame.render_widget(tips_para, chunks[2]);
+    frame.render_widget(tips_para, chunks[3]);
 
     let mut textarea = app.input_textarea.clone();
     textarea.set_block(
@@ -180,7 +202,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
             .border_style(Style::default().fg(palette.border).bg(palette.bg)),
     );
     textarea.set_style(palette.base_style());
-    frame.render_widget(&textarea, chunks[3]);
+    frame.render_widget(&textarea, chunks[4]);
 
     // Footer row — three horizontal segments from plugin slots.
     let footer_cols = Layout::default()
@@ -190,7 +212,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
             Constraint::Percentage(34),
             Constraint::Percentage(33),
         ])
-        .split(chunks[4]);
+        .split(chunks[5]);
 
     let footer_left_lines: Vec<Line<'static>> = frame_data
         .footer_left

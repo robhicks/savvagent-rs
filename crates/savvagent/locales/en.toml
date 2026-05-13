@@ -115,6 +115,9 @@ ctx-kilo       = "~%{k}k ctx"
 connecting   = "Connecting…  Press / for commands"
 press-slash  = "Press / for commands"
 
+[self-update]
+banner-available = "Update available: v%{current} → v%{latest}  (run /update)"
+
 [picker.themes]
 filter-label    = "Filter: %{filter}"
 listing         = "Themes (%{count}): %{names}"

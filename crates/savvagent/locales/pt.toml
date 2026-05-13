@@ -111,6 +111,9 @@ ctx-kilo       = "~%{k}k ctx"
 connecting   = "Conectando…  Pressione / para ver os comandos"
 press-slash  = "Pressione / para ver os comandos"
 
+[self-update]
+banner-available = "Atualização disponível: v%{current} → v%{latest}  (execute /update)"
+
 [picker.themes]
 filter-label    = "Filtro: %{filter}"
 listing         = "Temas (%{count}): %{names}"
