@@ -1032,6 +1032,30 @@ impl App {
         }
     }
 
+    /// Persist the active locale to `~/.savvagent/language.toml`. Errors
+    /// surface as a styled note; the in-memory selection is kept either
+    /// way. Called from `apply_effects` on `Effect::SetActiveLocale { persist: true }`.
+    // Invoked by apply_effects in Task 17; allow until then.
+    #[allow(dead_code)]
+    pub fn persist_language(&mut self) {
+        let code = self.active_language.clone();
+        match crate::plugin::builtin::language::catalog::save(&code) {
+            Ok(()) => {
+                let native = crate::plugin::builtin::language::catalog::lookup(&code)
+                    .map(|l| l.native_name)
+                    .unwrap_or(code.as_str());
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "language set to {native}"
+                )));
+            }
+            Err(e) => {
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "language `{code}` applied for this session, but persistence failed: {e}"
+                )));
+            }
+        }
+    }
+
     /// Persist the active theme to `~/.savvagent/theme.toml`. Errors
     /// surface as a styled note; the in-memory selection is kept either
     /// way so the session-scoped UX is consistent.
@@ -1531,6 +1555,29 @@ mod tests {
             notes.last().map(|n| n.contains("xx")).unwrap_or(false),
             "notes: {:?}",
             notes
+        );
+    }
+
+    #[test]
+    fn persist_language_writes_file_and_pushes_note() {
+        use crate::test_helpers::{HOME_LOCK, HomeGuard};
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+
+        let mut app = fresh_app();
+        app.set_active_language("pt".to_string());
+        app.persist_language();
+
+        let path = crate::plugin::builtin::language::catalog::config_path()
+            .expect("HOME set in HomeGuard");
+        let text = std::fs::read_to_string(&path).expect("file should be written");
+        assert!(text.contains(r#"language = "pt""#), "file content: {text}");
+
+        let notes = collect_app_notes(&app);
+        let last = notes.last().cloned().unwrap_or_default();
+        assert!(
+            last.contains("Português"),
+            "expected native name in note, got: {last}"
         );
     }
 }
