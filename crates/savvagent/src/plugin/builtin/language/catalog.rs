@@ -37,6 +37,25 @@ pub fn lookup(code: &str) -> Option<&'static Language> {
     LANGUAGES.iter().find(|l| l.code == code)
 }
 
+/// Normalize a POSIX-style locale env var value to a language code.
+///
+/// Strips the encoding suffix (`.UTF-8`), region suffix (`_RU`, `-US`),
+/// and modifier suffix (`@euro`). Returns `None` for the C/POSIX
+/// pseudo-locales and for empty/whitespace input.
+fn normalize_env_locale(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || matches!(trimmed, "C" | "POSIX") {
+        return None;
+    }
+    let head = trimmed
+        .split(|c: char| c == '_' || c == '-' || c == '.' || c == '@')
+        .next()?;
+    if head.is_empty() {
+        return None;
+    }
+    Some(head.to_ascii_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +80,24 @@ mod tests {
     fn lookup_returns_native_name() {
         assert_eq!(lookup("hi").map(|l| l.native_name), Some("हिन्दी"));
         assert_eq!(lookup("xx"), None);
+    }
+
+    #[test]
+    fn normalize_env_locale_cases() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("es_ES.UTF-8", Some("es")),
+            ("pt_BR@euro",  Some("pt")),
+            ("en-US",       Some("en")),
+            ("hi",          Some("hi")),
+            ("C",           None),
+            ("POSIX",       None),
+            ("",            None),
+            ("   ",         None),
+        ];
+        for (input, expected) in cases {
+            let got = normalize_env_locale(input);
+            let want = expected.map(String::from);
+            assert_eq!(got, want, "normalize_env_locale({input:?}) -> {got:?}, expected {want:?}");
+        }
     }
 }
