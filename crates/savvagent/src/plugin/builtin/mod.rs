@@ -38,6 +38,11 @@ pub mod resume;
 /// Saves the active transcript to disk; registered as `/save [path]`.
 pub mod save;
 
+/// Self-update plugin: version check, update banner, and `/update` slash.
+/// v0.11.0 PR 1 ships only the plugin shell + install-method detection;
+/// later PRs add the network check, banner slot, and apply path.
+pub mod self_update;
+
 /// Startup HUD screen with connect status; responds to HostStarting + Connect.
 pub mod splash;
 

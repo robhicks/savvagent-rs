@@ -89,6 +89,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::quit::QuitPlugin::new()),
         Box::new(builtin::resume::ResumePlugin::new()),
         Box::new(builtin::save::SavePlugin::new()),
+        Box::new(builtin::self_update::SelfUpdatePlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
@@ -125,6 +126,7 @@ mod tests {
             "internal:quit",
             "internal:resume",
             "internal:save",
+            "internal:self-update",
             "internal:splash",
             "internal:themes",
             "internal:view-file",
@@ -134,7 +136,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 15);
+        assert_eq!(set.plugins.len(), 16);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -161,14 +163,13 @@ mod tests {
         // Registry shape: the post-fix invariant is that the registry's
         // plugins HashMap has one entry per non-provider plugin PLUS one
         // entry per provider plugin (same underlying Arc as the providers
-        // map). The post-v0.9 `/quit` hotfix adds one non-provider plugin
-        // (`internal:quit`) on top of PR 8's 13, bringing the total to
-        // 14 + 4 = 18 unique ids in `plugins` and 4 in `providers`.
+        // map). v0.11.0 PR 1 adds `internal:self-update`, bringing the
+        // non-provider count to 16; total registry size is 16 + 4 = 20.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            19,
-            "registry should have 15 non-provider + 4 provider plugins"
+            20,
+            "registry should have 16 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),
