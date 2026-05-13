@@ -95,16 +95,32 @@ impl Screen for PaletteScreen {
             });
             return lines;
         }
-        for (visual_idx, (_, cmd)) in self.filtered().iter().enumerate() {
+        // Align description column across rows by padding the slash-name
+        // span to the widest name in the filtered list (with a 12-char
+        // floor + 2 cols of breathing room). Without this, names longer
+        // than the old fixed `{:<12}` width — `/connect anthropic`,
+        // `/connect gemini`, … — collide with their descriptions.
+        let filtered = self.filtered();
+        let name_col_width = filtered
+            .iter()
+            .map(|(_, c)| c.name.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(12)
+            + 2;
+        for (visual_idx, (_, cmd)) in filtered.iter().enumerate() {
             let marker = if visual_idx == self.cursor {
                 "▶ "
             } else {
                 "  "
             };
+            let name_with_slash = format!("/{}", cmd.name);
+            let pad_count = name_col_width.saturating_sub(name_with_slash.chars().count());
+            let padding = " ".repeat(pad_count);
             lines.push(StyledLine {
                 spans: vec![
                     StyledSpan {
-                        text: format!("{marker}/{:<12}", cmd.name),
+                        text: format!("{marker}{name_with_slash}{padding}"),
                         fg: Some(if visual_idx == self.cursor {
                             ThemeColor::Accent
                         } else {
