@@ -104,6 +104,14 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
     let palette = Palette::for_theme(app.active_theme);
 
+    // Inset the home layout from the terminal edges so the chrome has
+    // breathing room. The splash render path above intentionally keeps
+    // the full-bleed outer area.
+    let area = area.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+
     // Paint the active theme's base style across the whole frame so any
     // widget that doesn't set its own bg picks up the theme background.
     frame.buffer_mut().set_style(area, palette.base_style());

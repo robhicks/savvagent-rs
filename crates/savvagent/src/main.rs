@@ -1225,6 +1225,29 @@ fn translate_turn_event_to_host_event(
     }
 }
 
+/// If `app.context_size` (the chars/4 estimate) has moved since the last
+/// emission, fire `HostEvent::ContextSizeChanged` so footer/status
+/// plugins can rerender their `~N ctx` segment without polling. Called
+/// once per event-loop iteration from `run_app`, just before render.
+///
+/// Errors are warn-only — a buggy subscriber must not block the loop.
+async fn maybe_emit_context_changed(app: &mut App, last_emitted: &mut u32) {
+    let current = app.context_size as u32;
+    if current == *last_emitted {
+        return;
+    }
+    *last_emitted = current;
+    if let Err(err) = crate::plugin::effects::dispatch_host_event(
+        app,
+        savvagent_plugin::HostEvent::ContextSizeChanged { tokens: current },
+        0,
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "ContextSizeChanged dispatch failed");
+    }
+}
+
 async fn run_app(
     terminal: &mut tui::Tui,
     app: &mut App,
@@ -1249,10 +1272,13 @@ async fn run_app(
     //   that the matching `ToolCallFinished` emits the same `call_id`.
     //   Tool calls are serialized per-turn inside `run_turn_inner`, so a
     //   single "last" slot is sufficient — no interleaving to worry about.
+    // - `last_emitted_ctx`: tracks the most recent `ContextSizeChanged`
+    //   payload so we only emit when the value actually moves.
     let mut next_turn_id: u32 = 0;
     let mut current_turn_id: Option<u32> = None;
     let mut next_tool_call_id: u64 = 0;
     let mut last_tool_call_id: Option<u64> = None;
+    let mut last_emitted_ctx: u32 = 0;
 
     // Emit `HostEvent::HostStarting` exactly once. Subscribers (e.g.
     // future providers' auto-probe wiring) get one shot at startup.
@@ -1267,6 +1293,11 @@ async fn run_app(
     }
 
     loop {
+        // Fire ContextSizeChanged whenever the chars/4 estimate moves so
+        // home_footer (and any future status-line subscriber) can refresh
+        // its `~N ctx` segment without polling. Cheap when unchanged.
+        maybe_emit_context_changed(app, &mut last_emitted_ctx).await;
+
         let frame_area = terminal.get_frame().area();
         let frame_data = ui::compute_home_frame_data(app, frame_area).await;
         terminal.draw(|f| ui::render(app, f, &frame_data))?;

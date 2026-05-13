@@ -32,6 +32,10 @@ pub enum HookKind {
     /// it into the provider table. Subscribers (notably `internal:connect`)
     /// use this to keep their UI in sync.
     ProviderRegistered,
+    /// Emitted when the rough conversation context-size estimate changes.
+    /// Carries the current `app.context_size` (chars/4 heuristic) so the
+    /// home footer can render a `~N ctx` segment without polling.
+    ContextSizeChanged,
 }
 
 /// Typed host-lifecycle events that the runtime fires into the plugin bus.
@@ -100,6 +104,14 @@ pub enum HostEvent {
         /// Human-readable display name (forwarded from the plugin).
         display_name: String,
     },
+    /// The rough conversation context-size estimate changed. The event
+    /// loop emits this whenever `App::context_size` (the chars/4
+    /// heuristic) moves so footer/status plugins can show a `~N ctx`
+    /// segment without polling.
+    ContextSizeChanged {
+        /// Estimated total context size in tokens.
+        tokens: u32,
+    },
 }
 
 impl HostEvent {
@@ -119,6 +131,7 @@ impl HostEvent {
             HostEvent::PromptSubmitted { .. } => HookKind::PromptSubmitted,
             HostEvent::TranscriptSaved { .. } => HookKind::TranscriptSaved,
             HostEvent::ProviderRegistered { .. } => HookKind::ProviderRegistered,
+            HostEvent::ContextSizeChanged { .. } => HookKind::ContextSizeChanged,
         }
     }
 }
@@ -201,6 +214,10 @@ mod tests {
                     display_name: "Provider".into(),
                 },
                 HookKind::ProviderRegistered,
+            ),
+            (
+                HostEvent::ContextSizeChanged { tokens: 42 },
+                HookKind::ContextSizeChanged,
             ),
         ];
         for (event, expected) in cases {
