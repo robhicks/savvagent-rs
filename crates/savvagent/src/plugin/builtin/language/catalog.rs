@@ -83,7 +83,17 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 /// warning to stderr on parse failure or unsupported value.
 pub fn load() -> Option<String> {
     let path = config_path()?;
-    let text = std::fs::read_to_string(&path).ok()?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!(
+                "language.toml at {} could not be read: {e}; falling back to detection.",
+                path.display()
+            );
+            return None;
+        }
+    };
     match toml::from_str::<LanguageConfig>(&text) {
         Ok(cfg) if is_supported(&cfg.language) => Some(cfg.language),
         Ok(cfg) => {
@@ -280,5 +290,47 @@ mod tests {
                 std::env::remove_var(v);
             }
         }
+    }
+
+    #[test]
+    fn save_no_home_is_silent_ok_and_writes_nothing() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let prev = std::env::var("HOME").ok();
+        // SAFETY: HOME_LOCK serialises env mutation; the env-touching tests in
+        // this module all hold the lock for their duration.
+        unsafe { std::env::remove_var("HOME"); }
+
+        let result = save("es");
+        // Restore HOME before any assert that could panic — we don't want a
+        // failing assertion to leave the env in a bad state for sibling tests.
+        if let Some(p) = prev {
+            // SAFETY: same as above.
+            unsafe { std::env::set_var("HOME", p); }
+        }
+
+        assert!(result.is_ok(), "save with unset HOME must be a silent Ok(())");
+    }
+
+    #[test]
+    fn detect_initial_falls_through_unsupported_file_to_env() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+
+        // Write a file with an unsupported code.
+        let path = config_path().expect("HOME set in HomeGuard");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"language = \"klingon\"\n").unwrap();
+
+        // Env says Spanish — should win because the file's value is invalid.
+        // SAFETY: HOME_LOCK is held; sibling tests follow the same pattern.
+        unsafe { std::env::set_var("LANG", "es_ES.UTF-8"); }
+        unsafe { std::env::remove_var("LC_ALL"); }
+        unsafe { std::env::remove_var("LC_MESSAGES"); }
+
+        assert_eq!(detect_initial(), "es");
+
+        // Cleanup.
+        // SAFETY: same.
+        unsafe { std::env::remove_var("LANG"); }
     }
 }
