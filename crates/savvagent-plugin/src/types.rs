@@ -290,6 +290,11 @@ pub enum ScreenArgs {
     },
     /// Open the installed-plugins manager screen.
     PluginsManager,
+    /// Open the language picker, scrolled to the currently-active locale.
+    LanguagePicker {
+        /// Code of the locale currently active (used to pre-select the cursor row).
+        current_code: String,
+    },
 }
 
 impl ScreenArgs {
@@ -314,6 +319,7 @@ impl ScreenArgs {
             ScreenArgs::ViewFile { .. } => Some("view-file"),
             ScreenArgs::EditFile { .. } => Some("edit-file"),
             ScreenArgs::PluginsManager => Some("plugins.manager"),
+            ScreenArgs::LanguagePicker { .. } => Some("language.picker"),
         }
     }
 }
@@ -505,5 +511,13 @@ mod tests {
             ScreenArgs::PluginsManager.screen_id(),
             Some("plugins.manager")
         );
+    }
+
+    #[test]
+    fn language_picker_screen_id_is_language_picker() {
+        let args = ScreenArgs::LanguagePicker {
+            current_code: "en".into(),
+        };
+        assert_eq!(args.screen_id(), Some("language.picker"));
     }
 }
