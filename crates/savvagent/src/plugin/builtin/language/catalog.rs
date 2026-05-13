@@ -121,6 +121,26 @@ pub fn save(code: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Decide the initial locale at boot: saved file > $LC_ALL >
+/// $LC_MESSAGES > $LANG > "en". Each env var is normalized and
+/// validated against the shipped catalog; unsupported codes fall
+/// through to the next source.
+pub fn detect_initial() -> String {
+    if let Some(code) = load() {
+        return code;
+    }
+    for var in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(raw) = std::env::var(var) {
+            if let Some(code) = normalize_env_locale(&raw) {
+                if is_supported(&code) {
+                    return code;
+                }
+            }
+        }
+    }
+    "en".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +223,62 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(b"language = \"klingon\"\n").unwrap();
         assert_eq!(load(), None);
+    }
+
+    #[test]
+    fn detect_initial_precedence() {
+        let _guard = HOME_LOCK.lock().unwrap();
+
+        // Case 1: file wins over env.
+        {
+            let _home = HomeGuard::new();
+            save("es").unwrap();
+            // SAFETY: HOME_LOCK is held for the duration of this test.
+            unsafe { std::env::set_var("LANG", "fr_FR.UTF-8") };
+            assert_eq!(detect_initial(), "es");
+        }
+
+        // Case 2: no file, LC_ALL preferred.
+        {
+            let _home = HomeGuard::new();
+            // SAFETY: HOME_LOCK is held for the duration of this test.
+            unsafe {
+                std::env::set_var("LC_ALL", "pt_BR.UTF-8");
+                std::env::set_var("LANG", "en_US");
+            }
+            assert_eq!(detect_initial(), "pt");
+        }
+
+        // Case 3: no file, LC_ALL unsupported, LC_MESSAGES skipped, LANG wins.
+        {
+            let _home = HomeGuard::new();
+            // SAFETY: HOME_LOCK is held for the duration of this test.
+            unsafe {
+                std::env::set_var("LC_ALL", "ru_RU");
+                std::env::remove_var("LC_MESSAGES");
+                std::env::set_var("LANG", "hi_IN.UTF-8");
+            }
+            assert_eq!(detect_initial(), "hi");
+        }
+
+        // Case 4: no file, no env → "en".
+        {
+            let _home = HomeGuard::new();
+            // SAFETY: HOME_LOCK is held for the duration of this test.
+            unsafe {
+                for v in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+                    std::env::remove_var(v);
+                }
+            }
+            assert_eq!(detect_initial(), "en");
+        }
+
+        // Cleanup.
+        // SAFETY: HOME_LOCK is held for the duration of this test.
+        unsafe {
+            for v in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+                std::env::remove_var(v);
+            }
+        }
     }
 }
