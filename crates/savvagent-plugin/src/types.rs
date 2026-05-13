@@ -508,16 +508,15 @@ mod tests {
             Some("edit-file")
         );
         assert_eq!(
+            ScreenArgs::LanguagePicker {
+                current_code: "en".into()
+            }
+            .screen_id(),
+            Some("language.picker")
+        );
+        assert_eq!(
             ScreenArgs::PluginsManager.screen_id(),
             Some("plugins.manager")
         );
-    }
-
-    #[test]
-    fn language_picker_screen_id_is_language_picker() {
-        let args = ScreenArgs::LanguagePicker {
-            current_code: "en".into(),
-        };
-        assert_eq!(args.screen_id(), Some("language.picker"));
     }
 }
