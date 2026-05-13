@@ -33,7 +33,7 @@ impl Plugin for LanguagePlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "language".into(),
-            summary: "Switch the UI language".into(),
+            summary: rust_i18n::t!("slash.language-summary").to_string(),
             args_hint: Some("[list | <code>]".into()),
         }];
         contributions.screens = vec![ScreenSpec {
@@ -41,7 +41,7 @@ impl Plugin for LanguagePlugin {
             layout: ScreenLayout::CenteredModal {
                 width_pct: 60,
                 height_pct: 50,
-                title: Some("Pick a language".into()),
+                title: Some(rust_i18n::t!("picker.language.modal-title").to_string()),
             },
         }];
 
@@ -49,7 +49,7 @@ impl Plugin for LanguagePlugin {
             id: PluginId::new("internal:language").expect("valid built-in id"),
             name: "Languages".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "/language + locale catalog (en/es/pt/hi)".into(),
+            description: rust_i18n::t!("plugin.language-description").to_string(),
             kind: PluginKind::Core,
             contributions,
         }
@@ -75,9 +75,9 @@ impl Plugin for LanguagePlugin {
                     persist: true,
                 }]),
                 None => Ok(vec![Effect::PushNote {
-                    line: StyledLine::plain(format!(
-                        "language `{code}` not supported — run `/language` to pick one."
-                    )),
+                    line: StyledLine::plain(
+                        rust_i18n::t!("notes.language-not-found", code = code).to_string(),
+                    ),
                 }]),
             },
         }

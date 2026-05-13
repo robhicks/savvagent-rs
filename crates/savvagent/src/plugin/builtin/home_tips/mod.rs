@@ -47,7 +47,7 @@ impl Plugin for HomeTipsPlugin {
             id: PluginId::new("internal:home-tips").expect("valid built-in id"),
             name: "Home tips".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "One-line tips above the prompt".into(),
+            description: rust_i18n::t!("plugin.home-tips-description").to_string(),
             kind: PluginKind::Core,
             contributions,
         }
@@ -58,9 +58,9 @@ impl Plugin for HomeTipsPlugin {
             return vec![];
         }
         let text = if self.connected {
-            "Press / for commands".to_string()
+            rust_i18n::t!("tips.press-slash").to_string()
         } else {
-            "Connecting…  Press / for commands".to_string()
+            rust_i18n::t!("tips.connecting").to_string()
         };
         vec![StyledLine {
             spans: vec![StyledSpan {
@@ -117,6 +117,9 @@ mod tests {
                 height: 1,
             },
         );
-        assert_eq!(lines[0].spans[0].text, "Press / for commands");
+        assert_eq!(
+            lines[0].spans[0].text,
+            rust_i18n::t!("tips.press-slash").as_ref()
+        );
     }
 }

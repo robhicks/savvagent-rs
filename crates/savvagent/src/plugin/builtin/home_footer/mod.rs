@@ -57,11 +57,11 @@ fn format_context_segment(tokens: u32) -> Option<String> {
         return None;
     }
     if tokens < 1000 {
-        Some(format!("~{tokens} ctx"))
+        Some(rust_i18n::t!("footer.ctx-tokens", count = tokens).to_string())
     } else {
         // Round-half-up to the nearest thousand.
         let k = (tokens + 500) / 1000;
-        Some(format!("~{k}k ctx"))
+        Some(rust_i18n::t!("footer.ctx-kilo", k = k).to_string())
     }
 }
 
@@ -91,7 +91,7 @@ impl Plugin for HomeFooterPlugin {
             id: PluginId::new("internal:home-footer").expect("valid built-in id"),
             name: "Home footer".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Sandbox + turn state + working dir + context/cost/version".into(),
+            description: rust_i18n::t!("plugin.home-footer-description").to_string(),
             kind: PluginKind::Core,
             contributions,
         }
@@ -101,8 +101,8 @@ impl Plugin for HomeFooterPlugin {
         match slot_id {
             "home.footer.center" => {
                 let turn = match self.turn_active {
-                    Some(id) => format!("turn #{id} working"),
-                    None => "idle".to_string(),
+                    Some(id) => rust_i18n::t!("footer.turn-working", id = id).to_string(),
+                    None => rust_i18n::t!("footer.idle").to_string(),
                 };
                 vec![StyledLine {
                     spans: vec![StyledSpan {
@@ -141,7 +141,7 @@ impl Plugin for HomeFooterPlugin {
                     spans.push(muted(ctx_text));
                 }
                 spans.push(muted(" · ".into()));
-                spans.push(muted("$0.00".into()));
+                spans.push(muted(rust_i18n::t!("footer.cost-zero").to_string()));
                 spans.push(muted(" · ".into()));
                 spans.push(accent(format!("v{}", env!("CARGO_PKG_VERSION"))));
 
@@ -178,7 +178,10 @@ mod tests {
                 height: 1,
             },
         );
-        assert_eq!(lines[0].spans[0].text, "idle");
+        assert_eq!(
+            lines[0].spans[0].text,
+            rust_i18n::t!("footer.idle").as_ref()
+        );
     }
 
     #[tokio::test]
@@ -196,7 +199,10 @@ mod tests {
                 height: 1,
             },
         );
-        assert_eq!(lines[0].spans[0].text, "turn #3 working");
+        assert_eq!(
+            lines[0].spans[0].text,
+            rust_i18n::t!("footer.turn-working", id = 3u32).as_ref()
+        );
     }
 
     #[tokio::test]
@@ -220,7 +226,10 @@ mod tests {
                 height: 1,
             },
         );
-        assert_eq!(lines[0].spans[0].text, "idle");
+        assert_eq!(
+            lines[0].spans[0].text,
+            rust_i18n::t!("footer.idle").as_ref()
+        );
     }
 
     #[test]
@@ -244,7 +253,10 @@ mod tests {
             joined.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))),
             "expected version literal in: {joined}"
         );
-        assert!(joined.contains("$0.00"), "expected $0.00 in: {joined}");
+        assert!(
+            joined.contains(rust_i18n::t!("footer.cost-zero").as_ref()),
+            "expected cost-zero in: {joined}"
+        );
         assert!(
             !joined.contains("? for help"),
             "stale hint still present in: {joined}"
