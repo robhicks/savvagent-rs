@@ -292,6 +292,11 @@ pub struct App {
     /// persisted (when `persist = true`) by `apply_effects`.
     pub active_theme: crate::plugin::builtin::themes::catalog::Theme,
 
+    /// Currently-active locale code (e.g. `"en"`). Loaded at startup
+    /// from `~/.savvagent/language.toml` (or env detection); mutated by
+    /// `apply_effects` on `Effect::SetActiveLocale`.
+    pub active_language: String,
+
     /// Cached classification of the sandbox state for the startup splash.
     /// Loaded once at `App::new` via `SandboxConfig::load_with_status` so
     /// the splash render path doesn't re-read disk on every frame; refreshed
@@ -325,7 +330,7 @@ impl App {
     /// Build TUI state. The host runs out-of-band; the app only carries the
     /// model name (for the header), the directory transcripts get written
     /// into, and the conversation log it builds from streaming events.
-    pub fn new(model: String, transcript_dir: PathBuf) -> Self {
+    pub fn new(model: String, transcript_dir: PathBuf, initial_language: String) -> Self {
         let theme = Theme::default()
             .add_default_title()
             .with_block(
@@ -378,6 +383,7 @@ impl App {
             transcript_index: 0,
             resumed_at: None,
             active_theme: crate::plugin::builtin::themes::catalog::load(),
+            active_language: initial_language,
             splash_sandbox: {
                 let (cfg, status) = SandboxConfig::load_with_status();
                 crate::splash::SandboxSplashState::from_load(&cfg, &status)
@@ -1007,6 +1013,47 @@ impl App {
         }
     }
 
+    /// Set the active locale by code. Unknown codes are surfaced as a
+    /// styled note; the in-memory selection (and the `rust_i18n` global)
+    /// are left unchanged. Returns `true` if the locale was changed,
+    /// `false` if the code was rejected.
+    ///
+    /// Called from `apply_effects` on `Effect::SetActiveLocale`.
+    pub fn set_active_language(&mut self, code: String) -> bool {
+        if crate::plugin::builtin::language::catalog::is_supported(&code) {
+            rust_i18n::set_locale(&code);
+            self.active_language = code;
+            true
+        } else {
+            self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                "language `{code}` not supported — run `/language` to pick one."
+            )));
+            false
+        }
+    }
+
+    /// Persist the active locale to `~/.savvagent/language.toml`. Errors
+    /// surface as a styled note; the in-memory selection is kept either
+    /// way. Called from `apply_effects` on `Effect::SetActiveLocale { persist: true }`.
+    pub fn persist_language(&mut self) {
+        let code = self.active_language.clone();
+        match crate::plugin::builtin::language::catalog::save(&code) {
+            Ok(()) => {
+                let native = crate::plugin::builtin::language::catalog::lookup(&code)
+                    .map(|l| l.native_name)
+                    .unwrap_or(code.as_str());
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "language set to {native}"
+                )));
+            }
+            Err(e) => {
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                    "language `{code}` applied for this session, but persistence failed: {e}"
+                )));
+            }
+        }
+    }
+
     /// Persist the active theme to `~/.savvagent/theme.toml`. Errors
     /// surface as a styled note; the in-memory selection is kept either
     /// way so the session-scoped UX is consistent.
@@ -1261,7 +1308,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn fresh_app() -> App {
-        App::new("test-model".into(), PathBuf::from("/tmp"))
+        App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
     }
 
     #[test]
@@ -1472,5 +1519,65 @@ mod tests {
             InputMode::BashNetworkPrompt { .. } => "BashNetworkPrompt",
             InputMode::SelectingTranscript => "SelectingTranscript",
         }
+    }
+
+    fn collect_app_notes(app: &App) -> Vec<String> {
+        app.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn set_active_language_known_code_updates_rust_i18n() {
+        let mut app = fresh_app();
+        let changed = app.set_active_language("es".to_string());
+        assert!(changed, "known code must return true");
+        assert_eq!(app.active_language, "es");
+        assert_eq!(&*rust_i18n::locale(), "es");
+    }
+
+    #[test]
+    fn set_active_language_unknown_code_pushes_note_and_does_not_mutate() {
+        let mut app = fresh_app();
+        let before = app.active_language.clone();
+        let changed = app.set_active_language("xx".to_string());
+        assert!(!changed, "unknown code must return false");
+        assert_eq!(
+            app.active_language, before,
+            "unknown code must not mutate active_language"
+        );
+        let notes = collect_app_notes(&app);
+        assert!(
+            notes.last().map(|n| n.contains("xx")).unwrap_or(false),
+            "notes: {:?}",
+            notes
+        );
+    }
+
+    #[test]
+    fn persist_language_writes_file_and_pushes_note() {
+        use crate::test_helpers::{HOME_LOCK, HomeGuard};
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+
+        let mut app = fresh_app();
+        let _ = app.set_active_language("pt".to_string());
+        app.persist_language();
+
+        let path = crate::plugin::builtin::language::catalog::config_path()
+            .expect("HOME set in HomeGuard");
+        let text = std::fs::read_to_string(&path).expect("file should be written");
+        assert!(text.contains(r#"language = "pt""#), "file content: {text}");
+
+        let notes = collect_app_notes(&app);
+        let last = notes.last().cloned().unwrap_or_default();
+        assert!(
+            last.contains("Português"),
+            "expected native name in note, got: {last}"
+        );
     }
 }

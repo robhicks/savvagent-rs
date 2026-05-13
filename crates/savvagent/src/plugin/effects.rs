@@ -57,6 +57,12 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                 app.persist_config();
             }
         }
+        Effect::SetActiveLocale { code, persist } => {
+            let changed = app.set_active_language(code);
+            if changed && persist {
+                app.persist_language();
+            }
+        }
         Effect::SetActiveProvider { id, persist } => {
             app.set_active_provider(id);
             if persist {
@@ -326,6 +332,9 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
         ("themes.picker", _) => ScreenArgs::ThemePicker {
             current_slug: app.active_theme.name().to_string(),
         },
+        ("language.picker", _) => ScreenArgs::LanguagePicker {
+            current_code: app.active_language.clone(),
+        },
         ("connect.picker", _) => ScreenArgs::ConnectPicker,
         (_, other) => other,
     };
@@ -587,7 +596,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn fresh_app() -> crate::app::App {
-        crate::app::App::new("test-model".into(), PathBuf::from("/tmp"))
+        crate::app::App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
     }
 
     /// RunSlash at depth >= MAX_DISPATCH_DEPTH must return a depth-limit error
@@ -1475,6 +1484,90 @@ mod tests {
             found,
             "expected a 'Cannot toggle unknown plugin' note; entries: {:?}",
             app.entries
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_active_locale_persist_true_switches_rust_i18n_and_writes_file() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+
+        let mut app = fresh_app();
+        apply_effects(
+            &mut app,
+            vec![savvagent_plugin::Effect::SetActiveLocale {
+                code: "es".into(),
+                persist: true,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(&*rust_i18n::locale(), "es");
+        assert_eq!(app.active_language, "es");
+        let path = crate::plugin::builtin::language::catalog::config_path().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#"language = "es""#));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_active_locale_persist_false_does_not_write_file() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+
+        let mut app = fresh_app();
+        apply_effects(
+            &mut app,
+            vec![savvagent_plugin::Effect::SetActiveLocale {
+                code: "pt".into(),
+                persist: false,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(&*rust_i18n::locale(), "pt");
+        assert_eq!(app.active_language, "pt");
+        let path = crate::plugin::builtin::language::catalog::config_path().unwrap();
+        assert!(
+            !path.exists(),
+            "persist=false must not create language.toml"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_active_locale_unknown_code_is_a_noop_with_note() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        // Reset locale to a known baseline before capturing so the assertion
+        // is deterministic even though rust_i18n::set_locale is global state.
+        rust_i18n::set_locale("en");
+        let mut app = fresh_app();
+        let before_locale = rust_i18n::locale().to_string();
+        let before_active = app.active_language.clone();
+
+        apply_effects(
+            &mut app,
+            vec![savvagent_plugin::Effect::SetActiveLocale {
+                code: "xx".into(),
+                persist: true,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(&*rust_i18n::locale(), before_locale.as_str());
+        assert_eq!(app.active_language, before_active);
+
+        // persist must not fire when the code was rejected — the file
+        // must not exist in the HomeGuard tempdir.
+        let path = crate::plugin::builtin::language::catalog::config_path().unwrap();
+        assert!(
+            !path.exists(),
+            "persist must not fire when set_active_language rejected the code"
         );
     }
 }

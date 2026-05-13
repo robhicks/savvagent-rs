@@ -135,7 +135,9 @@ async fn main() -> Result<()> {
         original_hook(info);
     }));
 
-    let mut app = App::new(header_model, transcript_dir);
+    let initial_locale = crate::plugin::builtin::language::catalog::detect_initial();
+    rust_i18n::set_locale(&initial_locale);
+    let mut app = App::new(header_model, transcript_dir, initial_locale);
 
     {
         use crate::plugin::manifests::Indexes;
