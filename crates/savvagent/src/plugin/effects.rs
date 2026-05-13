@@ -58,8 +58,8 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             }
         }
         Effect::SetActiveLocale { code, persist } => {
-            app.set_active_language(code);
-            if persist {
+            let changed = app.set_active_language(code);
+            if changed && persist {
                 app.persist_language();
             }
         }
@@ -1561,5 +1561,13 @@ mod tests {
 
         assert_eq!(&*rust_i18n::locale(), before_locale.as_str());
         assert_eq!(app.active_language, before_active);
+
+        // persist must not fire when the code was rejected — the file
+        // must not exist in the HomeGuard tempdir.
+        let path = crate::plugin::builtin::language::catalog::config_path().unwrap();
+        assert!(
+            !path.exists(),
+            "persist must not fire when set_active_language rejected the code"
+        );
     }
 }

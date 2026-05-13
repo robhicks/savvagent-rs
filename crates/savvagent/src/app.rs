@@ -1015,16 +1015,20 @@ impl App {
 
     /// Set the active locale by code. Unknown codes are surfaced as a
     /// styled note; the in-memory selection (and the `rust_i18n` global)
-    /// are left unchanged. Called from `apply_effects` on
-    /// `Effect::SetActiveLocale`.
-    pub fn set_active_language(&mut self, code: String) {
+    /// are left unchanged. Returns `true` if the locale was changed,
+    /// `false` if the code was rejected.
+    ///
+    /// Called from `apply_effects` on `Effect::SetActiveLocale`.
+    pub fn set_active_language(&mut self, code: String) -> bool {
         if crate::plugin::builtin::language::catalog::is_supported(&code) {
             rust_i18n::set_locale(&code);
             self.active_language = code;
+            true
         } else {
             self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
                 "language `{code}` not supported — run `/language` to pick one."
             )));
+            false
         }
     }
 
@@ -1530,7 +1534,8 @@ mod tests {
     #[test]
     fn set_active_language_known_code_updates_rust_i18n() {
         let mut app = fresh_app();
-        app.set_active_language("es".to_string());
+        let changed = app.set_active_language("es".to_string());
+        assert!(changed, "known code must return true");
         assert_eq!(app.active_language, "es");
         assert_eq!(&*rust_i18n::locale(), "es");
     }
@@ -1539,7 +1544,8 @@ mod tests {
     fn set_active_language_unknown_code_pushes_note_and_does_not_mutate() {
         let mut app = fresh_app();
         let before = app.active_language.clone();
-        app.set_active_language("xx".to_string());
+        let changed = app.set_active_language("xx".to_string());
+        assert!(!changed, "unknown code must return false");
         assert_eq!(
             app.active_language, before,
             "unknown code must not mutate active_language"
@@ -1559,7 +1565,7 @@ mod tests {
         let _home = HomeGuard::new();
 
         let mut app = fresh_app();
-        app.set_active_language("pt".to_string());
+        let _ = app.set_active_language("pt".to_string());
         app.persist_language();
 
         let path = crate::plugin::builtin::language::catalog::config_path()
