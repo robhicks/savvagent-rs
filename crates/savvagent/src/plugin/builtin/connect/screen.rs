@@ -53,11 +53,11 @@ impl Screen for ConnectPickerScreen {
     fn render(&self, _region: Region) -> Vec<StyledLine> {
         if self.candidates.is_empty() {
             return vec![
-                StyledLine::plain("No providers are currently enabled."),
+                StyledLine::plain(rust_i18n::t!("picker.connect.no-providers").to_string()),
                 StyledLine::plain(""),
                 StyledLine {
                     spans: vec![StyledSpan {
-                        text: "Open /plugins to enable a provider, then come back.".into(),
+                        text: rust_i18n::t!("picker.connect.open-plugins-hint").to_string(),
                         fg: Some(ThemeColor::Warning),
                         bg: None,
                         modifiers: TextMods::default(),
@@ -107,7 +107,7 @@ impl Screen for ConnectPickerScreen {
 
     fn tips(&self) -> Vec<StyledLine> {
         vec![StyledLine::plain(
-            "↑/↓ navigate · Enter connect · Esc cancel",
+            rust_i18n::t!("picker.connect.tips").to_string(),
         )]
     }
 }
@@ -138,8 +138,14 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("No providers"));
-        assert!(joined.contains("/plugins"));
+        assert!(
+            joined.contains(rust_i18n::t!("picker.connect.no-providers").as_ref()),
+            "expected no-providers text, got: {joined}"
+        );
+        assert!(
+            joined.contains(rust_i18n::t!("picker.connect.open-plugins-hint").as_ref()),
+            "expected open-plugins-hint text, got: {joined}"
+        );
     }
 
     #[tokio::test]

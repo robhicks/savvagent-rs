@@ -34,7 +34,7 @@ impl Plugin for ViewFilePlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "view".into(),
-            summary: "Open a file in the viewer".into(),
+            summary: rust_i18n::t!("slash.view-summary").to_string(),
             args_hint: Some("<path>".into()),
         }];
         contributions.screens = vec![ScreenSpec {
@@ -42,7 +42,7 @@ impl Plugin for ViewFilePlugin {
             layout: ScreenLayout::CenteredModal {
                 width_pct: 90,
                 height_pct: 85,
-                title: Some("View file".into()),
+                title: Some(rust_i18n::t!("picker.view-file.modal-title").to_string()),
             },
         }];
 
@@ -50,7 +50,7 @@ impl Plugin for ViewFilePlugin {
             id: PluginId::new("internal:view-file").expect("valid built-in id"),
             name: "View file".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Read-only file viewer".into(),
+            description: rust_i18n::t!("plugin.view-file-description").to_string(),
             kind: PluginKind::Optional,
             contributions,
         }

@@ -41,7 +41,7 @@ impl Plugin for CommandPalettePlugin {
             layout: ScreenLayout::CenteredModal {
                 width_pct: 60,
                 height_pct: 60,
-                title: Some("Commands".into()),
+                title: Some(rust_i18n::t!("picker.command-palette.modal-title").to_string()),
             },
         }];
         let open_palette = BoundAction::EmitEffect(Effect::OpenScreen {

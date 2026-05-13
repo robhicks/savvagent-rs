@@ -39,7 +39,7 @@ impl Screen for SplashScreen {
         let mut lines = vec![
             StyledLine {
                 spans: vec![StyledSpan {
-                    text: "Savvagent".into(),
+                    text: rust_i18n::t!("splash.app-name").to_string(),
                     fg: Some(ThemeColor::Accent),
                     bg: None,
                     modifiers: TextMods {
@@ -52,14 +52,16 @@ impl Screen for SplashScreen {
         ];
         let status = match &self.hud {
             Some(h) if h.connected => match &h.last_provider {
-                Some(p) => format!("Connected to {}.", p.as_str()),
-                None => "Connected.".to_string(),
+                Some(p) => rust_i18n::t!("splash.connected-to", provider = p.as_str()).to_string(),
+                None => rust_i18n::t!("splash.connected").to_string(),
             },
-            _ => "Connecting\u{2026}".to_string(),
+            _ => rust_i18n::t!("splash.connecting").to_string(),
         };
         lines.push(StyledLine::plain(status));
         lines.push(StyledLine::plain(""));
-        lines.push(StyledLine::plain("Press Esc to dismiss"));
+        lines.push(StyledLine::plain(
+            rust_i18n::t!("splash.press-esc-dismiss").to_string(),
+        ));
         lines
     }
 
@@ -71,7 +73,7 @@ impl Screen for SplashScreen {
     }
 
     fn tips(&self) -> Vec<StyledLine> {
-        vec![StyledLine::plain("Esc dismiss")]
+        vec![StyledLine::plain(rust_i18n::t!("splash.tips").to_string())]
     }
 }
 
@@ -107,6 +109,6 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("Press Esc to dismiss"));
+        assert!(joined.contains(rust_i18n::t!("splash.press-esc-dismiss").as_ref()));
     }
 }

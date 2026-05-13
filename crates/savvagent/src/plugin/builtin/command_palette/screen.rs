@@ -87,7 +87,7 @@ impl Screen for PaletteScreen {
         if self.commands.is_empty() {
             lines.push(StyledLine {
                 spans: vec![StyledSpan {
-                    text: "(no commands available)".into(),
+                    text: rust_i18n::t!("picker.command-palette.no-commands").to_string(),
                     fg: Some(ThemeColor::Muted),
                     bg: None,
                     modifiers: TextMods::default(),
@@ -185,7 +185,7 @@ impl Screen for PaletteScreen {
 
     fn tips(&self) -> Vec<StyledLine> {
         vec![StyledLine::plain(
-            "↑/↓ navigate · type to filter · Enter run · Esc cancel",
+            rust_i18n::t!("picker.command-palette.tips").to_string(),
         )]
     }
 }
@@ -308,7 +308,7 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
             .collect();
         assert!(
-            joined.contains("(no commands available)"),
+            joined.contains(rust_i18n::t!("picker.command-palette.no-commands").as_ref()),
             "empty render should show placeholder, got: {joined}"
         );
         let effs = p.on_key(key(KeyCodePortable::Enter)).await.unwrap();

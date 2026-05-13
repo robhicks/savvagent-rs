@@ -32,7 +32,7 @@ impl Screen for ResumePickerScreen {
         if self.items.is_empty() {
             return vec![StyledLine {
                 spans: vec![StyledSpan {
-                    text: "No saved transcripts found in this directory.".into(),
+                    text: rust_i18n::t!("picker.resume.no-transcripts").to_string(),
                     fg: Some(ThemeColor::Warning),
                     bg: None,
                     modifiers: TextMods::default(),
@@ -80,7 +80,9 @@ impl Screen for ResumePickerScreen {
     }
 
     fn tips(&self) -> Vec<StyledLine> {
-        vec![StyledLine::plain("↑/↓ navigate · Enter open · Esc cancel")]
+        vec![StyledLine::plain(
+            rust_i18n::t!("picker.resume.tips").to_string(),
+        )]
     }
 }
 
@@ -110,7 +112,10 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("No saved transcripts"));
+        assert!(
+            joined.contains(rust_i18n::t!("picker.resume.no-transcripts").as_ref()),
+            "expected no-transcripts text, got: {joined}"
+        );
     }
 
     #[tokio::test]

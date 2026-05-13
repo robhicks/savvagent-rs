@@ -30,14 +30,14 @@ impl Plugin for ClearPlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "clear".into(),
-            summary: "Clear the conversation log".into(),
+            summary: rust_i18n::t!("slash.clear-summary").to_string(),
             args_hint: None,
         }];
         Manifest {
             id: PluginId::new("internal:clear").expect("valid built-in id"),
             name: "Clear log".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Clear the conversation log".into(),
+            description: rust_i18n::t!("plugin.clear-description").to_string(),
             kind: PluginKind::Optional,
             contributions,
         }

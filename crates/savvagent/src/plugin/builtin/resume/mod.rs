@@ -40,7 +40,7 @@ impl Plugin for ResumePlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "resume".into(),
-            summary: "Resume a saved transcript".into(),
+            summary: rust_i18n::t!("slash.resume-summary").to_string(),
             args_hint: None,
         }];
         contributions.screens = vec![ScreenSpec {
@@ -48,7 +48,7 @@ impl Plugin for ResumePlugin {
             layout: ScreenLayout::CenteredModal {
                 width_pct: 70,
                 height_pct: 70,
-                title: Some("Resume".into()),
+                title: Some(rust_i18n::t!("picker.resume.modal-title").to_string()),
             },
         }];
         contributions.hooks = vec![HookKind::TranscriptSaved];
@@ -57,7 +57,7 @@ impl Plugin for ResumePlugin {
             id: PluginId::new("internal:resume").expect("valid built-in id"),
             name: "Resume transcript".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Pick a saved transcript to resume".into(),
+            description: rust_i18n::t!("plugin.resume-description").to_string(),
             kind: PluginKind::Optional,
             contributions,
         }
