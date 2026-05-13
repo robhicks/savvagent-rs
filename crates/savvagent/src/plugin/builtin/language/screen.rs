@@ -1,10 +1,6 @@
 //! Wraps `LanguagePicker` as a `Screen`. Mirrors
 //! `internal:themes::screen::ThemePickerScreen`.
 
-// Temporary: LanguagePickerScreen is consumed by Task 12 (LanguagePlugin
-// create_screen wiring). Remove this attribute once Task 12 lands.
-#![allow(dead_code)]
-
 use async_trait::async_trait;
 use savvagent_plugin::{
     Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine, StyledSpan,

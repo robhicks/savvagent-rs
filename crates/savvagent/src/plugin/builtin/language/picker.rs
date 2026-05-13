@@ -2,11 +2,6 @@
 //! `internal:themes::picker::ThemePicker`. PR 3 wraps this in a
 //! `Screen` adapter (`screen.rs`).
 
-// Temporary: LanguagePicker + PickerOutcome are consumed by screen.rs
-// (Task 11) and mod.rs wiring (Task 12), both in the same PR. Remove
-// this attribute once those tasks land.
-#![allow(dead_code)]
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::catalog::{Language, supported};
