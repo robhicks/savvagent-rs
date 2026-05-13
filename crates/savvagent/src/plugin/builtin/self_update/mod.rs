@@ -32,9 +32,38 @@ pub mod check;
 /// `self_update`-backed production impl.
 pub mod apply;
 
+/// 24-hour cache for the GitHub Releases query result.
+pub mod cache;
+
 pub use apply::{BinarySwapper, SelfUpdateBinarySwapper, apply_update};
 pub use check::{GithubReleasesFetcher, ReleasesFetcher, UpdateState, check_for_update};
 pub use install_method::{InstallMethod, detect};
+
+use std::sync::OnceLock;
+
+/// Process-wide storage for the "restart to apply" hint. Written by the
+/// `/update` success path; read by `main.rs` after the event loop exits
+/// so it can print a one-line stderr hint after the alt-screen tears
+/// down.
+static RESTART_HINT: OnceLock<Mutex<Option<(semver::Version, semver::Version)>>> = OnceLock::new();
+
+fn restart_hint_cell() -> &'static Mutex<Option<(semver::Version, semver::Version)>> {
+    RESTART_HINT.get_or_init(|| Mutex::new(None))
+}
+
+/// Record a successful binary swap so the host can emit a restart hint
+/// on exit. Called once per process when `/update` transitions the
+/// plugin to [`UpdateState::Updated`].
+fn record_restart_hint(from: semver::Version, to: semver::Version) {
+    *restart_hint_cell().lock().unwrap() = Some((from, to));
+}
+
+/// Read the restart hint set by [`record_restart_hint`]. Used by
+/// `main.rs` after the TUI event loop exits — if `Some`, print a
+/// stderr line so the user knows to relaunch.
+pub fn pending_restart_hint() -> Option<(semver::Version, semver::Version)> {
+    restart_hint_cell().lock().unwrap().clone()
+}
 
 /// Environment variable that disables the update check + `/update` apply
 /// path entirely. Any non-empty value short-circuits the plugin to
@@ -234,6 +263,9 @@ impl Plugin for SelfUpdatePlugin {
                         .to_string();
                 match apply_update(self.swapper.as_ref(), current, latest.clone()).await {
                     Ok(new_state) => {
+                        if let UpdateState::Updated { from, to } = &new_state {
+                            record_restart_hint(from.clone(), to.clone());
+                        }
                         *self.state.lock().unwrap() = new_state;
                         let ok_note = rust_i18n::t!(
                             "self-update.note-update-ok",
@@ -265,15 +297,56 @@ impl Plugin for SelfUpdatePlugin {
         }
 
         // Spawn the version check on the runtime so the hook dispatcher
-        // returns immediately. The task writes the result back into the
-        // shared state for `render_slot` / `handle_slash` to consume.
+        // returns immediately. The task consults the 24h cache before
+        // hitting the network and persists the latest tag on a fresh
+        // fetch.
         let state = Arc::clone(&self.state);
         let fetcher = Arc::clone(&self.fetcher);
         let install_method = self.install_method;
         let current_version = env!("CARGO_PKG_VERSION").to_string();
 
         tokio::spawn(async move {
-            let result = check_for_update(&current_version, install_method, fetcher.as_ref()).await;
+            if matches!(install_method, InstallMethod::Dev) {
+                if let Ok(mut guard) = state.lock() {
+                    *guard = UpdateState::Disabled;
+                }
+                return;
+            }
+
+            // 24h cache: if a fresh entry exists, skip the network.
+            let cache_path = cache::cache_path();
+            let cached_fresh = cache_path
+                .as_ref()
+                .and_then(cache::load)
+                .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS));
+
+            let result = if let Some(entry) = cached_fresh {
+                tracing::debug!(tag = %entry.latest_tag, "self-update: using cached tag");
+                check::classify_tag(&current_version, &entry.latest_tag)
+            } else {
+                let fresh =
+                    check_for_update(&current_version, install_method, fetcher.as_ref()).await;
+                // Persist any tag we successfully classified so the next
+                // launch within DEFAULT_TTL_SECS skips the network.
+                if let Some(path) = cache_path {
+                    if let Some(tag) = match &fresh {
+                        UpdateState::Available { latest, .. } => Some(format!("v{latest}")),
+                        UpdateState::UpToDate => Some(format!("v{current_version}")),
+                        _ => None,
+                    } {
+                        cache::save(
+                            &path,
+                            &cache::CacheEntry {
+                                schema_version: 1,
+                                checked_at_unix: cache::now_unix(),
+                                latest_tag: tag,
+                            },
+                        );
+                    }
+                }
+                fresh
+            };
+
             if let Ok(mut guard) = state.lock() {
                 *guard = result;
             }

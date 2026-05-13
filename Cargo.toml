@@ -17,7 +17,7 @@ members = [
 default-members = ["crates/savvagent"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/robhicks/savvagent-rs"
@@ -25,17 +25,17 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Local crates
-savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.10.0" }
-savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.10.0" }
-savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.10.0" }
-savvagent-host = { path = "crates/savvagent-host", version = "0.10.0" }
-provider-anthropic = { path = "crates/provider-anthropic", version = "0.10.0" }
-provider-gemini = { path = "crates/provider-gemini", version = "0.10.0" }
-provider-local = { path = "crates/provider-local", version = "0.10.0" }
-provider-openai = { path = "crates/provider-openai", version = "0.10.0" }
-tool-bash = { path = "crates/tool-bash", version = "0.10.0" }
-tool-fs = { path = "crates/tool-fs", version = "0.10.0" }
-tool-grep = { path = "crates/tool-grep", version = "0.10.0" }
+savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.11.0" }
+savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.11.0" }
+savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.11.0" }
+savvagent-host = { path = "crates/savvagent-host", version = "0.11.0" }
+provider-anthropic = { path = "crates/provider-anthropic", version = "0.11.0" }
+provider-gemini = { path = "crates/provider-gemini", version = "0.11.0" }
+provider-local = { path = "crates/provider-local", version = "0.11.0" }
+provider-openai = { path = "crates/provider-openai", version = "0.11.0" }
+tool-bash = { path = "crates/tool-bash", version = "0.11.0" }
+tool-fs = { path = "crates/tool-fs", version = "0.11.0" }
+tool-grep = { path = "crates/tool-grep", version = "0.11.0" }
 
 # Async runtime + utilities
 tokio = { version = "1.52", features = ["full"] }
@@ -138,8 +138,13 @@ installers = ["shell", "powershell"]
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Whether to auto-include files like READMEs, LICENSEs, and CHANGELOGs (default true)
 auto-includes = true
-# The archive format to use for non-windows builds (defaults .tar.xz)
-unix-archive = ".tar.xz"
+# The archive format to use for non-windows builds (defaults .tar.xz).
+# Switched to .tar.gz in v0.11.0 so the `internal:self-update` plugin's
+# `self_update`-backed `/update` path can extract Unix tarballs natively
+# (the self_update crate ships gzip support out of the box; xz would
+# require an additional dep). Existing v0.10.x users curl|sh the new
+# installer once; from v0.11.0 onwards `/update` handles the upgrade.
+unix-archive = ".tar.gz"
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".zip"
 # Path that installers should place binaries in

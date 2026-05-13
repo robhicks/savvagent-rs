@@ -6,6 +6,79 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.11.0 — TUI Self Update (2026-05-13)
+
+In-band self-update. On launch the TUI asynchronously checks the GitHub
+Releases API for `robhicks/savvagent-rs` and, if a newer release is
+available, surfaces a one-line banner above the existing tips row. A new
+`/update` slash command downloads the matching cargo-dist tarball for
+the running target triple and atomically replaces the running binary.
+
+### New features
+
+- `home.banner` slot — new render slot above `home.tips`. The plugin
+  paints "Update available: vX → vY  (run /update)" when a newer
+  release is detected, or "Updated to vY. Restart savvagent to apply."
+  after a successful `/update`. Empty/blank when there is no update.
+- `/update` — download and install the latest release. Two
+  `Effect::PushNote` notes are emitted: a "Downloading vY…" line, then
+  a success or failure line. On failure the banner stays in the
+  "Update available" state so the user can retry.
+- 24-hour cache for the version check, persisted to
+  `~/.savvagent/update-check.json`. Subsequent launches within the TTL
+  skip the network call entirely.
+- Opt-out: `SAVVAGENT_NO_UPDATE_CHECK=1` env var or `--no-update-check`
+  CLI flag. Either signal disables both the check and `/update`.
+- Dev builds (binary running from `target/{debug,release}/`) are
+  detected automatically and short-circuit to `UpdateState::Disabled`
+  with no network call.
+- On-quit stderr hint: after `/update` succeeds, the TUI prints a
+  one-liner to stderr after the alt-screen tears down, so the user
+  sees "savvagent: installed v0.11.0 (was v0.10.0). Restart to use
+  the new version." even after closing the TUI.
+
+### Plugin SDK changes
+
+None — the feature is implemented entirely inside the savvagent crate
+as a new built-in plugin (`internal:self-update`). The `Plugin` trait
+surface is unchanged.
+
+### Release infrastructure
+
+- `cargo-dist` `unix-archive` switched from `.tar.xz` to `.tar.gz` so
+  the `self_update` crate can extract Unix release artifacts using
+  gzip support shipped with the crate (xz extraction would require an
+  additional native dependency). v0.10.x users upgrade by re-running
+  the curl|sh installer once; from v0.11.0 onwards `/update` handles
+  subsequent upgrades.
+
+### Dependencies
+
+- `semver = "1"` — version comparisons in `internal:self-update`.
+- `self_update = "=0.42.0"` — atomic binary replacement. Pinned to
+  0.42 because 0.43.1 has type-inference failures against rustc 1.85
+  + edition 2024.
+
+### Known limitations
+
+- The actual binary swap is not unit-tested end-to-end — the plugin's
+  orchestration is covered by a `BinarySwapper` stub, but the
+  production `self_update::backends::github::Update` path requires a
+  real release artifact to exercise. End-to-end verification happens
+  post-v0.11.0 once a v0.11.x release exists to update to.
+- `~/.savvagent/config.toml` opt-out (mentioned in the original issue)
+  is deferred. Env var + CLI flag are sufficient for v0.11.0;
+  introducing a config.toml for one boolean was over-scope.
+- `cargo install --force savvagent` is not supported — savvagent is
+  not yet published to crates.io. cargo-dist tarballs are the only
+  distribution channel.
+
+### Migration notes
+
+No external API or wire-protocol changes. Existing v0.10.x users
+upgrade by re-running the curl|sh installer. Plugin authors are
+unaffected.
+
 ## v0.10.0 — Localize TUI (2026-05-13)
 
 Internationalization for the TUI. The savvagent crate now ships
