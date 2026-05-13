@@ -89,7 +89,11 @@ impl Screen for EditFileScreen {
     }
 
     fn render(&self, region: Region) -> Vec<StyledLine> {
-        let dirty_marker = if self.dirty { " [+]" } else { "" };
+        let dirty_marker = if self.dirty {
+            rust_i18n::t!("picker.edit-file.dirty-marker").to_string()
+        } else {
+            String::new()
+        };
         let mut out = vec![StyledLine {
             spans: vec![StyledSpan {
                 text: format!("{}{}", self.path, dirty_marker),
@@ -105,7 +109,8 @@ impl Screen for EditFileScreen {
         if let Some(err) = &self.last_error {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
-                    text: format!("Save failed: {err}"),
+                    text: rust_i18n::t!("picker.edit-file.save-failed", err = err.clone())
+                        .to_string(),
                     fg: Some(ThemeColor::Error),
                     bg: None,
                     modifiers: TextMods {
@@ -208,7 +213,7 @@ impl Screen for EditFileScreen {
 
     fn tips(&self) -> Vec<StyledLine> {
         vec![StyledLine::plain(
-            "←/→/↑/↓ move · type to insert · Ctrl-S save · Esc close",
+            rust_i18n::t!("picker.edit-file.tips").to_string(),
         )]
     }
 }

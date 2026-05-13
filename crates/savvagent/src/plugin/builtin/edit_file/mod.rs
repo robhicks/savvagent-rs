@@ -34,7 +34,7 @@ impl Plugin for EditFilePlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "edit".into(),
-            summary: "Open a file in the editor".into(),
+            summary: rust_i18n::t!("slash.edit-summary").to_string(),
             args_hint: Some("<path>".into()),
         }];
         contributions.screens = vec![ScreenSpec {
@@ -42,7 +42,7 @@ impl Plugin for EditFilePlugin {
             layout: ScreenLayout::CenteredModal {
                 width_pct: 90,
                 height_pct: 85,
-                title: Some("Edit file".into()),
+                title: Some(rust_i18n::t!("picker.edit-file.modal-title").to_string()),
             },
         }];
 
@@ -50,7 +50,7 @@ impl Plugin for EditFilePlugin {
             id: PluginId::new("internal:edit-file").expect("valid built-in id"),
             name: "Edit file".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Basic in-TUI file editor".into(),
+            description: rust_i18n::t!("plugin.edit-file-description").to_string(),
             kind: PluginKind::Optional,
             contributions,
         }

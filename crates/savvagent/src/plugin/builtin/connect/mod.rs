@@ -51,7 +51,7 @@ impl Plugin for ConnectPlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "connect".into(),
-            summary: "Pick a provider to connect".into(),
+            summary: rust_i18n::t!("slash.connect-summary").to_string(),
             args_hint: Some("[provider]".into()),
         }];
         contributions.screens = vec![ScreenSpec {
@@ -59,7 +59,7 @@ impl Plugin for ConnectPlugin {
             layout: ScreenLayout::CenteredModal {
                 width_pct: 50,
                 height_pct: 50,
-                title: Some("Connect to a provider".into()),
+                title: Some(rust_i18n::t!("picker.connect.modal-title").to_string()),
             },
         }];
         // Subscribe to ProviderRegistered so we can keep our candidate
@@ -70,7 +70,7 @@ impl Plugin for ConnectPlugin {
             id: PluginId::new("internal:connect").expect("valid built-in id"),
             name: "Connect".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Provider picker".into(),
+            description: rust_i18n::t!("plugin.connect-description").to_string(),
             kind: PluginKind::Core,
             contributions,
         }

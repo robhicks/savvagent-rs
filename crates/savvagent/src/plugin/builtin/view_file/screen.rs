@@ -47,7 +47,8 @@ impl Screen for ViewFileScreen {
     fn render(&self, region: Region) -> Vec<StyledLine> {
         let mut out = vec![StyledLine {
             spans: vec![StyledSpan {
-                text: format!("{}  (read-only)", self.path),
+                text: rust_i18n::t!("picker.view-file.read-only", path = self.path.clone())
+                    .to_string(),
                 fg: Some(ThemeColor::Accent),
                 bg: None,
                 modifiers: TextMods {
@@ -89,7 +90,9 @@ impl Screen for ViewFileScreen {
     }
 
     fn tips(&self) -> Vec<StyledLine> {
-        vec![StyledLine::plain("↑/↓ scroll · PgUp/PgDn jump · Esc close")]
+        vec![StyledLine::plain(
+            rust_i18n::t!("picker.view-file.tips").to_string(),
+        )]
     }
 }
 

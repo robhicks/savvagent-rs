@@ -60,7 +60,7 @@ impl Screen for PluginsManagerScreen {
         if self.rows.is_empty() {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
-                    text: "  (no plugins registered)".to_string(),
+                    text: rust_i18n::t!("picker.plugins-manager.no-plugins").to_string(),
                     fg: Some(ThemeColor::Warning),
                     bg: None,
                     modifiers: TextMods::default(),
@@ -71,9 +71,15 @@ impl Screen for PluginsManagerScreen {
         for (i, row) in self.rows.iter().enumerate() {
             let marker = if i == self.cursor { "> " } else { "  " };
             let toggle = match (row.kind, row.enabled) {
-                (PluginKind::Core, _) => "(core)",
-                (PluginKind::Optional, true) => "[ on ]",
-                (PluginKind::Optional, false) => "[ off]",
+                (PluginKind::Core, _) => {
+                    rust_i18n::t!("picker.plugins-manager.row-core").to_string()
+                }
+                (PluginKind::Optional, true) => {
+                    rust_i18n::t!("picker.plugins-manager.row-on").to_string()
+                }
+                (PluginKind::Optional, false) => {
+                    rust_i18n::t!("picker.plugins-manager.row-off").to_string()
+                }
             };
             let color = if i == self.cursor {
                 ThemeColor::Accent
@@ -133,7 +139,8 @@ impl Screen for PluginsManagerScreen {
                     return Ok(vec![Effect::PushNote {
                         line: StyledLine {
                             spans: vec![StyledSpan {
-                                text: "Core plugins cannot be disabled.".into(),
+                                text: rust_i18n::t!("picker.plugins-manager.core-cannot-disable")
+                                    .to_string(),
                                 fg: Some(ThemeColor::Warning),
                                 bg: None,
                                 modifiers: TextMods::default(),
@@ -153,7 +160,7 @@ impl Screen for PluginsManagerScreen {
 
     fn tips(&self) -> Vec<StyledLine> {
         vec![StyledLine::plain(
-            "Up/Down navigate · Space/Enter toggle · Esc close",
+            rust_i18n::t!("picker.plugins-manager.tips").to_string(),
         )]
     }
 }
@@ -186,8 +193,10 @@ mod tests {
             Effect::PushNote { line } => {
                 let joined: String = line.spans.iter().map(|s| s.text.clone()).collect();
                 assert!(
-                    joined.contains("Core"),
-                    "expected Core warning, got {joined:?}"
+                    joined.contains(
+                        rust_i18n::t!("picker.plugins-manager.core-cannot-disable").as_ref()
+                    ),
+                    "expected core-cannot-disable text, got {joined:?}"
                 );
             }
             other => panic!("expected PushNote, got {other:?}"),

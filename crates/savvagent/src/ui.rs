@@ -527,10 +527,20 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
     for entry in &app.entries {
         match entry {
             Entry::User(text) => {
-                lines.push(line_block("You: ", text, palette.success, palette));
+                lines.push(line_block(
+                    rust_i18n::t!("conversation.you-prefix").as_ref(),
+                    text,
+                    palette.success,
+                    palette,
+                ));
             }
             Entry::Assistant(text) => {
-                lines.push(line_block("Agent: ", text, palette.secondary, palette));
+                lines.push(line_block(
+                    rust_i18n::t!("conversation.agent-prefix").as_ref(),
+                    text,
+                    palette.secondary,
+                    palette,
+                ));
             }
             Entry::Tool {
                 name,
@@ -579,7 +589,7 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
 
     if !app.live_text.is_empty() {
         lines.push(line_block(
-            "Agent: ",
+            rust_i18n::t!("conversation.agent-prefix").as_ref(),
             &app.live_text,
             palette.secondary,
             palette,

@@ -32,14 +32,14 @@ impl Plugin for SavePlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "save".into(),
-            summary: "Save transcript to a path".into(),
+            summary: rust_i18n::t!("slash.save-summary").to_string(),
             args_hint: Some("[path]".into()),
         }];
         Manifest {
             id: PluginId::new("internal:save").expect("valid built-in id"),
             name: "Save transcript".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Save the active conversation to disk".into(),
+            description: rust_i18n::t!("plugin.save-description").to_string(),
             kind: PluginKind::Optional,
             contributions,
         }

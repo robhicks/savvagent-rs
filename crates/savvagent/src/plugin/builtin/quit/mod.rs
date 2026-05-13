@@ -35,14 +35,14 @@ impl Plugin for QuitPlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "quit".into(),
-            summary: "Quit savvagent".into(),
+            summary: rust_i18n::t!("slash.quit-summary").to_string(),
             args_hint: None,
         }];
         Manifest {
             id: PluginId::new("internal:quit").expect("valid built-in id"),
             name: "Quit".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Shut down the application cleanly".into(),
+            description: rust_i18n::t!("plugin.quit-description").to_string(),
             kind: PluginKind::Core,
             contributions,
         }

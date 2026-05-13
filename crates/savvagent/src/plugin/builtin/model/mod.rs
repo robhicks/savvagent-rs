@@ -36,14 +36,14 @@ impl Plugin for ModelPlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "model".into(),
-            summary: "Switch to the next model on the active provider".into(),
+            summary: rust_i18n::t!("slash.model-summary").to_string(),
             args_hint: None,
         }];
         Manifest {
             id: PluginId::new("internal:model").expect("valid built-in id"),
             name: "Switch model".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Cycle to the next model on the active provider".into(),
+            description: rust_i18n::t!("plugin.model-description").to_string(),
             kind: PluginKind::Optional,
             contributions,
         }

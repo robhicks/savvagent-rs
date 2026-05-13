@@ -28,14 +28,24 @@ impl Screen for LanguagePickerScreen {
 
     fn render(&self, _region: Region) -> Vec<StyledLine> {
         let mut out: Vec<StyledLine> = Vec::new();
-        out.push(StyledLine::plain(format!("Filter: {}", self.inner.filter)));
+        out.push(StyledLine::plain(
+            rust_i18n::t!(
+                "picker.language.filter-label",
+                filter = self.inner.filter.clone()
+            )
+            .to_string(),
+        ));
         out.push(StyledLine::plain(""));
 
         let filtered = self.inner.filtered();
         if filtered.is_empty() {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
-                    text: format!("no languages match `{}`", self.inner.filter),
+                    text: rust_i18n::t!(
+                        "picker.language.no-match",
+                        filter = self.inner.filter.clone()
+                    )
+                    .to_string(),
                     fg: Some(ThemeColor::Warning),
                     bg: None,
                     modifiers: TextMods::default(),
@@ -99,7 +109,7 @@ impl Screen for LanguagePickerScreen {
 
     fn tips(&self) -> Vec<StyledLine> {
         vec![StyledLine::plain(
-            "↑/↓ navigate · type to filter · Enter apply · Esc cancel",
+            rust_i18n::t!("picker.language.tips").to_string(),
         )]
     }
 }

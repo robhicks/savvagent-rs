@@ -36,14 +36,24 @@ impl Screen for ThemePickerScreen {
 
     fn render(&self, _region: Region) -> Vec<StyledLine> {
         let mut out: Vec<StyledLine> = Vec::new();
-        out.push(StyledLine::plain(format!("Filter: {}", self.inner.filter)));
+        out.push(StyledLine::plain(
+            rust_i18n::t!(
+                "picker.themes.filter-label",
+                filter = self.inner.filter.clone()
+            )
+            .to_string(),
+        ));
         out.push(StyledLine::plain(""));
 
         let filtered = self.inner.filtered_themes();
         if filtered.is_empty() {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
-                    text: format!("no themes match `{}`", self.inner.filter),
+                    text: rust_i18n::t!(
+                        "picker.themes.no-match",
+                        filter = self.inner.filter.clone()
+                    )
+                    .to_string(),
                     fg: Some(ThemeColor::Warning),
                     bg: None,
                     modifiers: TextMods::default(),
@@ -71,7 +81,7 @@ impl Screen for ThemePickerScreen {
         if !builtins.is_empty() {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
-                    text: "  built-in:".to_string(),
+                    text: rust_i18n::t!("picker.themes.section-builtin").to_string(),
                     fg: Some(ThemeColor::Muted),
                     bg: None,
                     modifiers: TextMods::default(),
@@ -84,7 +94,7 @@ impl Screen for ThemePickerScreen {
         if !catalog.is_empty() {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
-                    text: "  catalog (ratatui-themes):".to_string(),
+                    text: rust_i18n::t!("picker.themes.section-catalog").to_string(),
                     fg: Some(ThemeColor::Muted),
                     bg: None,
                     modifiers: TextMods::default(),
@@ -149,7 +159,7 @@ impl Screen for ThemePickerScreen {
 
     fn tips(&self) -> Vec<StyledLine> {
         vec![StyledLine::plain(
-            "↑/↓ navigate · type to filter · Enter apply · Esc cancel",
+            rust_i18n::t!("picker.themes.tips").to_string(),
         )]
     }
 }

@@ -45,7 +45,7 @@ impl Plugin for SplashPlugin {
         }];
         contributions.slash_commands = vec![SlashSpec {
             name: "splash".into(),
-            summary: "Show the splash screen".into(),
+            summary: rust_i18n::t!("slash.splash-summary").to_string(),
             args_hint: None,
         }];
         contributions.hooks = vec![HookKind::HostStarting, HookKind::Connect];
@@ -54,7 +54,7 @@ impl Plugin for SplashPlugin {
             id: PluginId::new("internal:splash").expect("valid built-in id"),
             name: "Splash".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Startup HUD + parse-error screen".into(),
+            description: rust_i18n::t!("plugin.splash-description").to_string(),
             kind: PluginKind::Optional,
             contributions,
         }

@@ -42,7 +42,7 @@ impl Plugin for ThemesPlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "theme".into(),
-            summary: "Switch the color theme".into(),
+            summary: rust_i18n::t!("slash.theme-summary").to_string(),
             args_hint: Some("[list | <slug>]".into()),
         }];
         contributions.screens = vec![ScreenSpec {
@@ -50,7 +50,7 @@ impl Plugin for ThemesPlugin {
             layout: ScreenLayout::CenteredModal {
                 width_pct: 60,
                 height_pct: 70,
-                title: Some("Pick a theme".into()),
+                title: Some(rust_i18n::t!("picker.themes.modal-title").to_string()),
             },
         }];
         contributions.themes = Theme::all()
@@ -62,7 +62,7 @@ impl Plugin for ThemesPlugin {
             id: PluginId::new("internal:themes").expect("valid built-in id"),
             name: "Themes".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Color themes + /theme picker".into(),
+            description: rust_i18n::t!("plugin.themes-description").to_string(),
             kind: PluginKind::Core,
             contributions,
         }
@@ -93,9 +93,9 @@ impl Plugin for ThemesPlugin {
                     persist: true,
                 }]),
                 None => Ok(vec![Effect::PushNote {
-                    line: StyledLine::plain(format!(
-                        "theme `{slug}` not found — run `/theme list` to see available themes."
-                    )),
+                    line: StyledLine::plain(
+                        rust_i18n::t!("notes.theme-not-found", slug = slug).to_string(),
+                    ),
                 }]),
             },
         }
@@ -127,7 +127,14 @@ impl Plugin for ThemesPlugin {
 
 fn format_listing() -> StyledLine {
     let names: Vec<String> = Theme::all().iter().map(|t| t.name().to_string()).collect();
-    StyledLine::plain(format!("Themes ({}): {}", names.len(), names.join(", ")))
+    StyledLine::plain(
+        rust_i18n::t!(
+            "picker.themes.listing",
+            count = names.len(),
+            names = names.join(", ")
+        )
+        .to_string(),
+    )
 }
 
 #[cfg(test)]

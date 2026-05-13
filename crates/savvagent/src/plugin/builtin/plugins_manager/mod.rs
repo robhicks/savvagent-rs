@@ -39,7 +39,7 @@ impl Plugin for PluginsManagerPlugin {
         let mut contributions = Contributions::default();
         contributions.slash_commands = vec![SlashSpec {
             name: "plugins".into(),
-            summary: "Manage plugins".into(),
+            summary: rust_i18n::t!("slash.plugins-summary").to_string(),
             args_hint: None,
         }];
         contributions.screens = vec![ScreenSpec {
@@ -47,7 +47,7 @@ impl Plugin for PluginsManagerPlugin {
             layout: ScreenLayout::CenteredModal {
                 width_pct: 80,
                 height_pct: 80,
-                title: Some("Plugins".into()),
+                title: Some(rust_i18n::t!("picker.plugins-manager.modal-title").to_string()),
             },
         }];
 
@@ -55,7 +55,7 @@ impl Plugin for PluginsManagerPlugin {
             id: PluginId::new("internal:plugins-manager").expect("valid built-in id"),
             name: "Plugins manager".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Enable/disable optional plugins".into(),
+            description: rust_i18n::t!("plugin.plugins-manager-description").to_string(),
             kind: PluginKind::Core,
             contributions,
         }
