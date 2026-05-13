@@ -1514,6 +1514,8 @@ mod tests {
         let path = crate::plugin::builtin::language::catalog::config_path().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains(r#"language = "es""#));
+
+        rust_i18n::set_locale("en");
     }
 
     #[tokio::test]
@@ -1540,6 +1542,8 @@ mod tests {
             !path.exists(),
             "persist=false must not create language.toml"
         );
+
+        rust_i18n::set_locale("en");
     }
 
     #[tokio::test]

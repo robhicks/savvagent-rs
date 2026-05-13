@@ -6,6 +6,58 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.10.0 — Localize TUI (2026-05-13)
+
+Internationalization for the TUI. The savvagent crate now ships
+`rust-i18n` catalogs for English, Spanish, Portuguese, and Hindi. A
+new `internal:language` built-in plugin contributes a `/language`
+slash command and a centered-modal picker (mirroring the existing
+`internal:themes` plugin).
+
+### New features
+
+- `/language` — open the language picker. Arrow-key navigation,
+  type-to-filter, Enter to apply + persist, Esc to cancel.
+- `/language <code>` — directly switch to a supported locale
+  (`en`, `es`, `pt`, `hi`).
+- Boot-time locale detection: `~/.savvagent/language.toml` > `LC_ALL`
+  > `LC_MESSAGES` > `LANG` > `en`.
+- Live preview during picker navigation; Esc reverts.
+
+### Plugin SDK changes
+
+- `Effect::SetActiveLocale { code, persist }` — additive variant on
+  the `#[non_exhaustive]` Effect enum.
+- `ScreenArgs::LanguagePicker { current_code }` — additive variant on
+  the `#[non_exhaustive]` ScreenArgs enum.
+- `savvagent-plugin` crate version: 0.9.0 → 0.10.0.
+
+### Known limitations
+
+- Slash-command summaries in the command palette are captured at the
+  boot locale; changing language mid-session requires a restart to
+  refresh the summary column. Modal titles, picker rows, status-bar
+  text, and pushed notes all re-resolve every frame.
+- Hindi rendering depends on a terminal font that includes Devanagari
+  glyphs. Without one, rows fall back to replacement boxes. The
+  language code column (`hi`) is always ASCII, so the user can still
+  filter and select.
+- `LANGUAGE=` (glibc compound-locale env var) is not honored — only
+  POSIX `LC_ALL` / `LC_MESSAGES` / `LANG`.
+- A small number of user-facing literals were deferred during PR 6's
+  string sweep (ui.rs header, plugin manifest `name` fields, a handful
+  of `app.rs` notes). The catalog parity test continues to enforce
+  structural correctness on what IS in the catalog; these will be
+  cleaned up in a follow-up.
+
+### Migration notes
+
+No external API changes for non-plugin consumers. Plugin authors:
+`SetActiveLocale` and `LanguagePicker` are additive on
+`#[non_exhaustive]` enums; existing match arms continue to compile
+unchanged. The runtime applies `SetActiveLocale` automatically; no
+plugin code needs to call `rust_i18n::set_locale` directly.
+
 ## [0.9.0] - 2026-05-12
 
 ### v0.9.0 — Plugin system
