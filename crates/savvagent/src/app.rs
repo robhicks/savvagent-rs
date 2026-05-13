@@ -295,8 +295,6 @@ pub struct App {
     /// Currently-active locale code (e.g. `"en"`). Loaded at startup
     /// from `~/.savvagent/language.toml` (or env detection); mutated by
     /// `apply_effects` on `Effect::SetActiveLocale`.
-    // Consumed by apply_effects (Task 17) and detect_initial wiring (Task 18).
-    #[allow(dead_code)]
     pub active_language: String,
 
     /// Cached classification of the sandbox state for the startup splash.
@@ -1019,8 +1017,6 @@ impl App {
     /// styled note; the in-memory selection (and the `rust_i18n` global)
     /// are left unchanged. Called from `apply_effects` on
     /// `Effect::SetActiveLocale`.
-    // Invoked by apply_effects in Task 17; allow until then.
-    #[allow(dead_code)]
     pub fn set_active_language(&mut self, code: String) {
         if crate::plugin::builtin::language::catalog::is_supported(&code) {
             rust_i18n::set_locale(&code);
@@ -1035,8 +1031,6 @@ impl App {
     /// Persist the active locale to `~/.savvagent/language.toml`. Errors
     /// surface as a styled note; the in-memory selection is kept either
     /// way. Called from `apply_effects` on `Effect::SetActiveLocale { persist: true }`.
-    // Invoked by apply_effects in Task 17; allow until then.
-    #[allow(dead_code)]
     pub fn persist_language(&mut self) {
         let code = self.active_language.clone();
         match crate::plugin::builtin::language::catalog::save(&code) {
