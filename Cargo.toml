@@ -73,6 +73,19 @@ thiserror = "2"
 # latest GitHub release is newer than the running binary).
 semver = "1"
 
+# In-place binary replacement for `/update`. We disable defaults to opt out
+# of signature verification (no signed releases yet) and keep just the
+# archive formats cargo-dist produces: `.tar.gz` on Unix
+# (`archive-tar` + `compression-flate2`) and `.zip` on Windows
+# (`archive-zip`). Pinned to 0.42 because 0.43.1 has type-inference
+# failures against rustc 1.85 / edition 2024.
+self_update = { version = "=0.42.0", default-features = false, features = [
+    "archive-tar",
+    "archive-zip",
+    "compression-flate2",
+    "rustls",
+] }
+
 # Code search / walker (shared by tool-grep and the rewritten tool-fs glob)
 grep-matcher = "0.1"
 grep-regex = "0.1"

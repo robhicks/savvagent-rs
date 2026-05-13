@@ -113,6 +113,13 @@ press-slash  = "Pulsa / para ver los comandos"
 
 [self-update]
 banner-available = "Actualización disponible: v%{current} → v%{latest}  (ejecuta /update)"
+banner-updated   = "Actualizado a v%{latest}. Reinicia savvagent para aplicar."
+slash-summary    = "Descargar e instalar la última versión"
+note-no-update   = "Ya estás en la última versión — no hay nada que hacer."
+note-disabled    = "La actualización automática está deshabilitada en esta compilación."
+note-updating    = "Descargando v%{latest}…"
+note-update-ok   = "Instalado v%{latest}. Reinicia savvagent para usarlo."
+note-update-fail = "La actualización falló: %{err}"
 
 [picker.themes]
 filter-label    = "Filtro: %{filter}"
