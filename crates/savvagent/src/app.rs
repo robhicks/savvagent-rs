@@ -746,7 +746,10 @@ impl App {
     #[allow(dead_code)]
     pub fn open_file(&mut self, path: PathBuf, edit: bool) {
         if !path.exists() {
-            self.push_note(format!("File not found: {}", path.display()));
+            self.push_note(
+                rust_i18n::t!("notes.file-not-found", path = path.display().to_string())
+                    .to_string(),
+            );
             return;
         }
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
@@ -773,10 +776,15 @@ impl App {
                             InputMode::ViewingFile
                         };
                     }
-                    Err(e) => self.push_note(format!("Editor error: {e}")),
+                    Err(e) => self.push_note(
+                        rust_i18n::t!("notes.file-editor-error", err = format!("{e:#}"))
+                            .to_string(),
+                    ),
                 }
             }
-            Err(e) => self.push_note(format!("Read error: {e}")),
+            Err(e) => self.push_note(
+                rust_i18n::t!("notes.file-read-error", err = format!("{e:#}")).to_string(),
+            ),
         }
     }
 
@@ -788,8 +796,12 @@ impl App {
         let Some(editor) = &self.editor else { return };
         let content = editor.get_content();
         match std::fs::write(&path, content) {
-            Ok(_) => self.push_note(format!("Saved {}", path.display())),
-            Err(e) => self.push_note(format!("Write error: {e}")),
+            Ok(_) => self.push_note(
+                rust_i18n::t!("notes.file-saved", path = path.display().to_string()).to_string(),
+            ),
+            Err(e) => self.push_note(
+                rust_i18n::t!("notes.file-write-error", err = format!("{e:#}")).to_string(),
+            ),
         }
     }
 
@@ -907,7 +919,7 @@ impl App {
                 true
             }
             _ if head.starts_with('/') => {
-                self.push_note(format!("Unknown command: {head}"));
+                self.push_note(rust_i18n::t!("notes.unknown-command", cmd = head).to_string());
                 true
             }
             _ => false,
@@ -1006,9 +1018,9 @@ impl App {
                 self.active_theme = theme;
             }
             None => {
-                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "theme `{slug}` not found — run `/theme list` to see available themes."
-                )));
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.theme-not-found", slug = slug).to_string(),
+                ));
             }
         }
     }
@@ -1025,9 +1037,9 @@ impl App {
             self.active_language = code;
             true
         } else {
-            self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                "language `{code}` not supported — run `/language` to pick one."
-            )));
+            self.push_styled_note(savvagent_plugin::StyledLine::plain(
+                rust_i18n::t!("notes.language-not-found", code = code).to_string(),
+            ));
             false
         }
     }
@@ -1042,14 +1054,19 @@ impl App {
                 let native = crate::plugin::builtin::language::catalog::lookup(&code)
                     .map(|l| l.native_name)
                     .unwrap_or(code.as_str());
-                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "language set to {native}"
-                )));
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.language-set", native = native).to_string(),
+                ));
             }
             Err(e) => {
-                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "language `{code}` applied for this session, but persistence failed: {e}"
-                )));
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!(
+                        "notes.language-persistence-failed",
+                        code = code,
+                        err = format!("{e:#}")
+                    )
+                    .to_string(),
+                ));
             }
         }
     }
@@ -1063,16 +1080,19 @@ impl App {
         let theme = self.active_theme;
         match crate::plugin::builtin::themes::catalog::save(theme) {
             Ok(()) => {
-                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "theme set to `{}`",
-                    theme.name()
-                )));
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.theme-set", slug = theme.name()).to_string(),
+                ));
             }
             Err(e) => {
-                self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "theme `{}` applied for this session, but persistence failed: {e}",
-                    theme.name()
-                )));
+                self.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!(
+                        "notes.theme-persistence-failed",
+                        slug = theme.name(),
+                        err = format!("{e:#}")
+                    )
+                    .to_string(),
+                ));
             }
         }
     }
@@ -1099,9 +1119,9 @@ impl App {
         );
         self.registered_providers
             .insert(id.as_str().to_string(), client);
-        self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-            "Connected to {display_name}."
-        )));
+        self.push_styled_note(savvagent_plugin::StyledLine::plain(
+            rust_i18n::t!("splash.connected-to", provider = display_name).to_string(),
+        ));
     }
 
     /// Save transcript to the given path. Serializes `entries` to a JSON array

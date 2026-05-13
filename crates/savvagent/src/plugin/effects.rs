@@ -77,10 +77,9 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                 Err(e) => {
                     tracing::warn!(error = %e, provider_id = %id.as_str(),
                         "RegisterProvider with invalid provider id; skipping");
-                    app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                        "Invalid provider id from plugin: {}",
-                        id.as_str()
-                    )));
+                    app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                        rust_i18n::t!("notes.provider-invalid-id", id = id.as_str()).to_string(),
+                    ));
                     return Ok(());
                 }
             };
@@ -93,7 +92,7 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                          app startup finishes installing the runtime."
                     );
                     app.push_styled_note(savvagent_plugin::StyledLine::plain(
-                        "Plugin runtime not yet installed; /connect requires app startup to complete.",
+                        rust_i18n::t!("notes.provider-runtime-not-ready").to_string(),
                     ));
                     return Ok(());
                 }
@@ -135,17 +134,16 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                     "Effect::RegisterProvider: take_provider_client returned None — \
                      possible dual-instance bug or plugin lifecycle issue."
                 );
-                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "provider `{}` announced but no client was constructed",
-                    id.as_str()
-                )));
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.provider-no-client", id = id.as_str()).to_string(),
+                ));
             }
         }
         Effect::SaveTranscript { path } => match app.save_transcript_to(path.clone()) {
             Ok(()) => {
-                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "Transcript saved to {path}"
-                )));
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.transcript-saved", path = path.clone()).to_string(),
+                ));
                 // Notify subscribers (e.g. `internal:resume`) that a
                 // transcript was just persisted. The autosave path in
                 // `main.rs` already dispatches `TranscriptSaved` after
@@ -165,9 +163,14 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             }
             Err(e) => {
                 tracing::error!(error = %e, path = %path, "save_transcript failed");
-                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "Save failed ({path}): {e}"
-                )));
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!(
+                        "notes.transcript-save-failed",
+                        path = path.clone(),
+                        err = format!("{e:#}")
+                    )
+                    .to_string(),
+                ));
             }
         },
         Effect::PromptSend { text } => app.submit_prompt(text),
@@ -213,7 +216,7 @@ async fn apply_toggle_plugin(app: &mut App, id: PluginId, enabled: bool) -> Resu
         None => {
             tracing::error!("Effect::TogglePlugin: plugin runtime not installed");
             app.push_styled_note(savvagent_plugin::StyledLine::plain(
-                "Plugin runtime not yet installed; /plugins requires app startup to complete.",
+                rust_i18n::t!("notes.plugins-runtime-not-ready").to_string(),
             ));
             return Ok(());
         }
@@ -237,18 +240,17 @@ async fn apply_toggle_plugin(app: &mut App, id: PluginId, enabled: bool) -> Resu
             let kind = plugin.lock().await.manifest().kind;
             if matches!(kind, PluginKind::Core) {
                 tracing::warn!(plugin = %id.as_str(), "refusing to toggle Core plugin");
-                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "Cannot disable Core plugin: {}",
-                    id.as_str()
-                )));
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.plugin-toggle-cannot-disable-core", id = id.as_str())
+                        .to_string(),
+                ));
                 return Ok(());
             }
         } else {
             tracing::warn!(plugin = %id.as_str(), "TogglePlugin: unknown plugin id");
-            app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                "Cannot toggle unknown plugin: {}",
-                id.as_str()
-            )));
+            app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                rust_i18n::t!("notes.plugin-toggle-unknown", id = id.as_str()).to_string(),
+            ));
             return Ok(());
         }
         reg.set_enabled(&id, enabled);
@@ -281,11 +283,14 @@ async fn apply_toggle_plugin(app: &mut App, id: PluginId, enabled: bool) -> Resu
                     error = %e,
                     "TogglePlugin: Indexes::build failed; rolled back registry mutation",
                 );
-                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "Couldn't toggle {}: rebuilding plugin indexes failed ({}); change reverted.",
-                    id.as_str(),
-                    e
-                )));
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!(
+                        "notes.plugin-toggle-indexes-failed",
+                        id = id.as_str(),
+                        err = format!("{e:#}")
+                    )
+                    .to_string(),
+                ));
                 return Ok(());
             }
         }
@@ -314,10 +319,10 @@ async fn apply_toggle_plugin(app: &mut App, id: PluginId, enabled: bool) -> Resu
         }
         if let Err(e) = persistence::save(&entries) {
             tracing::error!(error = %e, "plugins.toml save failed");
-            app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                "Could not save plugins.toml ({e}); toggle applied for this session only — \
-                 will revert at next start."
-            )));
+            app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                rust_i18n::t!("notes.plugin-toggle-persist-failed", err = format!("{e:#}"))
+                    .to_string(),
+            ));
         }
     }
     Ok(())

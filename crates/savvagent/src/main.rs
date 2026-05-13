@@ -204,24 +204,16 @@ async fn main() -> Result<()> {
         app.refresh_splash_sandbox_from_host(host.sandbox_config());
     }
     if !app.connected {
-        app.push_note(
-            "Not connected. Type / (or press Ctrl-P) and pick /connect to set up a provider.",
-        );
+        app.push_note(rust_i18n::t!("notes.not-connected-startup").to_string());
     }
     if tool_bins.fs.is_none() {
-        app.push_note(
-            "Note: savvagent-tool-fs not found — fs tools disabled. Run `cargo build` or set SAVVAGENT_TOOL_FS_BIN.",
-        );
+        app.push_note(rust_i18n::t!("errors.tool-fs-not-found").to_string());
     }
     if tool_bins.bash.is_none() {
-        app.push_note(
-            "Note: savvagent-tool-bash not found — bash disabled. Run `cargo build` or set SAVVAGENT_TOOL_BASH_BIN.",
-        );
+        app.push_note(rust_i18n::t!("errors.tool-bash-not-found").to_string());
     }
     if tool_bins.grep.is_none() {
-        app.push_note(
-            "Note: savvagent-tool-grep not found — search disabled. Run `cargo build` or set SAVVAGENT_TOOL_GREP_BIN.",
-        );
+        app.push_note(rust_i18n::t!("errors.tool-grep-not-found").to_string());
     }
     let res = run_app(
         &mut terminal,
@@ -493,9 +485,9 @@ async fn dispatch_slash_command(
             Ok(effs) => {
                 if let Err(e) = crate::plugin::effects::apply_effects(app, effs).await {
                     tracing::warn!(error = %e, command = %name_str, "apply_effects after textarea slash dispatch failed");
-                    app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                        "Command failed: {e}"
-                    )));
+                    app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                        rust_i18n::t!("notes.command-failed", err = format!("{e:#}")).to_string(),
+                    ));
                 }
                 return;
             }
@@ -504,9 +496,9 @@ async fn dispatch_slash_command(
             }
             Err(e) => {
                 tracing::warn!(error = %e, command = %name_str, "textarea slash dispatch failed");
-                app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                    "Command failed: {e}"
-                )));
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.command-failed", err = format!("{e:#}")).to_string(),
+                ));
                 return;
             }
         }
@@ -520,15 +512,15 @@ async fn dispatch_slash_command(
 /// no-args verdict as a coarse hint.
 async fn show_tools(app: &mut App, host_slot: &HostSlot) {
     let Some(host) = current_host(host_slot).await else {
-        app.push_note("Not connected — no tools to list.");
+        app.push_note(rust_i18n::t!("notes.not-connected-tools").to_string());
         return;
     };
     let defs = host.tool_defs().await;
     if defs.is_empty() {
-        app.push_note("No tools registered.");
+        app.push_note(rust_i18n::t!("notes.no-tools-registered").to_string());
         return;
     }
-    app.push_note(format!("{} tool(s):", defs.len()));
+    app.push_note(rust_i18n::t!("notes.tools-count", count = defs.len()).to_string());
     for def in &defs {
         let verdict = host.default_verdict_for(&def.name);
         let label = match verdict {
@@ -541,7 +533,15 @@ async fn show_tools(app: &mut App, host_slot: &HostSlot) {
         } else {
             format!(" — {}", def.description)
         };
-        app.push_note(format!("  [{label}] {}{}", def.name, desc));
+        app.push_note(
+            rust_i18n::t!(
+                "notes.tools-entry",
+                policy = label,
+                name = def.name.clone(),
+                desc = desc
+            )
+            .to_string(),
+        );
     }
 }
 
@@ -589,15 +589,21 @@ fn resolve_model_change(
             // than reject every id against an empty "Known: " list, treat
             // this as "nothing to validate against" and proceed.
             ModelChangeOutcome::Proceed {
-                warning: Some(format!(
-                    "Provider advertises no models. Proceeding to `{requested}` optimistically."
-                )),
+                warning: Some(
+                    rust_i18n::t!("notes.model-no-models-optimistic", model = requested)
+                        .to_string(),
+                ),
             }
         }
         Ok(resp) => match validate_model_id(requested, &resp.models) {
             Ok(()) => ModelChangeOutcome::Proceed { warning: None },
             Err(known) => ModelChangeOutcome::Reject {
-                note: format!("Unknown model `{requested}`. Known: {}", known.join(", ")),
+                note: rust_i18n::t!(
+                    "notes.model-unknown-id",
+                    model = requested,
+                    known = known.join(", ")
+                )
+                .to_string(),
             },
         },
         Err(e) if matches!(e.kind, savvagent_protocol::ErrorKind::NotImplemented) => {
@@ -609,10 +615,14 @@ fn resolve_model_change(
             // Network/auth/decode failure. Surface it to the user so they can
             // tell a typo'd id apart from a misconfigured key.
             ModelChangeOutcome::Proceed {
-                warning: Some(format!(
-                    "Could not verify model `{requested}`: {}. Proceeding optimistically.",
-                    e.message
-                )),
+                warning: Some(
+                    rust_i18n::t!(
+                        "notes.model-verify-failed",
+                        model = requested,
+                        err = e.message.clone()
+                    )
+                    .to_string(),
+                ),
             }
         }
     }
@@ -632,30 +642,45 @@ async fn handle_model_command(
 ) {
     if rest.is_empty() {
         match app.active_provider_id {
-            Some(id) => app.push_note(format!("Current model: {}:{}", id, app.model)),
-            None => app.push_note(format!("Current model: {} (not connected)", app.model)),
+            Some(id) => app.push_note(
+                rust_i18n::t!(
+                    "notes.model-current-connected",
+                    provider = id,
+                    model = app.model.clone()
+                )
+                .to_string(),
+            ),
+            None => app.push_note(
+                rust_i18n::t!(
+                    "notes.model-current-not-connected",
+                    model = app.model.clone()
+                )
+                .to_string(),
+            ),
         }
         return;
     }
 
     let new_model = rest.to_string();
     let Some(spec_id) = app.active_provider_id else {
-        app.push_note("Not connected — `/connect` first, then `/model <id>`.");
+        app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
         return;
     };
     let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) else {
-        app.push_note(format!("Unknown active provider: {spec_id}"));
+        app.push_note(rust_i18n::t!("notes.model-unknown-provider", id = spec_id).to_string());
         return;
     };
     let key = if spec.api_key_required {
         match creds::load(spec.id) {
             Ok(Some(k)) => k,
             Ok(None) => {
-                app.push_note("No saved key for the active provider — `/connect` first.");
+                app.push_note(rust_i18n::t!("notes.model-no-saved-key").to_string());
                 return;
             }
             Err(e) => {
-                app.push_note(format!("Keyring error: {e}"));
+                app.push_note(
+                    rust_i18n::t!("notes.keyring-error", err = format!("{e:#}")).to_string(),
+                );
                 return;
             }
         }
@@ -709,7 +734,7 @@ async fn handle_model_command(
 /// overwritten when the in-flight turn finishes.
 async fn handle_resume_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
     if app.is_loading {
-        app.push_note("Cannot /resume during an in-flight turn — wait for it to finish.");
+        app.push_note(rust_i18n::t!("notes.cannot-resume-during-turn").to_string());
         return;
     }
     if rest.is_empty() {
@@ -744,7 +769,7 @@ async fn handle_resume_command(app: &mut App, rest: &str, host_slot: &HostSlot) 
 /// the conversation log.
 async fn do_resume_from_path(app: &mut App, host_slot: &HostSlot, path: &Path) {
     let Some(host) = current_host(host_slot).await else {
-        app.push_note("Not connected — run /connect first, then /resume to load a transcript.");
+        app.push_note(rust_i18n::t!("notes.cannot-resume-not-connected").to_string());
         return;
     };
 
@@ -752,11 +777,14 @@ async fn do_resume_from_path(app: &mut App, host_slot: &HostSlot, path: &Path) {
         Ok(record) => {
             // Warn if the transcript was from a different model.
             if record.model != host.config().model && record.saved_at > 0 {
-                app.push_note(format!(
-                    "Warning: transcript was saved with model '{}'; current model is '{}'.",
-                    record.model,
-                    host.config().model
-                ));
+                app.push_note(
+                    rust_i18n::t!(
+                        "notes.resume-model-mismatch",
+                        saved = record.model.clone(),
+                        current = host.config().model.clone()
+                    )
+                    .to_string(),
+                );
             }
             let ts = if record.saved_at > 0 {
                 collect_transcript_entries(path.parent().unwrap_or(path))
@@ -772,21 +800,32 @@ async fn do_resume_from_path(app: &mut App, host_slot: &HostSlot, path: &Path) {
             };
             app.replay_transcript(&record);
             app.resumed_at = Some(ts.clone());
-            app.push_note(format!(
-                "Resumed transcript from {ts} ({} messages). New turns continue from here.",
-                record.messages.len()
-            ));
+            app.push_note(
+                rust_i18n::t!(
+                    "notes.resume-resumed",
+                    ts = ts,
+                    count = record.messages.len()
+                )
+                .to_string(),
+            );
         }
         Err(TranscriptError::SchemaMismatch { found, expected }) => {
-            app.push_note(format!(
-                "Cannot resume: transcript schema v{found}, this build expects v{expected}."
-            ));
+            app.push_note(
+                rust_i18n::t!(
+                    "notes.resume-schema-mismatch",
+                    found = found,
+                    expected = expected
+                )
+                .to_string(),
+            );
         }
         Err(TranscriptError::Malformed(msg)) => {
-            app.push_note(format!("Cannot resume: malformed transcript JSON: {msg}"));
+            app.push_note(rust_i18n::t!("notes.resume-malformed-json", msg = msg).to_string());
         }
         Err(TranscriptError::Io(e)) => {
-            app.push_note(format!("Cannot resume: {e}"));
+            app.push_note(
+                rust_i18n::t!("notes.resume-io-error", err = format!("{e:#}")).to_string(),
+            );
         }
     }
 }
@@ -803,7 +842,7 @@ async fn perform_model_change(
     tool_bins: &ToolBins,
     app: &mut App,
 ) {
-    app.push_note(format!("Switching to {}…", new_model));
+    app.push_note(rust_i18n::t!("notes.model-switching-to", model = new_model.clone()).to_string());
     let host = match build_in_process_host_with_model(
         spec,
         api_key,
@@ -815,7 +854,9 @@ async fn perform_model_change(
     {
         Ok(h) => h,
         Err(e) => {
-            app.push_note(format!("Model switch failed: {e:#}"));
+            app.push_note(
+                rust_i18n::t!("notes.model-switch-failed", err = format!("{e:#}")).to_string(),
+            );
             return;
         }
     };
@@ -834,7 +875,7 @@ async fn perform_model_change(
     app.live_text.clear();
     app.update_metrics();
     app.model = new_model;
-    app.push_note(format!("Model is now {}.", app.model));
+    app.push_note(rust_i18n::t!("notes.model-is-now", model = app.model.clone()).to_string());
 }
 
 /// `/sandbox` (no args) shows current status.
@@ -859,17 +900,23 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
             cfg.mode = new_mode;
             match cfg.save().await {
                 Ok(()) => {
-                    app.push_note(format!(
-                        "Sandbox {}: will take effect after the next /connect.",
-                        if new_mode == SandboxMode::On {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        }
-                    ));
+                    app.push_note(
+                        rust_i18n::t!(
+                            "notes.sandbox-enabled",
+                            state = if new_mode == SandboxMode::On {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        )
+                        .to_string(),
+                    );
                 }
                 Err(e) => {
-                    app.push_note(format!("Could not save sandbox config: {e}"));
+                    app.push_note(
+                        rust_i18n::t!("notes.sandbox-config-save-failed", err = format!("{e:#}"))
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -879,28 +926,34 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
                 None => {
                     // No active host — show what's on disk instead.
                     let cfg = SandboxConfig::load();
-                    app.push_note(format!(
-                        "Sandbox (on-disk, not yet active): enabled={}  allow_net={}  per-tool overrides: {}",
-                        cfg.is_enabled(),
-                        cfg.allow_net,
-                        fmt_overrides(&cfg),
-                    ));
+                    app.push_note(
+                        rust_i18n::t!(
+                            "notes.sandbox-status-on-disk",
+                            enabled = cfg.is_enabled().to_string(),
+                            allow_net = cfg.allow_net.to_string(),
+                            overrides = fmt_overrides(&cfg)
+                        )
+                        .to_string(),
+                    );
                 }
                 Some(host) => {
                     let cfg = host.sandbox_config();
-                    app.push_note(format!(
-                        "Sandbox: enabled={}  allow_net={}  per-tool overrides: {}",
-                        cfg.is_enabled(),
-                        cfg.allow_net,
-                        fmt_overrides(cfg),
-                    ));
+                    app.push_note(
+                        rust_i18n::t!(
+                            "notes.sandbox-status-active",
+                            enabled = cfg.is_enabled().to_string(),
+                            allow_net = cfg.allow_net.to_string(),
+                            overrides = fmt_overrides(cfg)
+                        )
+                        .to_string(),
+                    );
                     if cfg.is_enabled() {
                         #[cfg(target_os = "linux")]
-                        app.push_note("  wrapper: bwrap (Linux)");
+                        app.push_note(rust_i18n::t!("notes.sandbox-wrapper-linux").to_string());
                         #[cfg(target_os = "macos")]
-                        app.push_note("  wrapper: sandbox-exec (macOS)");
+                        app.push_note(rust_i18n::t!("notes.sandbox-wrapper-macos").to_string());
                         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                        app.push_note("  wrapper: none (Windows — deferred)");
+                        app.push_note(rust_i18n::t!("notes.sandbox-wrapper-windows").to_string());
                     }
                     if !cfg.extra_binds.is_empty() {
                         app.push_note(format!(
@@ -916,9 +969,9 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
             }
         }
         other => {
-            app.push_note(format!(
-                "Unknown sandbox subcommand `{other}`. Usage: /sandbox  |  /sandbox on  |  /sandbox off"
-            ));
+            app.push_note(
+                rust_i18n::t!("notes.sandbox-unknown-subcommand", sub = other).to_string(),
+            );
         }
     }
 }
@@ -940,22 +993,16 @@ async fn handle_bash_slash_command(
     let parsed = match parse_bash_command(rest_raw) {
         Ok(p) => p,
         Err(BashCommandError::UnknownFlag { token }) => {
-            app.push_note(format!(
-                "Unknown bash flag `{token}` — only `--net` and `--no-net` are recognised. \
-                 Usage: /bash [--net|--no-net] <command>. \
-                 Example: /bash --net curl https://example.com"
-            ));
+            app.push_note(rust_i18n::t!("notes.bash-flag-unknown", token = token).to_string());
             return;
         }
         Err(_) => {
-            app.push_note(
-                "Usage: /bash [--net|--no-net] <command>. Example: /bash --net curl https://example.com",
-            );
+            app.push_note(rust_i18n::t!("notes.bash-usage").to_string());
             return;
         }
     };
     let Some(host) = current_host(host_slot).await else {
-        app.push_note("Not connected — `/connect` first, then `/bash <command>`.");
+        app.push_note(rust_i18n::t!("notes.not-connected-bash").to_string());
         return;
     };
     // Pre-flight: confirm tool-bash is actually configured. Without this
@@ -965,14 +1012,11 @@ async fn handle_bash_slash_command(
     // surface tool-bash advertises.
     let bash_configured = host.tool_defs().await.iter().any(|t| t.name == "run");
     if !bash_configured {
-        app.push_note(
-            "tool-bash isn't configured — set SAVVAGENT_TOOL_BASH_BIN or run `cargo build` \
-             so the `savvagent-tool-bash` binary is available, then `/connect` again.",
-        );
+        app.push_note(rust_i18n::t!("notes.bash-not-configured").to_string());
         return;
     }
     if app.is_loading {
-        app.push_note("Cannot /bash during an in-flight turn — wait for it to finish.");
+        app.push_note(rust_i18n::t!("notes.cannot-bash-during-turn").to_string());
         return;
     }
 
@@ -1073,17 +1117,22 @@ async fn perform_connect(
 ) {
     if spec.api_key_required {
         if let Err(e) = creds::save(spec.id, &api_key) {
-            app.push_note(format!("Could not store key in OS keyring: {e}"));
+            app.push_note(
+                rust_i18n::t!("notes.keyring-store-failed", err = format!("{e:#}")).to_string(),
+            );
             return;
         }
     }
 
-    app.push_note(format!("Connecting to {}…", spec.display_name));
+    app.push_note(rust_i18n::t!("notes.connecting-to", name = spec.display_name).to_string());
 
     let host = match build_in_process_host(spec, &api_key, project_root, tool_bins).await {
         Ok(h) => h,
         Err(e) => {
-            app.push_note(format!("Connect to {} failed: {e:#}", spec.id));
+            app.push_note(
+                rust_i18n::t!("notes.connect-failed", id = spec.id, err = format!("{e:#}"))
+                    .to_string(),
+            );
             return;
         }
     };
@@ -1116,7 +1165,7 @@ async fn perform_connect(
     if let Some(host) = current_host(host_slot).await {
         app.refresh_splash_sandbox_from_host(host.sandbox_config());
     }
-    app.push_note(format!("Connected to {}.", spec.display_name));
+    app.push_note(rust_i18n::t!("notes.connected-to", name = spec.display_name).to_string());
 
     // Notify hook subscribers about the new provider + active
     // connection. The `/connect <provider>` slash path emits
@@ -1603,7 +1652,9 @@ async fn run_app(
                                 continue;
                             }
                             let Some(host) = current_host(&host_slot).await else {
-                                app.push_note("Not connected. Use /connect first.");
+                                app.push_note(
+                                    rust_i18n::t!("notes.not-connected-connect-first").to_string(),
+                                );
                                 app.input_textarea = TextArea::default();
                                 continue;
                             };
@@ -1719,10 +1770,13 @@ async fn run_app(
                             match creds::load(spec.id) {
                                 Ok(Some(key)) => {
                                     app.input_mode = InputMode::Editing;
-                                    app.push_note(format!(
-                                        "Using stored key for {}.",
-                                        spec.display_name
-                                    ));
+                                    app.push_note(
+                                        rust_i18n::t!(
+                                            "notes.using-stored-key",
+                                            name = spec.display_name
+                                        )
+                                        .to_string(),
+                                    );
                                     perform_connect(
                                         spec,
                                         key,
@@ -1735,7 +1789,13 @@ async fn run_app(
                                 }
                                 Ok(None) => app.enter_api_key_for(idx),
                                 Err(e) => {
-                                    app.push_note(format!("Keyring error: {e}"));
+                                    app.push_note(
+                                        rust_i18n::t!(
+                                            "notes.keyring-error",
+                                            err = format!("{e:#}")
+                                        )
+                                        .to_string(),
+                                    );
                                     app.enter_api_key_for(idx);
                                 }
                             }
@@ -1754,7 +1814,7 @@ async fn run_app(
                         perform_connect(spec, key, &host_slot, &project_root, &tool_bins, app)
                             .await;
                     } else {
-                        app.push_note("API key cannot be empty.");
+                        app.push_note(rust_i18n::t!("notes.api-key-empty").to_string());
                     }
                 }
                 _ => {
@@ -1837,14 +1897,20 @@ async fn run_app(
                     }
                     app.input_mode = InputMode::Editing;
                     let label = match choice {
-                        BashNetworkChoice::Once => "bash net: allowed once",
-                        BashNetworkChoice::AlwaysThisSession => {
-                            "bash net: always allowed (this session)"
+                        BashNetworkChoice::Once => {
+                            rust_i18n::t!("bash.net-allowed-once").to_string()
                         }
-                        BashNetworkChoice::DenyOnce => "bash net: denied once",
-                        BashNetworkChoice::DenyAlways => "bash net: never (this session)",
+                        BashNetworkChoice::AlwaysThisSession => {
+                            rust_i18n::t!("bash.net-always-allowed").to_string()
+                        }
+                        BashNetworkChoice::DenyOnce => {
+                            rust_i18n::t!("bash.net-denied-once").to_string()
+                        }
+                        BashNetworkChoice::DenyAlways => {
+                            rust_i18n::t!("bash.net-never").to_string()
+                        }
                         BashNetworkChoice::Cancelled => {
-                            "bash net: cancelled (via Esc — defaulted to deny)"
+                            rust_i18n::t!("bash.net-cancelled").to_string()
                         }
                     };
                     app.push_note(label);
@@ -1866,7 +1932,7 @@ async fn run_app(
                         app.close_transcript_picker();
                         if app.is_loading {
                             app.push_note(
-                                "Cannot /resume during an in-flight turn — wait for it to finish.",
+                                rust_i18n::t!("notes.cannot-resume-during-turn").to_string(),
                             );
                         } else {
                             do_resume_from_path(app, &host_slot, &path).await;
@@ -1911,16 +1977,17 @@ async fn dispatch_bound_action(app: &mut App, action: savvagent_plugin::BoundAct
                 Ok(effs) => {
                     if let Err(e) = crate::plugin::effects::apply_effects(app, effs).await {
                         tracing::warn!(error = %e, command = %name, "apply_effects after slash dispatch failed");
-                        app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                            "Command failed: {e}"
-                        )));
+                        app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                            rust_i18n::t!("notes.command-failed", err = format!("{e:#}"))
+                                .to_string(),
+                        ));
                     }
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, command = %name, "slash dispatch failed");
-                    app.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
-                        "Command failed: {e}"
-                    )));
+                    app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                        rust_i18n::t!("notes.command-failed", err = format!("{e:#}")).to_string(),
+                    ));
                 }
             }
         }
@@ -1972,10 +2039,10 @@ async fn resolve_pending_permission(
     app.input_mode = InputMode::Editing;
 
     let label = match (decision, persist) {
-        (PermissionDecision::Allow, false) => "allowed once",
-        (PermissionDecision::Allow, true) => "always allowed (this session)",
-        (PermissionDecision::Deny, false) => "denied",
-        (PermissionDecision::Deny, true) => "always denied (this session)",
+        (PermissionDecision::Allow, false) => rust_i18n::t!("permission.allowed-once").to_string(),
+        (PermissionDecision::Allow, true) => rust_i18n::t!("permission.always-allowed").to_string(),
+        (PermissionDecision::Deny, false) => rust_i18n::t!("permission.denied").to_string(),
+        (PermissionDecision::Deny, true) => rust_i18n::t!("permission.always-denied").to_string(),
     };
     app.push_note(format!("{}: {label}", req.name));
 }
