@@ -26,13 +26,13 @@ const USER_AGENT: &str = concat!("savvagent-rs/", env!("CARGO_PKG_VERSION"), " (
 
 /// The plugin's view of "is there a newer release?". Stored in plugin
 /// state and read by [`crate::plugin::builtin::self_update::SelfUpdatePlugin`]'s
-/// `render_slot` (added in PR 3) and `handle_slash` (added in PR 4).
+/// `render_slot` and `handle_slash`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateState {
     /// Initial state before the `HostStarting` task has produced a result.
     Unknown,
     /// The plugin is short-circuited and will not check or apply updates.
-    /// Set for dev builds (and, from PR 3, when opt-out flags are set).
+    /// Set for dev builds and when opt-out flags are set.
     Disabled,
     /// The running binary matches or exceeds the latest release.
     UpToDate,
@@ -45,8 +45,17 @@ pub enum UpdateState {
         /// `v` stripped).
         latest: Version,
     },
+    /// `/update` succeeded; the on-disk binary is now `to` but the
+    /// running process is still `from`. The banner row reflects this so
+    /// the user is prompted to restart.
+    Updated {
+        /// Version the running process was when `/update` started.
+        from: Version,
+        /// Version of the newly-installed on-disk binary.
+        to: Version,
+    },
     /// Network / parse / IO error during the check. Logged at `debug` only;
-    /// no UI surface in PR 3.
+    /// no UI surface.
     CheckFailed,
 }
 

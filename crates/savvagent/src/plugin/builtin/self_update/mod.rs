@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
-    PluginKind, Region, SlotSpec, StyledLine, StyledSpan, TextMods, ThemeColor,
+    PluginKind, Region, SlashSpec, SlotSpec, StyledLine, StyledSpan, TextMods, ThemeColor,
 };
 
 /// Install-method detection (pure helper + [`std::env::current_exe`]
@@ -28,6 +28,11 @@ pub mod install_method;
 /// read.
 pub mod check;
 
+/// `/update` apply path: the [`BinarySwapper`] trait and its
+/// `self_update`-backed production impl.
+pub mod apply;
+
+pub use apply::{BinarySwapper, SelfUpdateBinarySwapper, apply_update};
 pub use check::{GithubReleasesFetcher, ReleasesFetcher, UpdateState, check_for_update};
 pub use install_method::{InstallMethod, detect};
 
@@ -67,6 +72,22 @@ fn opt_out_active() -> bool {
     opt_out_from(|k| std::env::var(k).ok(), std::env::args())
 }
 
+/// Build a `PushNote` effect carrying a plain (un-styled) text line.
+/// Centralised so each call site doesn't repeat the `StyledSpan`
+/// scaffolding.
+fn note_effect(text: String) -> Effect {
+    Effect::PushNote {
+        line: StyledLine {
+            spans: vec![StyledSpan {
+                text,
+                fg: None,
+                bg: None,
+                modifiers: TextMods::default(),
+            }],
+        },
+    }
+}
+
 /// TUI self-update plugin.
 ///
 /// Holds the install-method classification (captured once at construction)
@@ -78,31 +99,43 @@ pub struct SelfUpdatePlugin {
     /// Cached install-method classification. Captured at construction
     /// because `current_exe()` is stable for the process lifetime.
     install_method: InstallMethod,
-    /// Shared state mutated by the spawned `HostStarting` task and read
-    /// by `render_slot` (PR 3) / `handle_slash` (PR 4). `std::sync::Mutex`
-    /// suffices — writes happen once per launch; reads happen on the
-    /// render hot path but only under `try_lock` (PR 3 wiring).
+    /// Shared state mutated by the spawned `HostStarting` task and the
+    /// `/update` slash handler; read by `render_slot` via `try_lock`.
     state: Arc<Mutex<UpdateState>>,
     /// Fetcher used by the spawned check task. The default constructor
     /// installs [`GithubReleasesFetcher`]; tests inject a stub via
     /// [`SelfUpdatePlugin::with_fetcher`].
     fetcher: Arc<dyn ReleasesFetcher>,
+    /// Binary swapper used by `/update`. Defaults to
+    /// [`SelfUpdateBinarySwapper`]; tests substitute a stub.
+    swapper: Arc<dyn BinarySwapper>,
 }
 
 impl SelfUpdatePlugin {
     /// Construct a new [`SelfUpdatePlugin`] backed by the production
-    /// [`GithubReleasesFetcher`].
+    /// [`GithubReleasesFetcher`] and [`SelfUpdateBinarySwapper`].
     pub fn new() -> Self {
-        Self::with_fetcher(Arc::new(GithubReleasesFetcher))
+        Self::with_fetcher_and_swapper(
+            Arc::new(GithubReleasesFetcher),
+            Arc::new(SelfUpdateBinarySwapper),
+        )
     }
 
-    /// Construct a [`SelfUpdatePlugin`] with a custom [`ReleasesFetcher`].
-    /// Used by tests to inject a stub that returns canned tag values
-    /// without touching the network. Honors the `SAVVAGENT_NO_UPDATE_CHECK`
-    /// env var and `--no-update-check` CLI flag — when either is set the
-    /// plugin starts in [`UpdateState::Disabled`] and `on_event` is a
-    /// no-op.
+    /// Construct a [`SelfUpdatePlugin`] with a custom fetcher; production
+    /// swapper. Tests that don't exercise `/update` use this.
+    #[cfg(test)]
     pub fn with_fetcher(fetcher: Arc<dyn ReleasesFetcher>) -> Self {
+        Self::with_fetcher_and_swapper(fetcher, Arc::new(SelfUpdateBinarySwapper))
+    }
+
+    /// Construct a [`SelfUpdatePlugin`] with custom fetcher AND swapper.
+    /// Honors the `SAVVAGENT_NO_UPDATE_CHECK` env var and
+    /// `--no-update-check` CLI flag — when either is set the plugin
+    /// starts in [`UpdateState::Disabled`] and `on_event` is a no-op.
+    pub fn with_fetcher_and_swapper(
+        fetcher: Arc<dyn ReleasesFetcher>,
+        swapper: Arc<dyn BinarySwapper>,
+    ) -> Self {
         let initial = if opt_out_active() {
             UpdateState::Disabled
         } else {
@@ -112,6 +145,7 @@ impl SelfUpdatePlugin {
             install_method: detect(),
             state: Arc::new(Mutex::new(initial)),
             fetcher,
+            swapper,
         }
     }
 
@@ -145,6 +179,11 @@ impl Plugin for SelfUpdatePlugin {
             slot_id: BANNER_SLOT_ID.into(),
             priority: 100,
         }];
+        contributions.slash_commands = vec![SlashSpec {
+            name: "update".into(),
+            summary: rust_i18n::t!("self-update.slash-summary").to_string(),
+            args_hint: None,
+        }];
 
         Manifest {
             id: PluginId::new("internal:self-update").expect("valid built-in id"),
@@ -153,6 +192,64 @@ impl Plugin for SelfUpdatePlugin {
             description: rust_i18n::t!("plugin.self-update-description").to_string(),
             kind: PluginKind::Core,
             contributions,
+        }
+    }
+
+    async fn handle_slash(
+        &mut self,
+        name: &str,
+        _args: Vec<String>,
+    ) -> Result<Vec<Effect>, PluginError> {
+        if name != "update" {
+            return Ok(vec![]);
+        }
+
+        // Decide what to do based on the current state — and clone the
+        // versions out so we can release the lock before the (potentially
+        // long-running) async swap call.
+        let action = {
+            let guard = self.state.lock().unwrap();
+            match &*guard {
+                UpdateState::Available { current, latest } => {
+                    Action::Apply(current.clone(), latest.clone())
+                }
+                UpdateState::Disabled => {
+                    Action::Note(rust_i18n::t!("self-update.note-disabled").to_string())
+                }
+                UpdateState::Updated { to, .. } => Action::Note(
+                    rust_i18n::t!("self-update.note-update-ok", latest = to.to_string())
+                        .to_string(),
+                ),
+                UpdateState::Unknown | UpdateState::UpToDate | UpdateState::CheckFailed => {
+                    Action::Note(rust_i18n::t!("self-update.note-no-update").to_string())
+                }
+            }
+        };
+
+        match action {
+            Action::Note(text) => Ok(vec![note_effect(text)]),
+            Action::Apply(current, latest) => {
+                let starting_note =
+                    rust_i18n::t!("self-update.note-updating", latest = latest.to_string())
+                        .to_string();
+                match apply_update(self.swapper.as_ref(), current, latest.clone()).await {
+                    Ok(new_state) => {
+                        *self.state.lock().unwrap() = new_state;
+                        let ok_note = rust_i18n::t!(
+                            "self-update.note-update-ok",
+                            latest = latest.to_string()
+                        )
+                        .to_string();
+                        Ok(vec![note_effect(starting_note), note_effect(ok_note)])
+                    }
+                    Err(e) => {
+                        let fail_note =
+                            rust_i18n::t!("self-update.note-update-fail", err = e.to_string())
+                                .to_string();
+                        Ok(vec![note_effect(starting_note), note_effect(fail_note)])
+                    }
+                }
+            }
         }
     }
 
@@ -195,15 +292,18 @@ impl Plugin for SelfUpdatePlugin {
         let Ok(guard) = self.state.try_lock() else {
             return vec![];
         };
-        let UpdateState::Available { current, latest } = &*guard else {
-            return vec![];
+        let text = match &*guard {
+            UpdateState::Available { current, latest } => rust_i18n::t!(
+                "self-update.banner-available",
+                current = current.to_string(),
+                latest = latest.to_string()
+            )
+            .to_string(),
+            UpdateState::Updated { to, .. } => {
+                rust_i18n::t!("self-update.banner-updated", latest = to.to_string()).to_string()
+            }
+            _ => return vec![],
         };
-        let text = rust_i18n::t!(
-            "self-update.banner-available",
-            current = current.to_string(),
-            latest = latest.to_string()
-        )
-        .to_string();
         vec![StyledLine {
             spans: vec![StyledSpan {
                 text,
@@ -213,6 +313,13 @@ impl Plugin for SelfUpdatePlugin {
             }],
         }]
     }
+}
+
+/// Internal helper enum: lets `handle_slash` resolve the state-dependent
+/// action under the lock and execute it after the lock is dropped.
+enum Action {
+    Note(String),
+    Apply(semver::Version, semver::Version),
 }
 
 #[cfg(test)]
@@ -242,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_subscribes_to_host_starting_and_contributes_banner_slot() {
+    fn manifest_subscribes_to_host_starting_contributes_slot_and_slash() {
         let _lock = HOME_LOCK.lock().unwrap();
         rust_i18n::set_locale("en");
 
@@ -252,8 +359,8 @@ mod tests {
         assert_eq!(m.contributions.hooks, vec![HookKind::HostStarting]);
         assert_eq!(m.contributions.slots.len(), 1);
         assert_eq!(m.contributions.slots[0].slot_id, BANNER_SLOT_ID);
-        // Slash arrives in PR 4.
-        assert!(m.contributions.slash_commands.is_empty());
+        assert_eq!(m.contributions.slash_commands.len(), 1);
+        assert_eq!(m.contributions.slash_commands[0].name, "update");
     }
 
     #[test]
@@ -382,6 +489,189 @@ mod tests {
         };
         let lines = p.render_slot("home.tips", dummy_region());
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn render_slot_renders_updated_banner_when_state_is_updated() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+
+        let p = SelfUpdatePlugin::with_fetcher(Arc::new(FixedFetcher("v99.99.99")));
+        *p.state.lock().unwrap() = UpdateState::Updated {
+            from: Version::parse("0.10.0").unwrap(),
+            to: Version::parse("0.11.0").unwrap(),
+        };
+        let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
+        assert_eq!(lines.len(), 1);
+        let text = &lines[0].spans[0].text;
+        assert!(
+            text.contains("0.11.0"),
+            "expected 'to' version in banner: {text}"
+        );
+        assert!(
+            text.to_lowercase().contains("restart"),
+            "expected restart hint in banner: {text}"
+        );
+    }
+
+    // --- /update handle_slash ---
+
+    /// In-test binary swapper: records the call and returns the
+    /// configured outcome.
+    struct StubSwapper {
+        result: Mutex<Result<(), String>>,
+        invoked: Mutex<bool>,
+    }
+
+    impl StubSwapper {
+        fn ok() -> Self {
+            Self {
+                result: Mutex::new(Ok(())),
+                invoked: Mutex::new(false),
+            }
+        }
+        fn err(msg: &str) -> Self {
+            Self {
+                result: Mutex::new(Err(msg.into())),
+                invoked: Mutex::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BinarySwapper for StubSwapper {
+        async fn swap(&self, _: &Version, _: &Version) -> anyhow::Result<()> {
+            *self.invoked.lock().unwrap() = true;
+            match &*self.result.lock().unwrap() {
+                Ok(()) => Ok(()),
+                Err(msg) => Err(anyhow::anyhow!(msg.clone())),
+            }
+        }
+    }
+
+    fn make_plugin_in_available_state(
+        swapper: Arc<StubSwapper>,
+    ) -> (SelfUpdatePlugin, Arc<StubSwapper>) {
+        let plugin = SelfUpdatePlugin::with_fetcher_and_swapper(
+            Arc::new(FixedFetcher("v0.11.0")),
+            swapper.clone(),
+        );
+        *plugin.state.lock().unwrap() = UpdateState::Available {
+            current: Version::parse("0.10.0").unwrap(),
+            latest: Version::parse("0.11.0").unwrap(),
+        };
+        (plugin, swapper)
+    }
+
+    use std::sync::Mutex;
+
+    /// Acquire HOME_LOCK only long enough to set the locale + build the
+    /// plugin, then drop the guard before any `.await` (clippy's
+    /// `await_holding_lock` is a hard error in this crate). Locale flips
+    /// during the subsequent await window do not affect these tests
+    /// because the assertions check structural properties (effect
+    /// counts, state transitions, error-message passthrough) rather
+    /// than locale-specific text.
+    fn locked_make_available_plugin(swapper: Arc<StubSwapper>) -> SelfUpdatePlugin {
+        let _lock = HOME_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let (plugin, _) = make_plugin_in_available_state(swapper);
+        plugin
+    }
+
+    #[tokio::test]
+    async fn slash_update_when_available_calls_swapper_and_transitions_state() {
+        let swapper = Arc::new(StubSwapper::ok());
+        let mut plugin = locked_make_available_plugin(swapper.clone());
+
+        let effects = plugin.handle_slash("update", vec![]).await.unwrap();
+
+        assert!(
+            *swapper.invoked.lock().unwrap(),
+            "swapper.swap() must be called"
+        );
+        // Two notes pushed: starting + success.
+        assert_eq!(effects.len(), 2);
+        assert!(matches!(effects[0], Effect::PushNote { .. }));
+        assert!(matches!(effects[1], Effect::PushNote { .. }));
+
+        // State transitioned to Updated.
+        match plugin.state() {
+            UpdateState::Updated { from, to } => {
+                assert_eq!(from.to_string(), "0.10.0");
+                assert_eq!(to.to_string(), "0.11.0");
+            }
+            other => panic!("expected Updated state, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_update_when_swap_fails_keeps_state_in_available() {
+        let swapper = Arc::new(StubSwapper::err("disk full"));
+        let mut plugin = locked_make_available_plugin(swapper);
+
+        let effects = plugin.handle_slash("update", vec![]).await.unwrap();
+
+        // Two notes: starting + failure (with err text passthrough — the
+        // err substring is not localized, it's the source error message).
+        assert_eq!(effects.len(), 2);
+        if let Effect::PushNote { line } = &effects[1] {
+            assert!(
+                line.spans[0].text.contains("disk full"),
+                "fail note must include error: {}",
+                line.spans[0].text
+            );
+        } else {
+            panic!("expected PushNote effect");
+        }
+
+        // State stays Available so the user can retry.
+        assert!(matches!(plugin.state(), UpdateState::Available { .. }));
+    }
+
+    #[tokio::test]
+    async fn slash_update_when_no_update_returns_no_update_note() {
+        let mut plugin = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            let p = SelfUpdatePlugin::with_fetcher_and_swapper(
+                Arc::new(FixedFetcher("v0.10.0")),
+                Arc::new(StubSwapper::ok()),
+            );
+            *p.state.lock().unwrap() = UpdateState::UpToDate;
+            p
+        };
+
+        let effects = plugin.handle_slash("update", vec![]).await.unwrap();
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(effects[0], Effect::PushNote { .. }));
+    }
+
+    #[tokio::test]
+    async fn slash_update_when_disabled_returns_disabled_note() {
+        let mut plugin = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            let p = SelfUpdatePlugin::with_fetcher_and_swapper(
+                Arc::new(FixedFetcher("v99.99.99")),
+                Arc::new(StubSwapper::ok()),
+            );
+            *p.state.lock().unwrap() = UpdateState::Disabled;
+            p
+        };
+
+        let effects = plugin.handle_slash("update", vec![]).await.unwrap();
+        assert_eq!(effects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn slash_ignores_other_commands() {
+        let mut plugin = SelfUpdatePlugin::with_fetcher_and_swapper(
+            Arc::new(FixedFetcher("v0.11.0")),
+            Arc::new(StubSwapper::ok()),
+        );
+        let effects = plugin.handle_slash("not-update", vec![]).await.unwrap();
+        assert!(effects.is_empty());
     }
 
     #[tokio::test]

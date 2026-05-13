@@ -69,6 +69,7 @@ ratatui-explorer.workspace = true
 ratatui-code-editor.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
+self_update.workspace = true
 semver.workspace = true
 
 [dev-dependencies]
