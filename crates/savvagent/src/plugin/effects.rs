@@ -587,7 +587,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn fresh_app() -> crate::app::App {
-        crate::app::App::new("test-model".into(), PathBuf::from("/tmp"))
+        crate::app::App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
     }
 
     /// RunSlash at depth >= MAX_DISPATCH_DEPTH must return a depth-limit error

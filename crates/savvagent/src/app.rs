@@ -292,6 +292,13 @@ pub struct App {
     /// persisted (when `persist = true`) by `apply_effects`.
     pub active_theme: crate::plugin::builtin::themes::catalog::Theme,
 
+    /// Currently-active locale code (e.g. `"en"`). Loaded at startup
+    /// from `~/.savvagent/language.toml` (or env detection); mutated by
+    /// `apply_effects` on `Effect::SetActiveLocale`.
+    // Consumed by apply_effects (Task 17) and detect_initial wiring (Task 18).
+    #[allow(dead_code)]
+    pub active_language: String,
+
     /// Cached classification of the sandbox state for the startup splash.
     /// Loaded once at `App::new` via `SandboxConfig::load_with_status` so
     /// the splash render path doesn't re-read disk on every frame; refreshed
@@ -325,7 +332,7 @@ impl App {
     /// Build TUI state. The host runs out-of-band; the app only carries the
     /// model name (for the header), the directory transcripts get written
     /// into, and the conversation log it builds from streaming events.
-    pub fn new(model: String, transcript_dir: PathBuf) -> Self {
+    pub fn new(model: String, transcript_dir: PathBuf, initial_language: String) -> Self {
         let theme = Theme::default()
             .add_default_title()
             .with_block(
@@ -378,6 +385,7 @@ impl App {
             transcript_index: 0,
             resumed_at: None,
             active_theme: crate::plugin::builtin::themes::catalog::load(),
+            active_language: initial_language,
             splash_sandbox: {
                 let (cfg, status) = SandboxConfig::load_with_status();
                 crate::splash::SandboxSplashState::from_load(&cfg, &status)
@@ -1007,6 +1015,23 @@ impl App {
         }
     }
 
+    /// Set the active locale by code. Unknown codes are surfaced as a
+    /// styled note; the in-memory selection (and the `rust_i18n` global)
+    /// are left unchanged. Called from `apply_effects` on
+    /// `Effect::SetActiveLocale`.
+    // Invoked by apply_effects in Task 17; allow until then.
+    #[allow(dead_code)]
+    pub fn set_active_language(&mut self, code: String) {
+        if crate::plugin::builtin::language::catalog::is_supported(&code) {
+            rust_i18n::set_locale(&code);
+            self.active_language = code;
+        } else {
+            self.push_styled_note(savvagent_plugin::StyledLine::plain(format!(
+                "language `{code}` not supported — run `/language` to pick one."
+            )));
+        }
+    }
+
     /// Persist the active theme to `~/.savvagent/theme.toml`. Errors
     /// surface as a styled note; the in-memory selection is kept either
     /// way so the session-scoped UX is consistent.
@@ -1261,7 +1286,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn fresh_app() -> App {
-        App::new("test-model".into(), PathBuf::from("/tmp"))
+        App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
     }
 
     #[test]
@@ -1472,5 +1497,40 @@ mod tests {
             InputMode::BashNetworkPrompt { .. } => "BashNetworkPrompt",
             InputMode::SelectingTranscript => "SelectingTranscript",
         }
+    }
+
+    fn collect_app_notes(app: &App) -> Vec<String> {
+        app.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn set_active_language_known_code_updates_rust_i18n() {
+        let mut app = fresh_app();
+        app.set_active_language("es".to_string());
+        assert_eq!(app.active_language, "es");
+        assert_eq!(&*rust_i18n::locale(), "es");
+    }
+
+    #[test]
+    fn set_active_language_unknown_code_pushes_note_and_does_not_mutate() {
+        let mut app = fresh_app();
+        let before = app.active_language.clone();
+        app.set_active_language("xx".to_string());
+        assert_eq!(
+            app.active_language, before,
+            "unknown code must not mutate active_language"
+        );
+        let notes = collect_app_notes(&app);
+        assert!(
+            notes.last().map(|n| n.contains("xx")).unwrap_or(false),
+            "notes: {:?}",
+            notes
+        );
     }
 }

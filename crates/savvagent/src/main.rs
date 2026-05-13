@@ -135,7 +135,8 @@ async fn main() -> Result<()> {
         original_hook(info);
     }));
 
-    let mut app = App::new(header_model, transcript_dir);
+    // TODO: Task 18 wires detect_initial() here to read ~/.savvagent/language.toml.
+    let mut app = App::new(header_model, transcript_dir, "en".to_string());
 
     {
         use crate::plugin::manifests::Indexes;
