@@ -3,10 +3,10 @@
 //! Mirrors `crates/savvagent/src/plugin/builtin/themes/catalog.rs`.
 //! Persistence and env detection land in later tasks.
 
-// Temporary while PR 2 lands the catalog standalone. PR 3 wires the
-// internal:language plugin to consume LANGUAGES + supported() + lookup()
-// + load()/save()/detect_initial() from non-test code, at which point
-// this attribute should be removed.
+// Temporary: LANGUAGES + supported() + lookup() are now consumed by the
+// LanguagePlugin (PR 3), but load()/save()/detect_initial(),
+// LanguageConfig, and is_supported() remain test-only until PR 4 wires
+// them into App. Remove this attribute once PR 4 lands.
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
