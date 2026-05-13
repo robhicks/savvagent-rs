@@ -5,3 +5,4 @@
 //! adapter in `screen.rs` (PR 3), Plugin impl in this file (PR 3).
 
 pub mod catalog;
+pub mod picker;
