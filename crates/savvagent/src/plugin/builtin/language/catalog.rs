@@ -3,6 +3,9 @@
 //! Mirrors `crates/savvagent/src/plugin/builtin/themes/catalog.rs`.
 //! Persistence and env detection land in later tasks.
 
+use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+
 /// Shipped language entry. Static; the catalog is a const slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Language {
@@ -56,9 +59,73 @@ fn normalize_env_locale(raw: &str) -> Option<String> {
     Some(head.to_ascii_lowercase())
 }
 
+/// On-disk shape of `~/.savvagent/language.toml`. Single key.
+#[derive(Debug, Serialize, Deserialize)]
+struct LanguageConfig {
+    language: String,
+}
+
+/// Compute `~/.savvagent/language.toml`. Returns `None` if `$HOME` is
+/// unset or empty (matches the convention in
+/// `themes::catalog::config_path` and `sandbox.rs::sandbox_toml_path`).
+pub(crate) fn config_path() -> Option<PathBuf> {
+    let raw = std::env::var("HOME").ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw).join(".savvagent").join("language.toml"))
+}
+
+/// Load the saved language code from `~/.savvagent/language.toml`.
+///
+/// Returns `None` if the file is missing, fails to parse, or its
+/// `language` field is not in the shipped catalog. Logs a one-line
+/// warning to stderr on parse failure or unsupported value.
+pub fn load() -> Option<String> {
+    let path = config_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    match toml::from_str::<LanguageConfig>(&text) {
+        Ok(cfg) if is_supported(&cfg.language) => Some(cfg.language),
+        Ok(cfg) => {
+            eprintln!(
+                "language.toml at {} contains unsupported language `{}`; falling back to detection.",
+                path.display(),
+                cfg.language
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!(
+                "language.toml at {} failed to parse: {e}; falling back to detection.",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// Persist `code` to `~/.savvagent/language.toml`. Silent no-op if
+/// `$HOME` is unset (matches `themes::catalog::save`).
+pub fn save(code: &str) -> std::io::Result<()> {
+    let Some(path) = config_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let cfg = LanguageConfig { language: code.to_string() };
+    let text = toml::to_string(&cfg).expect("LanguageConfig serialization is infallible");
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::{HomeGuard, HOME_LOCK};
+    use std::io::Write;
 
     #[test]
     fn catalog_includes_all_four_shipped_locales() {
@@ -99,5 +166,42 @@ mod tests {
             let want = expected.map(String::from);
             assert_eq!(got, want, "normalize_env_locale({input:?}) -> {got:?}, expected {want:?}");
         }
+    }
+
+    #[test]
+    fn save_then_load_round_trips() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        save("es").expect("save should succeed");
+        assert_eq!(load(), Some("es".to_string()));
+    }
+
+    #[test]
+    fn load_missing_file_returns_none() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        assert_eq!(load(), None);
+    }
+
+    #[test]
+    fn load_malformed_toml_returns_none() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let path = config_path().expect("HOME set in HomeGuard");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"language =\n").unwrap();
+        assert_eq!(load(), None);
+    }
+
+    #[test]
+    fn load_unsupported_code_in_file_returns_none() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let path = config_path().expect("HOME set in HomeGuard");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"language = \"klingon\"\n").unwrap();
+        assert_eq!(load(), None);
     }
 }
