@@ -90,7 +90,11 @@ impl Plugin for CommandPalettePlugin {
         if id != "palette" {
             return Err(PluginError::ScreenNotFound(id.to_string()));
         }
-        Ok(Box::new(PaletteScreen::new()))
+        // `apply_effects::open_screen` replaces this empty placeholder with a
+        // `PaletteScreen::with_commands(...)` populated from the runtime's
+        // slash index. The empty form here exists only to satisfy the
+        // `Plugin::create_screen` contract (which can't reach into the App).
+        Ok(Box::new(PaletteScreen::empty()))
     }
 
     fn render_slot(&self, slot_id: &str, _region: Region) -> Vec<StyledLine> {

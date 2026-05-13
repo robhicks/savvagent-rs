@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs};
 
 use crate::app::App;
+use crate::plugin::builtin::command_palette::screen::{PaletteCommand, PaletteScreen};
 use crate::plugin::builtin::plugins_manager::screen::{PluginRow, PluginsManagerScreen};
 use crate::plugin::builtin::plugins_manager::{persistence, summarize_contributions};
 use crate::plugin::hooks::HookDispatcher;
@@ -351,10 +352,10 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
     // For screens whose row/data list lives in `App`/the registry rather
     // than in `ScreenArgs`, build the populated screen ourselves and skip
     // the plugin's `create_screen` (which would just allocate an empty
-    // placeholder we'd immediately discard). Today that's only
-    // `plugins.manager`; future screens with the same shape (e.g. a
-    // hooks inspector) should follow the same pattern rather than
-    // smuggling state through ScreenArgs.
+    // placeholder we'd immediately discard). Today that's `plugins.manager`
+    // and `palette`; future screens with the same shape (e.g. a hooks
+    // inspector) should follow the same pattern rather than smuggling
+    // state through ScreenArgs.
     let (screen, layout) = if id == "plugins.manager" {
         let layout = {
             let plugin = handle.lock().await;
@@ -371,6 +372,23 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
         let rows = build_plugins_manager_rows(&reg).await;
         let screen: Box<dyn savvagent_plugin::Screen> =
             Box::new(PluginsManagerScreen::with_rows(rows));
+        (screen, layout)
+    } else if id == "palette" {
+        let layout = {
+            let plugin = handle.lock().await;
+            let manifest = plugin.manifest();
+            manifest
+                .contributions
+                .screens
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| format!("plugin {} doesn't declare screen {id}", pid.as_str()))?
+                .layout
+                .clone()
+        };
+        let commands = build_palette_commands(&reg, &idx).await;
+        let screen: Box<dyn savvagent_plugin::Screen> =
+            Box::new(PaletteScreen::with_commands(commands));
         (screen, layout)
     } else {
         let plugin = handle.lock().await;
@@ -389,6 +407,47 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
 
     app.screen_stack.push(screen, layout);
     Ok(())
+}
+
+/// Build one [`PaletteCommand`] per slash command in the runtime's slash
+/// index. Only enabled plugins' slashes appear (the index is rebuilt on
+/// enable/disable). Sorted alphabetically by name so the palette has a
+/// stable ordering across runs.
+async fn build_palette_commands(
+    reg_handle: &std::sync::Arc<tokio::sync::RwLock<crate::plugin::registry::PluginRegistry>>,
+    idx_handle: &std::sync::Arc<tokio::sync::RwLock<crate::plugin::manifests::Indexes>>,
+) -> Vec<PaletteCommand> {
+    let idx = idx_handle.read().await;
+    let mut entries: Vec<(String, PluginId)> = idx
+        .slash
+        .iter()
+        .map(|(name, pid)| (name.clone(), pid.clone()))
+        .collect();
+    drop(idx);
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let reg = reg_handle.read().await;
+    let mut commands = Vec::with_capacity(entries.len());
+    for (name, pid) in entries {
+        let Some(plugin) = reg.get(&pid) else {
+            continue;
+        };
+        let manifest = plugin.lock().await.manifest();
+        let Some(spec) = manifest
+            .contributions
+            .slash_commands
+            .iter()
+            .find(|s| s.name == name)
+        else {
+            continue;
+        };
+        commands.push(PaletteCommand {
+            name: spec.name.clone(),
+            description: spec.summary.clone(),
+            needs_arg: spec.args_hint.is_some(),
+        });
+    }
+    commands
 }
 
 /// Build one [`PluginRow`] per registered plugin by walking the registry's

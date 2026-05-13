@@ -6,62 +6,70 @@ use savvagent_plugin::{
     TextMods, ThemeColor,
 };
 
-/// Static list of commands shown by default. PR 8's manager screen builds
-/// the same list at open-time from the runtime's slash index for accuracy.
-///
-/// Each tuple is `(name, description, needs_arg)`. Commands flagged
-/// `needs_arg == true` prefill the textarea with `"/cmd "` on Enter
-/// instead of firing immediately — so the user can supply the missing
-/// argument (typically via the `@` file picker) before submitting. Without
-/// this, `/view` and `/edit` would error out on entry with their "usage:"
-/// `PluginError::InvalidArgs`.
-const VISIBLE_COMMANDS: &[(&str, &str, bool)] = &[
-    ("theme", "Switch color theme", false),
-    ("clear", "Clear conversation log", false),
-    ("save", "Save transcript", false),
-    ("model", "Switch active model", false),
-    ("connect", "Pick a provider to connect", false),
-    ("resume", "Resume an earlier transcript", false),
-    ("view", "Open a file in the viewer", true),
-    ("edit", "Open a file in the editor", true),
-    ("plugins", "Open the plugin manager", false),
-    ("splash", "Show the splash screen", false),
-    ("quit", "Quit savvagent", false),
-];
+/// One row in the palette: a slash command name, its summary, and whether
+/// it requires an argument (selecting a `needs_arg == true` row prefills
+/// the textarea with `"/cmd "` instead of dispatching the slash immediately).
+#[derive(Debug, Clone)]
+pub struct PaletteCommand {
+    /// Slash command name without the leading `/`.
+    pub name: String,
+    /// One-line summary from the plugin's `SlashSpec.summary`.
+    pub description: String,
+    /// `true` if the command's `SlashSpec.args_hint` is `Some(_)`.
+    pub needs_arg: bool,
+}
 
 /// Modal screen that lets the user filter and run slash commands by name.
 ///
-/// Maintains a text `filter` and a `cursor` index into the filtered list.
-/// On `Enter`, emits `Effect::Stack([CloseScreen, RunSlash])` so the palette
-/// closes before the target slash command's screen is pushed.
+/// The command list is populated by `apply_effects::open_screen` from the
+/// runtime's [`crate::plugin::manifests::Indexes::slash`] map and each
+/// owning plugin's manifest — so disabled plugins' slashes don't appear,
+/// and new plugins are picked up without touching this file.
+///
+/// On `Enter`:
+/// - `needs_arg == true` rows emit `Stack([CloseScreen, PrefillInput])`
+///   so the user can complete the slash (typically via the `@` file picker).
+/// - Other rows emit `Stack([CloseScreen, RunSlash])`.
 pub struct PaletteScreen {
     filter: String,
     cursor: usize,
+    commands: Vec<PaletteCommand>,
 }
 
 impl PaletteScreen {
-    /// Create a new `PaletteScreen` with an empty filter and cursor at the top.
-    pub fn new() -> Self {
+    /// Empty palette with no rows; only useful before
+    /// `apply_effects::open_screen` replaces it with a populated screen
+    /// via [`Self::with_commands`].
+    pub fn empty() -> Self {
         Self {
             filter: String::new(),
             cursor: 0,
+            commands: Vec::new(),
         }
     }
 
-    fn filtered(&self) -> Vec<(usize, &'static str, &'static str, bool)> {
+    /// Populate the palette with `commands` (already sorted by the caller).
+    pub fn with_commands(commands: Vec<PaletteCommand>) -> Self {
+        Self {
+            filter: String::new(),
+            cursor: 0,
+            commands,
+        }
+    }
+
+    fn filtered(&self) -> Vec<(usize, &PaletteCommand)> {
         let f = self.filter.to_ascii_lowercase();
-        VISIBLE_COMMANDS
+        self.commands
             .iter()
             .enumerate()
-            .filter(|(_, (name, _, _))| name.contains(&f))
-            .map(|(i, (n, d, a))| (i, *n, *d, *a))
+            .filter(|(_, c)| c.name.contains(&f))
             .collect()
     }
 }
 
 impl Default for PaletteScreen {
     fn default() -> Self {
-        Self::new()
+        Self::empty()
     }
 }
 
@@ -76,25 +84,40 @@ impl Screen for PaletteScreen {
             StyledLine::plain(format!("> {}", self.filter)),
             StyledLine::plain(""),
         ];
-        for (i, (_, name, desc, _)) in self.filtered().iter().enumerate() {
-            let marker = if i == self.cursor { "▶ " } else { "  " };
+        if self.commands.is_empty() {
+            lines.push(StyledLine {
+                spans: vec![StyledSpan {
+                    text: "(no commands available)".into(),
+                    fg: Some(ThemeColor::Muted),
+                    bg: None,
+                    modifiers: TextMods::default(),
+                }],
+            });
+            return lines;
+        }
+        for (visual_idx, (_, cmd)) in self.filtered().iter().enumerate() {
+            let marker = if visual_idx == self.cursor {
+                "▶ "
+            } else {
+                "  "
+            };
             lines.push(StyledLine {
                 spans: vec![
                     StyledSpan {
-                        text: format!("{marker}/{name:<12}"),
-                        fg: Some(if i == self.cursor {
+                        text: format!("{marker}/{:<12}", cmd.name),
+                        fg: Some(if visual_idx == self.cursor {
                             ThemeColor::Accent
                         } else {
                             ThemeColor::Fg
                         }),
                         bg: None,
                         modifiers: TextMods {
-                            bold: i == self.cursor,
+                            bold: visual_idx == self.cursor,
                             ..Default::default()
                         },
                     },
                     StyledSpan {
-                        text: desc.to_string(),
+                        text: cmd.description.clone(),
                         fg: Some(ThemeColor::Muted),
                         bg: None,
                         modifiers: TextMods::default(),
@@ -132,11 +155,12 @@ impl Screen for PaletteScreen {
                 Ok(vec![])
             }
             KeyCodePortable::Enter => {
-                let Some((_, name, _, needs_arg)) = self.filtered().get(self.cursor).cloned()
-                else {
+                let filtered = self.filtered();
+                let Some((_, cmd)) = filtered.get(self.cursor).cloned() else {
                     return Ok(vec![Effect::CloseScreen]);
                 };
-                if needs_arg {
+                let name = cmd.name.clone();
+                if cmd.needs_arg {
                     // Don't fire the slash with empty args (which would
                     // error with "usage: /<cmd> <path>"). Instead, close
                     // the palette and seed the textarea so the user can
@@ -151,10 +175,7 @@ impl Screen for PaletteScreen {
                 } else {
                     Ok(vec![Effect::Stack(vec![
                         Effect::CloseScreen,
-                        Effect::RunSlash {
-                            name: name.to_string(),
-                            args: vec![],
-                        },
+                        Effect::RunSlash { name, args: vec![] },
                     ])])
                 }
             }
@@ -181,28 +202,47 @@ mod tests {
         }
     }
 
+    fn cmd(name: &str, needs_arg: bool) -> PaletteCommand {
+        PaletteCommand {
+            name: name.into(),
+            description: format!("{name} description"),
+            needs_arg,
+        }
+    }
+
+    fn fixture() -> PaletteScreen {
+        // Alphabetically sorted — matches apply_effects::open_screen ordering.
+        PaletteScreen::with_commands(vec![
+            cmd("clear", false),
+            cmd("edit", true),
+            cmd("quit", false),
+            cmd("theme", false),
+            cmd("view", true),
+        ])
+    }
+
     #[tokio::test]
     async fn enter_emits_close_then_runslash_for_first_match() {
-        let mut p = PaletteScreen::new();
+        let mut p = fixture();
         let effs = p.on_key(key(KeyCodePortable::Enter)).await.unwrap();
         match effs.first() {
             Some(Effect::Stack(children)) => {
                 assert!(matches!(children[0], Effect::CloseScreen));
                 match &children[1] {
-                    Effect::RunSlash { name, .. } => assert_eq!(name, "theme"),
-                    _ => panic!(),
+                    Effect::RunSlash { name, .. } => assert_eq!(name, "clear"),
+                    other => panic!("expected RunSlash, got {other:?}"),
                 }
             }
-            other => panic!("unexpected: {:?}", other),
+            other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn typing_filters_and_resets_cursor() {
-        let mut p = PaletteScreen::new();
-        p.on_key(key(KeyCodePortable::Char('m'))).await.unwrap();
+        let mut p = fixture();
+        p.on_key(key(KeyCodePortable::Char('e'))).await.unwrap();
         let filtered = p.filtered();
-        assert!(filtered.iter().all(|(_, n, _, _)| n.contains('m')));
+        assert!(filtered.iter().all(|(_, c)| c.name.contains('e')));
         assert_eq!(p.cursor, 0);
     }
 
@@ -212,8 +252,7 @@ mod tests {
     /// test for hotfix bug #1.
     #[tokio::test]
     async fn enter_on_needs_arg_command_emits_prefill_not_runslash() {
-        let mut p = PaletteScreen::new();
-        // Filter down to `view` so the cursor sits on a needs_arg entry.
+        let mut p = fixture();
         for ch in "view".chars() {
             p.on_key(key(KeyCodePortable::Char(ch))).await.unwrap();
         }
@@ -233,11 +272,10 @@ mod tests {
     /// `quit` is reachable from the palette (post-v0.9 regression).
     #[tokio::test]
     async fn quit_is_listed_and_runs_via_runslash() {
-        let mut p = PaletteScreen::new();
+        let mut p = fixture();
         for ch in "quit".chars() {
             p.on_key(key(KeyCodePortable::Char(ch))).await.unwrap();
         }
-        // After typing "quit", at least one entry must match.
         assert!(!p.filtered().is_empty(), "palette should list /quit");
         let effs = p.on_key(key(KeyCodePortable::Enter)).await.unwrap();
         match effs.first() {
@@ -255,9 +293,31 @@ mod tests {
         }
     }
 
+    /// Empty command set renders a placeholder and Enter is a no-op-ish close.
+    #[tokio::test]
+    async fn empty_palette_renders_placeholder_and_enter_closes() {
+        let mut p = PaletteScreen::empty();
+        let lines = p.render(Region {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        });
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect();
+        assert!(
+            joined.contains("(no commands available)"),
+            "empty render should show placeholder, got: {joined}"
+        );
+        let effs = p.on_key(key(KeyCodePortable::Enter)).await.unwrap();
+        assert!(matches!(effs[0], Effect::CloseScreen));
+    }
+
     #[tokio::test]
     async fn esc_closes() {
-        let mut p = PaletteScreen::new();
+        let mut p = fixture();
         let effs = p.on_key(key(KeyCodePortable::Esc)).await.unwrap();
         assert!(matches!(effs[0], Effect::CloseScreen));
     }
