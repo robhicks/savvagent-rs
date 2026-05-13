@@ -61,7 +61,7 @@ impl Screen for PluginsManagerScreen {
             out.push(StyledLine {
                 spans: vec![StyledSpan {
                     text: "  (no plugins registered)".to_string(),
-                    fg: Some(ThemeColor::Yellow),
+                    fg: Some(ThemeColor::Warning),
                     bg: None,
                     modifiers: TextMods::default(),
                 }],
@@ -76,9 +76,9 @@ impl Screen for PluginsManagerScreen {
                 (PluginKind::Optional, false) => "[ off]",
             };
             let color = if i == self.cursor {
-                ThemeColor::Cyan
+                ThemeColor::Accent
             } else {
-                ThemeColor::White
+                ThemeColor::Fg
             };
             // TextMods is not #[non_exhaustive], so FRU is safe here.
             let mods_active = TextMods {
@@ -101,7 +101,7 @@ impl Screen for PluginsManagerScreen {
                     },
                     StyledSpan {
                         text: format!("  {}", row.contribution_summary),
-                        fg: Some(ThemeColor::Gray),
+                        fg: Some(ThemeColor::Muted),
                         bg: None,
                         modifiers: TextMods::default(),
                     },
@@ -134,7 +134,7 @@ impl Screen for PluginsManagerScreen {
                         line: StyledLine {
                             spans: vec![StyledSpan {
                                 text: "Core plugins cannot be disabled.".into(),
-                                fg: Some(ThemeColor::Yellow),
+                                fg: Some(ThemeColor::Warning),
                                 bg: None,
                                 modifiers: TextMods::default(),
                             }],

@@ -25,6 +25,9 @@ pub mod model;
 /// Persists per-user state in `~/.savvagent/plugins.toml`.
 pub mod plugins_manager;
 
+/// Shuts down the TUI; registered as `/quit`. Core plugin (non-disableable).
+pub mod quit;
+
 /// Transcript picker; opened via `/resume` with an in-memory cache backed
 /// by the [`HookKind::TranscriptSaved`] hook.
 pub mod resume;

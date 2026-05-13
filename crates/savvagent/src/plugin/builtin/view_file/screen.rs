@@ -48,7 +48,7 @@ impl Screen for ViewFileScreen {
         let mut out = vec![StyledLine {
             spans: vec![StyledSpan {
                 text: format!("{}  (read-only)", self.path),
-                fg: Some(ThemeColor::Cyan),
+                fg: Some(ThemeColor::Accent),
                 bg: None,
                 modifiers: TextMods {
                     bold: true,

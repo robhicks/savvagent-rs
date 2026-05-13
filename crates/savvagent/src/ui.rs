@@ -104,6 +104,14 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
     let palette = Palette::for_theme(app.active_theme);
 
+    // Inset the home layout from the terminal edges so the chrome has
+    // breathing room. The splash render path above intentionally keeps
+    // the full-bleed outer area.
+    let area = area.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+
     // Paint the active theme's base style across the whole frame so any
     // widget that doesn't set its own bg picks up the theme background.
     frame.buffer_mut().set_style(area, palette.base_style());
@@ -160,7 +168,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         .tips
         .iter()
         .cloned()
-        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
         .collect();
     let tips_para = Paragraph::new(tips_lines).style(palette.base_style());
     frame.render_widget(tips_para, chunks[2]);
@@ -188,7 +196,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         .footer_left
         .iter()
         .cloned()
-        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
         .collect();
     frame.render_widget(
         Paragraph::new(footer_left_lines).style(palette.base_style()),
@@ -199,7 +207,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         .footer_center
         .iter()
         .cloned()
-        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
         .collect();
     frame.render_widget(
         Paragraph::new(footer_center_lines)
@@ -212,7 +220,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         .footer_right
         .iter()
         .cloned()
-        .map(crate::plugin::convert::styled_line_to_ratatui)
+        .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
         .collect();
     frame.render_widget(
         Paragraph::new(footer_right_lines)
@@ -229,7 +237,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
     // Screen-stack: if any screen is on top, paint it over the home chrome.
     if let Some((top_screen, layout)) = app.screen_stack.top() {
-        paint_screen(frame, area, top_screen, layout);
+        paint_screen(frame, area, top_screen, layout, palette);
     }
 
     if matches!(
@@ -605,11 +613,19 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
 /// screen's `render` output fills the inner content area.
 /// For `Fullscreen` and `BottomSheet`, content fills the computed area
 /// directly.
+///
+/// Every layout punches a hole with [`Clear`] and then fills its region
+/// with `palette.base_style()` so the modal sits on a uniform theme
+/// background. Without that step the conversation log behind the modal
+/// would bleed through under any plugin span that only sets `fg` — which
+/// makes upstream themes (Solarized Light, Catppuccin Latte, Tokyo Night
+/// Day, …) look like floating text rather than a popup.
 fn paint_screen(
     f: &mut Frame,
     area: Rect,
     screen: &dyn savvagent_plugin::Screen,
     layout: &savvagent_plugin::ScreenLayout,
+    palette: Palette,
 ) {
     use savvagent_plugin::ScreenLayout;
 
@@ -617,13 +633,14 @@ fn paint_screen(
         ScreenLayout::Fullscreen { .. } => {
             // Full-frame overlay: paint content directly.
             f.render_widget(Clear, area);
+            f.buffer_mut().set_style(area, palette.base_style());
             let region = crate::plugin::convert::rect_to_region(area);
             let lines: Vec<Line<'static>> = screen
                 .render(region)
                 .into_iter()
-                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
                 .collect();
-            let para = Paragraph::new(lines);
+            let para = Paragraph::new(lines).style(palette.base_style());
             f.render_widget(para, area);
 
             // Tips row at the very bottom of the frame.
@@ -632,9 +649,12 @@ fn paint_screen(
                 let tips_row = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
                 let tips_lines: Vec<Line<'static>> = tips
                     .into_iter()
-                    .map(crate::plugin::convert::styled_line_to_ratatui)
+                    .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
                     .collect();
-                f.render_widget(Paragraph::new(tips_lines), tips_row);
+                f.render_widget(
+                    Paragraph::new(tips_lines).style(palette.base_style()),
+                    tips_row,
+                );
             }
         }
         ScreenLayout::CenteredModal {
@@ -653,11 +673,17 @@ fn paint_screen(
             let y = area.y + area.height.saturating_sub(h) / 2;
             let outer = Rect::new(x, y, w, h);
 
+            // Punch a hole over whatever's underneath, then fill the modal's
+            // region with the theme's base style so spans that only set fg
+            // sit on a uniform bg instead of the conversation log behind.
             f.render_widget(Clear, outer);
+            f.buffer_mut().set_style(outer, palette.base_style());
 
             // Border + optional title.
             let block = Block::default()
                 .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.border).bg(palette.bg))
+                .style(palette.base_style())
                 .title(title.as_deref().unwrap_or(""));
 
             // Tips as a bottom title if present.
@@ -679,42 +705,47 @@ fn paint_screen(
             let lines: Vec<Line<'static>> = screen
                 .render(region)
                 .into_iter()
-                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
                 .collect();
-            f.render_widget(Paragraph::new(lines), inner);
+            f.render_widget(Paragraph::new(lines).style(palette.base_style()), inner);
         }
         ScreenLayout::BottomSheet { height } => {
             let h = (*height).min(area.height);
             let sheet = Rect::new(area.x, area.y + area.height - h, area.width, h);
             f.render_widget(Clear, sheet);
+            f.buffer_mut().set_style(sheet, palette.base_style());
             let region = crate::plugin::convert::rect_to_region(sheet);
             let lines: Vec<Line<'static>> = screen
                 .render(region)
                 .into_iter()
-                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
                 .collect();
-            f.render_widget(Paragraph::new(lines), sheet);
+            f.render_widget(Paragraph::new(lines).style(palette.base_style()), sheet);
 
             let tips = screen.tips();
             if !tips.is_empty() && sheet.height > 0 {
                 let tips_row = Rect::new(sheet.x, sheet.y + sheet.height - 1, sheet.width, 1);
                 let tips_lines: Vec<Line<'static>> = tips
                     .into_iter()
-                    .map(crate::plugin::convert::styled_line_to_ratatui)
+                    .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
                     .collect();
-                f.render_widget(Paragraph::new(tips_lines), tips_row);
+                f.render_widget(
+                    Paragraph::new(tips_lines).style(palette.base_style()),
+                    tips_row,
+                );
             }
         }
         // Future layout variants are silently treated as fullscreen.
         _ => {
             f.render_widget(Clear, area);
+            f.buffer_mut().set_style(area, palette.base_style());
             let region = crate::plugin::convert::rect_to_region(area);
             let lines: Vec<Line<'static>> = screen
                 .render(region)
                 .into_iter()
-                .map(crate::plugin::convert::styled_line_to_ratatui)
+                .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
                 .collect();
-            f.render_widget(Paragraph::new(lines), area);
+            f.render_widget(Paragraph::new(lines).style(palette.base_style()), area);
         }
     }
 }

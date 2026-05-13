@@ -39,7 +39,11 @@ impl Plugin for ViewFilePlugin {
         }];
         contributions.screens = vec![ScreenSpec {
             id: "view-file".into(),
-            layout: ScreenLayout::Fullscreen { hide_chrome: false },
+            layout: ScreenLayout::CenteredModal {
+                width_pct: 90,
+                height_pct: 85,
+                title: Some("View file".into()),
+            },
         }];
 
         Manifest {
@@ -61,6 +65,11 @@ impl Plugin for ViewFilePlugin {
             .into_iter()
             .next()
             .ok_or_else(|| PluginError::InvalidArgs("usage: /view <path>".into()))?;
+        // The TUI's `@` file picker inserts paths with a leading `@`
+        // (e.g. `/view @src/main.rs`). Strip it before handing to the
+        // screen so the underlying open() call sees a real filesystem
+        // path. v0.8's legacy `/view` handler stripped `@` the same way.
+        let path = path.strip_prefix('@').unwrap_or(&path).to_string();
         Ok(vec![Effect::OpenScreen {
             id: "view-file".into(),
             args: ScreenArgs::ViewFile { path },
@@ -73,6 +82,50 @@ impl Plugin for ViewFilePlugin {
                 Ok(Box::new(ViewFileScreen::open(path)?))
             }
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the post-v0.9 hotfix: `/view @src/foo.rs`
+    /// produced by the `@` file picker must strip the `@` before reaching
+    /// `ViewFileScreen::open`, which doesn't understand the prefix.
+    #[tokio::test]
+    async fn handle_slash_strips_at_prefix_from_path() {
+        let mut p = ViewFilePlugin::new();
+        let effs = p
+            .handle_slash("view", vec!["@src/foo.rs".into()])
+            .await
+            .expect("handle_slash must succeed");
+        match effs.first() {
+            Some(Effect::OpenScreen {
+                id,
+                args: ScreenArgs::ViewFile { path },
+            }) => {
+                assert_eq!(id, "view-file");
+                assert_eq!(path, "src/foo.rs", "leading '@' must be stripped");
+            }
+            other => panic!("expected OpenScreen::ViewFile, got {other:?}"),
+        }
+    }
+
+    /// Bare paths (no `@`) pass through unchanged.
+    #[tokio::test]
+    async fn handle_slash_leaves_bare_path_alone() {
+        let mut p = ViewFilePlugin::new();
+        let effs = p
+            .handle_slash("view", vec!["src/foo.rs".into()])
+            .await
+            .expect("handle_slash must succeed");
+        match effs.first() {
+            Some(Effect::OpenScreen {
+                args: ScreenArgs::ViewFile { path },
+                ..
+            }) => assert_eq!(path, "src/foo.rs"),
+            other => panic!("expected OpenScreen::ViewFile, got {other:?}"),
         }
     }
 }

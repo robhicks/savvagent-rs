@@ -26,8 +26,20 @@ pub struct StyledSpan {
 /// A terminal color that can be used as a foreground or background.
 ///
 /// Variants cover the 16 ANSI named colors, the 256-color indexed palette,
-/// and direct RGB. The runtime maps these to ratatui `Color` at the boundary.
+/// direct RGB, and a set of *semantic* slots (`Fg`, `Bg`, `Accent`, …)
+/// that the runtime resolves against the active theme's palette.
+///
+/// Prefer the semantic variants in plugin code that wants to look correct
+/// across every theme — they adapt to upstream palettes (Dracula, Nord,
+/// Solarized Light, Catppuccin, …) where literal ANSI colors would either
+/// disappear into the background or clash with it. Literal ANSI variants
+/// (`Cyan`, `Red`, etc.) remain valid for cases where a specific color is
+/// intended regardless of theme.
+///
+/// This enum is `#[non_exhaustive]` so the runtime can add new semantic
+/// slots without breaking exhaustive matches in downstream code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ThemeColor {
     /// Terminal default color (inherits from the current theme).
     Default,
@@ -74,6 +86,30 @@ pub enum ThemeColor {
         /// Blue component (0..=255).
         b: u8,
     },
+
+    // --- Semantic slots ---------------------------------------------------
+    //
+    // Resolved by the runtime against the active theme's palette. Use these
+    // in preference to literal ANSI colors whenever the intent is "match
+    // the theme" rather than "be specifically this color".
+    /// Active theme's primary foreground color.
+    Fg,
+    /// Active theme's primary background color.
+    Bg,
+    /// Active theme's accent color (selected / highlighted / active).
+    Accent,
+    /// Active theme's muted color (descriptions, secondary text).
+    Muted,
+    /// Active theme's error color.
+    Error,
+    /// Active theme's warning color.
+    Warning,
+    /// Active theme's success color.
+    Success,
+    /// Active theme's secondary color.
+    Secondary,
+    /// Active theme's chrome / border color.
+    Border,
 }
 
 /// Plain-bool text attribute flags for WIT portability.

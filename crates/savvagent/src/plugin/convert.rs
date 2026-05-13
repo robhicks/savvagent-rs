@@ -69,7 +69,12 @@ pub fn rect_to_region(r: ratatui::layout::Rect) -> Region {
 }
 
 /// Map a `ThemeColor` to the corresponding `ratatui::style::Color`.
-pub fn theme_color_to_ratatui(c: ThemeColor) -> Color {
+///
+/// Literal ANSI / indexed / RGB variants map 1:1. Semantic variants (`Fg`,
+/// `Bg`, `Accent`, `Muted`, `Error`, `Warning`, `Success`, `Secondary`,
+/// `Border`) resolve against the supplied [`crate::palette::Palette`] so
+/// plugin output adapts to the active theme.
+pub fn theme_color_to_ratatui(c: ThemeColor, palette: &crate::palette::Palette) -> Color {
     match c {
         ThemeColor::Default => Color::Reset,
         ThemeColor::Black => Color::Black,
@@ -90,6 +95,22 @@ pub fn theme_color_to_ratatui(c: ThemeColor) -> Color {
         ThemeColor::Gray => Color::Gray,
         ThemeColor::Indexed(i) => Color::Indexed(i),
         ThemeColor::Rgb { r, g, b } => Color::Rgb(r, g, b),
+
+        // Semantic slots — resolved against the active palette.
+        ThemeColor::Fg => palette.fg,
+        ThemeColor::Bg => palette.bg,
+        ThemeColor::Accent => palette.accent,
+        ThemeColor::Muted => palette.muted,
+        ThemeColor::Error => palette.error,
+        ThemeColor::Warning => palette.warning,
+        ThemeColor::Success => palette.success,
+        ThemeColor::Secondary => palette.secondary,
+        ThemeColor::Border => palette.border,
+
+        // `ThemeColor` is `#[non_exhaustive]`. Future variants added by
+        // `savvagent-plugin` that this runtime has not been taught about
+        // fall back to the theme's default fg so the text remains legible.
+        _ => palette.fg,
     }
 }
 
@@ -114,14 +135,18 @@ pub fn text_mods_to_modifier(m: TextMods) -> Modifier {
     out
 }
 
-/// Convert a `StyledSpan` to a ratatui `Span<'static>`.
-pub fn styled_span_to_ratatui(span: StyledSpan) -> Span<'static> {
+/// Convert a `StyledSpan` to a ratatui `Span<'static>`, resolving any
+/// semantic [`ThemeColor`] variants against the active palette.
+pub fn styled_span_to_ratatui(
+    span: StyledSpan,
+    palette: &crate::palette::Palette,
+) -> Span<'static> {
     let mut style = Style::default();
     if let Some(fg) = span.fg {
-        style = style.fg(theme_color_to_ratatui(fg));
+        style = style.fg(theme_color_to_ratatui(fg, palette));
     }
     if let Some(bg) = span.bg {
-        style = style.bg(theme_color_to_ratatui(bg));
+        style = style.bg(theme_color_to_ratatui(bg, palette));
     }
     let mods = text_mods_to_modifier(span.modifiers);
     if !mods.is_empty() {
@@ -130,12 +155,16 @@ pub fn styled_span_to_ratatui(span: StyledSpan) -> Span<'static> {
     Span::styled(span.text, style)
 }
 
-/// Convert a `StyledLine` to a ratatui `Line<'static>`.
-pub fn styled_line_to_ratatui(line: StyledLine) -> Line<'static> {
+/// Convert a `StyledLine` to a ratatui `Line<'static>`, resolving any
+/// semantic [`ThemeColor`] variants against the active palette.
+pub fn styled_line_to_ratatui(
+    line: StyledLine,
+    palette: &crate::palette::Palette,
+) -> Line<'static> {
     Line::from(
         line.spans
             .into_iter()
-            .map(styled_span_to_ratatui)
+            .map(|s| styled_span_to_ratatui(s, palette))
             .collect::<Vec<_>>(),
     )
 }
@@ -160,7 +189,54 @@ mod tests {
 
     #[test]
     fn theme_color_cyan_maps_correctly() {
-        assert_eq!(theme_color_to_ratatui(ThemeColor::Cyan), Color::Cyan);
+        let palette = crate::palette::Palette::for_theme(
+            crate::plugin::builtin::themes::catalog::Theme::Dark,
+        );
+        assert_eq!(
+            theme_color_to_ratatui(ThemeColor::Cyan, &palette),
+            Color::Cyan
+        );
+    }
+
+    #[test]
+    fn theme_color_semantic_fg_resolves_against_active_palette() {
+        // Dark theme's fg is Color::White.
+        let dark = crate::palette::Palette::for_theme(
+            crate::plugin::builtin::themes::catalog::Theme::Dark,
+        );
+        assert_eq!(
+            theme_color_to_ratatui(ThemeColor::Fg, &dark),
+            Color::White,
+            "Dark theme fg should resolve to White"
+        );
+        // Light theme's fg is Color::Black — confirms the resolution is
+        // palette-driven, not literal.
+        let light = crate::palette::Palette::for_theme(
+            crate::plugin::builtin::themes::catalog::Theme::Light,
+        );
+        assert_eq!(
+            theme_color_to_ratatui(ThemeColor::Fg, &light),
+            Color::Black,
+            "Light theme fg should resolve to Black"
+        );
+    }
+
+    #[test]
+    fn theme_color_semantic_accent_differs_per_theme() {
+        // Dark uses Color::Blue for accent; HighContrast uses Color::Yellow.
+        // If these collapse to the same Color, the semantic resolution is
+        // not threading the palette through.
+        let dark = crate::palette::Palette::for_theme(
+            crate::plugin::builtin::themes::catalog::Theme::Dark,
+        );
+        let hc = crate::palette::Palette::for_theme(
+            crate::plugin::builtin::themes::catalog::Theme::HighContrast,
+        );
+        assert_ne!(
+            theme_color_to_ratatui(ThemeColor::Accent, &dark),
+            theme_color_to_ratatui(ThemeColor::Accent, &hc),
+            "semantic Accent must vary across themes"
+        );
     }
 
     #[test]
@@ -187,7 +263,10 @@ mod tests {
                 modifiers: TextMods::default(),
             }],
         };
-        let rline = styled_line_to_ratatui(line);
+        let palette = crate::palette::Palette::for_theme(
+            crate::plugin::builtin::themes::catalog::Theme::Dark,
+        );
+        let rline = styled_line_to_ratatui(line, &palette);
         assert_eq!(rline.spans.len(), 1);
         assert_eq!(rline.spans[0].content, "hello");
     }

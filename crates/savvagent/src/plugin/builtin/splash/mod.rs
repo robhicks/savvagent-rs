@@ -55,7 +55,7 @@ impl Plugin for SplashPlugin {
             name: "Splash".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             description: "Startup HUD + parse-error screen".into(),
-            kind: PluginKind::Core,
+            kind: PluginKind::Optional,
             contributions,
         }
     }

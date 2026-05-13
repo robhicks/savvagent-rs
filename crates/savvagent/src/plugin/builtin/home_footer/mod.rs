@@ -3,7 +3,8 @@
 //! Contributes to slots `home.footer.center` and `home.footer.right`.
 //! Subscribes to `TurnStart` / `TurnEnd` for the turn-state span (PR 7
 //! wires the host to actually emit those events; until then the plugin
-//! shows the idle state).
+//! shows the idle state) and `ContextSizeChanged` for the `~N ctx`
+//! segment on the right slot.
 
 use async_trait::async_trait;
 use savvagent_plugin::{
@@ -14,11 +15,14 @@ use savvagent_plugin::{
 /// TUI home-screen footer plugin.
 ///
 /// Renders sandbox + turn state in `home.footer.center` and the working
-/// directory + key reminder in `home.footer.right`. Tracks the active turn
-/// by listening to `TurnStart` / `TurnEnd` host events.
+/// directory + context-size + cost + version in `home.footer.right`.
+/// Tracks the active turn by listening to `TurnStart` / `TurnEnd` host
+/// events, and the rough conversation context-size estimate by listening
+/// to `ContextSizeChanged`.
 pub struct HomeFooterPlugin {
     turn_active: Option<u32>,
     working_dir: String,
+    context_tokens: u32,
 }
 
 impl HomeFooterPlugin {
@@ -33,6 +37,7 @@ impl HomeFooterPlugin {
         Self {
             turn_active: None,
             working_dir: wd,
+            context_tokens: 0,
         }
     }
 }
@@ -40,6 +45,23 @@ impl HomeFooterPlugin {
 impl Default for HomeFooterPlugin {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Format the context-size estimate for the footer:
+/// - 0 returns `None` so the segment is omitted entirely
+/// - `< 1000` renders as `~123 ctx`
+/// - `>= 1000` rounds to the nearest thousand and renders as `~12k ctx`
+fn format_context_segment(tokens: u32) -> Option<String> {
+    if tokens == 0 {
+        return None;
+    }
+    if tokens < 1000 {
+        Some(format!("~{tokens} ctx"))
+    } else {
+        // Round-half-up to the nearest thousand.
+        let k = (tokens + 500) / 1000;
+        Some(format!("~{k}k ctx"))
     }
 }
 
@@ -59,13 +81,17 @@ impl Plugin for HomeFooterPlugin {
                 priority: 100,
             },
         ];
-        contributions.hooks = vec![HookKind::TurnStart, HookKind::TurnEnd];
+        contributions.hooks = vec![
+            HookKind::TurnStart,
+            HookKind::TurnEnd,
+            HookKind::ContextSizeChanged,
+        ];
 
         Manifest {
             id: PluginId::new("internal:home-footer").expect("valid built-in id"),
             name: "Home footer".into(),
             version: env!("CARGO_PKG_VERSION").into(),
-            description: "Sandbox + turn state + working dir + key reminder".into(),
+            description: "Sandbox + turn state + working dir + context/cost/version".into(),
             kind: PluginKind::Core,
             contributions,
         }
@@ -81,29 +107,45 @@ impl Plugin for HomeFooterPlugin {
                 vec![StyledLine {
                     spans: vec![StyledSpan {
                         text: turn,
-                        fg: Some(ThemeColor::Cyan),
+                        fg: Some(ThemeColor::Accent),
                         bg: None,
                         modifiers: TextMods::default(),
                     }],
                 }]
             }
             "home.footer.right" => {
-                vec![StyledLine {
-                    spans: vec![
-                        StyledSpan {
-                            text: self.working_dir.clone(),
-                            fg: Some(ThemeColor::Gray),
-                            bg: None,
-                            modifiers: TextMods::default(),
-                        },
-                        StyledSpan {
-                            text: "  ? for help".into(),
-                            fg: Some(ThemeColor::DarkGray),
-                            bg: None,
-                            modifiers: TextMods::default(),
-                        },
-                    ],
-                }]
+                // Layout: working_dir · ~N ctx · $0.00 · vX.Y.Z
+                //
+                // - working_dir / labels / dividers use ThemeColor::Muted
+                // - version uses ThemeColor::Accent
+                // - $0.00 is a literal placeholder until real cost tracking
+                //   ships.
+                // TODO(v0.10): wire real cost via TurnOutcome.usage + per-model pricing table
+                let muted = |text: String| StyledSpan {
+                    text,
+                    fg: Some(ThemeColor::Muted),
+                    bg: None,
+                    modifiers: TextMods::default(),
+                };
+                let accent = |text: String| StyledSpan {
+                    text,
+                    fg: Some(ThemeColor::Accent),
+                    bg: None,
+                    modifiers: TextMods::default(),
+                };
+
+                let mut spans: Vec<StyledSpan> = Vec::with_capacity(7);
+                spans.push(muted(self.working_dir.clone()));
+                if let Some(ctx_text) = format_context_segment(self.context_tokens) {
+                    spans.push(muted(" · ".into()));
+                    spans.push(muted(ctx_text));
+                }
+                spans.push(muted(" · ".into()));
+                spans.push(muted("$0.00".into()));
+                spans.push(muted(" · ".into()));
+                spans.push(accent(format!("v{}", env!("CARGO_PKG_VERSION"))));
+
+                vec![StyledLine { spans }]
             }
             _ => vec![],
         }
@@ -113,6 +155,7 @@ impl Plugin for HomeFooterPlugin {
         match event {
             HostEvent::TurnStart { turn_id } => self.turn_active = Some(turn_id),
             HostEvent::TurnEnd { .. } => self.turn_active = None,
+            HostEvent::ContextSizeChanged { tokens } => self.context_tokens = tokens,
             _ => {}
         }
         Ok(vec![])
@@ -181,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn right_slot_includes_working_dir_and_hint() {
+    fn right_slot_includes_working_dir_version_and_cost() {
         let p = HomeFooterPlugin::new();
         let lines = p.render_slot(
             "home.footer.right",
@@ -193,6 +236,40 @@ mod tests {
             },
         );
         let joined: String = lines[0].spans.iter().map(|s| s.text.clone()).collect();
-        assert!(joined.contains("? for help"));
+        assert!(
+            joined.contains(&p.working_dir),
+            "expected working dir in: {joined}"
+        );
+        assert!(
+            joined.contains(&format!("v{}", env!("CARGO_PKG_VERSION"))),
+            "expected version literal in: {joined}"
+        );
+        assert!(joined.contains("$0.00"), "expected $0.00 in: {joined}");
+        assert!(
+            !joined.contains("? for help"),
+            "stale hint still present in: {joined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_size_event_updates_token_segment() {
+        let mut p = HomeFooterPlugin::new();
+        p.on_event(HostEvent::ContextSizeChanged { tokens: 1234 })
+            .await
+            .unwrap();
+        let lines = p.render_slot(
+            "home.footer.right",
+            Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 1,
+            },
+        );
+        let joined: String = lines[0].spans.iter().map(|s| s.text.clone()).collect();
+        assert!(
+            joined.contains("~1k ctx") || joined.contains("~1234 ctx"),
+            "expected token segment, got: {joined}"
+        );
     }
 }

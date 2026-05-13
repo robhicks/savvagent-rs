@@ -40,7 +40,7 @@ impl Screen for SplashScreen {
             StyledLine {
                 spans: vec![StyledSpan {
                     text: "Savvagent".into(),
-                    fg: Some(ThemeColor::Cyan),
+                    fg: Some(ThemeColor::Accent),
                     bg: None,
                     modifiers: TextMods {
                         bold: true,

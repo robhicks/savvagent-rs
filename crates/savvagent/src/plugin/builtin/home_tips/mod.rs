@@ -65,7 +65,7 @@ impl Plugin for HomeTipsPlugin {
         vec![StyledLine {
             spans: vec![StyledSpan {
                 text,
-                fg: Some(ThemeColor::DarkGray),
+                fg: Some(ThemeColor::Muted),
                 bg: None,
                 modifiers: TextMods::default(),
             }],

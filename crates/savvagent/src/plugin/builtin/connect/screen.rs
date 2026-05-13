@@ -58,7 +58,7 @@ impl Screen for ConnectPickerScreen {
                 StyledLine {
                     spans: vec![StyledSpan {
                         text: "Open /plugins to enable a provider, then come back.".into(),
-                        fg: Some(ThemeColor::Yellow),
+                        fg: Some(ThemeColor::Warning),
                         bg: None,
                         modifiers: TextMods::default(),
                     }],

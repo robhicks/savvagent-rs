@@ -18,9 +18,15 @@ use crate::providers::{PROVIDERS, ProviderSpec};
 pub enum InputMode {
     /// Editing the prompt textarea.
     Editing,
-    /// Browsing a read-only file in the popup editor.
+    /// Browsing a read-only file in the legacy popup editor. Replaced by
+    /// the `internal:view-file` Screen plugin; retained until a follow-up
+    /// PR rips out the legacy file-popup mechanism.
+    #[allow(dead_code)]
     ViewingFile,
-    /// Editing a file in the popup editor.
+    /// Editing a file in the legacy popup editor. Replaced by the
+    /// `internal:edit-file` Screen plugin; retained until a follow-up
+    /// PR rips out the legacy file-popup mechanism.
+    #[allow(dead_code)]
     EditingFile,
     /// Provider selection list — first step of `/connect`.
     SelectingProvider,
@@ -727,7 +733,11 @@ impl App {
         self.is_file_picker_active = false;
     }
 
-    /// Open `path` in the popup editor (read-only or read-write per `edit`).
+    /// Open `path` in the legacy popup editor (read-only or read-write per
+    /// `edit`). Superseded by the `internal:view-file` / `internal:edit-file`
+    /// Screen plugins; retained until a follow-up PR rips out the legacy
+    /// file-popup mechanism.
+    #[allow(dead_code)]
     pub fn open_file(&mut self, path: PathBuf, edit: bool) {
         if !path.exists() {
             self.push_note(format!("File not found: {}", path.display()));
@@ -863,7 +873,18 @@ impl App {
         self.update_metrics();
     }
 
-    /// Dispatch a `/...` command. Returns `true` if it was a slash command.
+    /// Legacy slash-command fallback for slashes the plugin router didn't
+    /// claim. All commands here either still rely on App-side state
+    /// machines that haven't been ported to plugins (e.g. the
+    /// `SelectingProvider` InputMode for `/connect`) or are genuinely
+    /// unknown.
+    ///
+    /// The legacy arms for `/clear`, `/save`, `/view`, `/edit`, `/quit`
+    /// were removed once their plugin counterparts shipped (PR 5, PR 4,
+    /// PR 8 hotfix): leaving the legacy arms intact meant disabling the
+    /// owning plugin in `/plugins` had no effect — the slash was still
+    /// silently serviced here. Now, when those plugins are disabled,
+    /// their slashes fall through to the unknown-command arm.
     pub fn handle_command(&mut self, command: &str) -> bool {
         let parts: Vec<&str> = command.split_whitespace().collect();
         let Some(head) = parts.first() else {
@@ -871,36 +892,12 @@ impl App {
         };
         match *head {
             "/connect" => {
+                // `/connect` is still partially routed through the legacy
+                // `SelectingProvider` InputMode flow when no plugin owns
+                // the slash. The `internal:connect` plugin (PR 5) is Core
+                // and always present, so this arm only fires if a future
+                // build removes that plugin.
                 self.open_provider_selector();
-                true
-            }
-            "/clear" => {
-                self.entries.clear();
-                self.live_text.clear();
-                self.update_metrics();
-                self.push_note("History cleared.");
-                true
-            }
-            "/save" => {
-                self.push_note("Saving transcript…");
-                true
-            }
-            "/view" => {
-                if let Some(p) = parts.get(1) {
-                    let s = p.strip_prefix('@').unwrap_or(p);
-                    self.open_file(PathBuf::from(s), false);
-                }
-                true
-            }
-            "/edit" => {
-                if let Some(p) = parts.get(1) {
-                    let s = p.strip_prefix('@').unwrap_or(p);
-                    self.open_file(PathBuf::from(s), true);
-                }
-                true
-            }
-            "/quit" => {
-                self.should_quit = true;
                 true
             }
             _ if head.starts_with('/') => {
@@ -972,6 +969,25 @@ impl App {
     /// Request that the event loop exit on the next tick.
     pub fn request_quit(&mut self) {
         self.should_quit = true;
+    }
+
+    /// Replace the prompt textarea contents with `text` and put the cursor at
+    /// the very end. Called by `apply_effects` in response to
+    /// [`savvagent_plugin::Effect::PrefillInput`]. The command palette emits
+    /// `PrefillInput { text: "/cmd " }` for slashes that need a path arg
+    /// (e.g. `/view`, `/edit`) so the user can complete the line via the
+    /// `@` file picker instead of executing the command with no args.
+    pub fn prefill_input(&mut self, text: String) {
+        self.input_textarea = TextArea::from(vec![text]);
+        let row = self.input_textarea.lines().len().saturating_sub(1) as u16;
+        let col = self
+            .input_textarea
+            .lines()
+            .last()
+            .map(|l| l.len())
+            .unwrap_or(0) as u16;
+        self.input_textarea
+            .move_cursor(tui_textarea::CursorMove::Jump(row, col));
     }
 
     /// Set the active theme by slug. Unknown slugs are surfaced as a

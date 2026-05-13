@@ -85,6 +85,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
         Box::new(builtin::model::ModelPlugin::new()),
         Box::new(builtin::plugins_manager::PluginsManagerPlugin::new()),
+        Box::new(builtin::quit::QuitPlugin::new()),
         Box::new(builtin::resume::ResumePlugin::new()),
         Box::new(builtin::save::SavePlugin::new()),
         Box::new(builtin::splash::SplashPlugin::new()),
@@ -119,6 +120,7 @@ mod tests {
             "internal:home-tips",
             "internal:model",
             "internal:plugins-manager",
+            "internal:quit",
             "internal:resume",
             "internal:save",
             "internal:splash",
@@ -130,7 +132,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 13);
+        assert_eq!(set.plugins.len(), 14);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -157,14 +159,14 @@ mod tests {
         // Registry shape: the post-fix invariant is that the registry's
         // plugins HashMap has one entry per non-provider plugin PLUS one
         // entry per provider plugin (same underlying Arc as the providers
-        // map). PR 8 adds one non-provider plugin (`internal:plugins-manager`),
-        // bringing the total to 13 + 4 = 17 unique ids in `plugins` and 4
-        // in `providers`.
+        // map). The post-v0.9 `/quit` hotfix adds one non-provider plugin
+        // (`internal:quit`) on top of PR 8's 13, bringing the total to
+        // 14 + 4 = 18 unique ids in `plugins` and 4 in `providers`.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            17,
-            "registry should have 13 non-provider + 4 provider plugins"
+            18,
+            "registry should have 14 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),

@@ -33,7 +33,7 @@ impl Screen for ResumePickerScreen {
             return vec![StyledLine {
                 spans: vec![StyledSpan {
                     text: "No saved transcripts found in this directory.".into(),
-                    fg: Some(ThemeColor::Yellow),
+                    fg: Some(ThemeColor::Warning),
                     bg: None,
                     modifiers: TextMods::default(),
                 }],
