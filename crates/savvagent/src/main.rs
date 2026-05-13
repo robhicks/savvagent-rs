@@ -164,6 +164,17 @@ async fn main() -> Result<()> {
             }
         }
 
+        // Honour the user's saved Optional-plugin choices for legacy
+        // hardcoded subsystems. The startup splash render lives in
+        // `mod splash` rather than the `internal:splash` plugin's
+        // Screen; gate the hardcoded path on the plugin's enabled
+        // state so toggling `splash` in /plugins actually disables it.
+        let splash_id =
+            savvagent_plugin::PluginId::new("internal:splash").expect("valid built-in id");
+        if !registry.is_enabled(&splash_id) {
+            app.show_splash = false;
+        }
+
         let indexes = Indexes::build(&registry)
             .await
             .unwrap_or_else(|e| panic!("plugin manifest conflict at startup: {e}"));
