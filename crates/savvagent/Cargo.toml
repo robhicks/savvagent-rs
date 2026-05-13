@@ -68,6 +68,8 @@ tui-textarea.workspace = true
 ratatui-explorer.workspace = true
 ratatui-code-editor.workspace = true
 keyring.workspace = true
+reqwest.workspace = true
+semver.workspace = true
 
 [dev-dependencies]
 rmcp.workspace = true
