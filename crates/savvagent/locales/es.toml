@@ -1,4 +1,4 @@
-# crates/savvagent/locales/en.toml
+# Estado: pendiente de traducción (PR 7). crates/savvagent/locales/es.toml
 #
 # Authoritative English locale catalog. Every key here must have a
 # matching entry in es.toml, pt.toml, and hi.toml; the parity test in
