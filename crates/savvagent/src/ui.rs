@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, FrameExt, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, FrameExt, List, ListItem, Padding, Paragraph, Wrap},
 };
 use savvagent_host::ToolCallStatus;
 
@@ -60,13 +60,14 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
     let idx_guard = idx.read().await;
     let router = SlotRouter::new(&idx_guard, &reg_guard);
 
-    // Give each footer slot ~1/3 of the terminal width for budgeting.
+    // Footer budgets: left + center share half the row, right gets the
+    // other half so the working_dir/version segment never clips its tail.
     let footer_cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
         ])
         .split(Rect::new(area.x, area.y, area.width, 1));
 
@@ -103,14 +104,6 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     }
 
     let palette = Palette::for_theme(app.active_theme);
-
-    // Inset the home layout from the terminal edges so the chrome has
-    // breathing room. The splash render path above intentionally keeps
-    // the full-bleed outer area.
-    let area = area.inner(Margin {
-        vertical: 1,
-        horizontal: 2,
-    });
 
     // Paint the active theme's base style across the whole frame so any
     // widget that doesn't set its own bg picks up the theme background.
@@ -157,13 +150,20 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.border).bg(palette.bg)),
+                .border_style(Style::default().fg(palette.border).bg(palette.bg))
+                .padding(Padding::horizontal(2)),
         );
     frame.render_widget(header, chunks[0]);
 
     render_log(app, frame, chunks[1], palette);
 
     // Tips row — one-line hints above the prompt, rendered from plugin slot.
+    // Inset horizontally so the row aligns with the content inside the
+    // bordered blocks above and below (border + interior padding = 3 cols).
+    let tips_area = chunks[2].inner(Margin {
+        horizontal: 3,
+        vertical: 0,
+    });
     let tips_lines: Vec<Line<'static>> = frame_data
         .tips
         .iter()
@@ -171,26 +171,33 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
         .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
         .collect();
     let tips_para = Paragraph::new(tips_lines).style(palette.base_style());
-    frame.render_widget(tips_para, chunks[2]);
+    frame.render_widget(tips_para, tips_area);
 
     let mut textarea = app.input_textarea.clone();
     textarea.set_block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.border).bg(palette.bg)),
+            .border_style(Style::default().fg(palette.border).bg(palette.bg))
+            .padding(Padding::horizontal(1)),
     );
     textarea.set_style(palette.base_style());
     frame.render_widget(&textarea, chunks[3]);
 
     // Footer row — three horizontal segments from plugin slots.
+    // Inset horizontally so the row aligns with the content inside the
+    // bordered blocks (border + interior padding = 3 cols).
+    let footer_row = chunks[4].inner(Margin {
+        horizontal: 3,
+        vertical: 0,
+    });
     let footer_cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
         ])
-        .split(chunks[4]);
+        .split(footer_row);
 
     let footer_left_lines: Vec<Line<'static>> = frame_data
         .footer_left
@@ -267,7 +274,7 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(title)
+                .title(Line::styled(title, palette.base_style().fg(palette.fg)))
                 .title_bottom(Line::from(hint).right_aligned());
             let inner = popup.inner(Margin {
                 horizontal: 1,
@@ -325,7 +332,11 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                    .title(" Connect to provider ")
+                    .padding(Padding::new(2, 2, 1, 0))
+                    .title(Line::styled(
+                        " Connect to provider ",
+                        palette.base_style().fg(palette.fg),
+                    ))
                     .title_bottom(
                         Line::from(" [↑/↓] move  [Enter] select  [Esc] cancel ").right_aligned(),
                     ),
@@ -369,7 +380,11 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                        .title(" Permission requested ")
+                        .padding(Padding::new(2, 2, 1, 0))
+                        .title(Line::styled(
+                            " Permission requested ",
+                            palette.base_style().fg(palette.fg),
+                        ))
                         .title_bottom(
                             Line::from(" [y] allow  [n] deny  [a] always  [N] never  [Esc] deny ")
                                 .right_aligned(),
@@ -427,7 +442,11 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                    .title(" Bash network access? ")
+                    .padding(Padding::new(2, 2, 1, 0))
+                    .title(Line::styled(
+                        " Bash network access? ",
+                        palette.base_style().fg(palette.fg),
+                    ))
                     .title_bottom(
                         Line::from(" [O]nce  [A]lways  [D]eny  [F]orever  [Esc] deny ")
                             .right_aligned(),
@@ -447,10 +466,10 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.border).bg(palette.bg))
             .style(palette.base_style())
-            .title(title)
+            .title(Line::styled(title, palette.base_style().fg(palette.fg)))
             .title_bottom(Line::from(" [Enter] connect  [Esc] cancel ").right_aligned());
         let inner = popup.inner(Margin {
-            horizontal: 1,
+            horizontal: 2,
             vertical: 1,
         });
         frame.render_widget(block, popup);
@@ -476,7 +495,11 @@ fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect, palette: P
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                    .title(" Resume transcript ")
+                    .padding(Padding::new(2, 2, 1, 0))
+                    .title(Line::styled(
+                        " Resume transcript ",
+                        palette.base_style().fg(palette.fg),
+                    ))
                     .title_bottom(Line::from(" [Esc] cancel ").right_aligned()),
             );
         frame.render_widget(body, popup);
@@ -494,6 +517,7 @@ fn render_transcript_picker(app: &App, frame: &mut Frame, area: Rect, palette: P
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.border).bg(palette.bg))
+            .padding(Padding::new(2, 2, 1, 0))
             .title(" Resume transcript ")
             .title_bottom(Line::from(" [↑/↓] move  [Enter] resume  [Esc] cancel ").right_aligned()),
     );
@@ -603,7 +627,11 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                .title(" Conversation "),
+                .padding(Padding::new(2, 2, 1, 1))
+                .title(Line::styled(
+                    " Conversation ",
+                    palette.base_style().fg(palette.fg),
+                )),
         );
     frame.render_widget(para, area);
 }
@@ -694,7 +722,10 @@ fn paint_screen(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(palette.border).bg(palette.bg))
                 .style(palette.base_style())
-                .title(title.as_deref().unwrap_or(""));
+                .title(Line::styled(
+                    title.as_deref().unwrap_or("").to_string(),
+                    palette.base_style().fg(palette.fg),
+                ));
 
             // Tips as a bottom title if present.
             let tips = screen.tips();
@@ -705,8 +736,10 @@ fn paint_screen(
                 block
             };
 
+            // Interior padding: 2 cols horizontally and 1 row top/bottom
+            // gives modal content breathing room inside the border.
             let inner = outer.inner(Margin {
-                horizontal: 1,
+                horizontal: 2,
                 vertical: 1,
             });
             f.render_widget(block, outer);

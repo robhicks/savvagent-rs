@@ -6,6 +6,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.10.1 — TUI polish (2026-05-13)
+
+Render-path fixes for theme legibility, layout breathing room, and
+command-palette alignment. No API, plugin, or wire-format changes.
+
+### Fixes
+
+- TUI padding: removed the outer terminal-edge inset and added
+  interior padding to each bordered widget (header, conversation
+  log, input, popups, screen-stack modals). Content now sits inside
+  the borders with breathing room instead of the entire app being
+  inset from the terminal edges.
+- Block titles ("Conversation", popup titles, screen-stack modal
+  titles) now render in `palette.fg` instead of inheriting the
+  border color, so they stay legible on upstream themes whose
+  `border`/`selection` color is a pale chrome accent.
+- Upstream themes' `muted` color is now blended 50% toward `fg`,
+  so command descriptions, footer chrome, and conversation notes
+  remain readable across Solarized Light, Catppuccin Latte, Tokyo
+  Night Day, etc. Built-in themes are unchanged.
+- Command palette: description column aligns across rows even when
+  command names exceed 12 characters (`/connect anthropic`,
+  `/connect gemini`, …). Width is now computed from the longest
+  filtered name with a 12-char floor and 2-col gutter.
+- Footer right slot widened from 33% to 50% so the working-directory
+  path and version string no longer clip the SemVer patch level
+  (e.g., `v0.10.0` rendering as `v0.10.`).
+
 ## v0.10.0 — Localize TUI (2026-05-13)
 
 Internationalization for the TUI. The savvagent crate now ships

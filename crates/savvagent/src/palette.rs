@@ -96,7 +96,7 @@ impl Palette {
     /// | `fg`       | `fg`           | direct                                 |
     /// | `bg`       | `bg`           | direct                                 |
     /// | `accent`   | `accent`       | direct                                 |
-    /// | `muted`    | `muted`        | direct                                 |
+    /// | `muted`    | `muted`        | blended toward `fg` for legibility     |
     /// | `error`    | `error`        | direct                                 |
     /// | `warning`  | `warning`      | direct                                 |
     /// | `success`  | `success`      | direct                                 |
@@ -106,6 +106,15 @@ impl Palette {
     /// Upstream's `info` slot has no direct counterpart in our layout
     /// (we don't render "info"-flavored chrome). It is intentionally
     /// dropped; new slots can map to it if a need appears.
+    ///
+    /// `muted` is intentionally not the raw upstream value: many themes
+    /// (Solarized Light, Catppuccin Latte, Tokyo Night Day, …) set
+    /// `muted` to a "comment" color that is barely legible against the
+    /// theme background. The UI uses `muted` for command descriptions,
+    /// tips, footer chrome, and conversation notes — content the user
+    /// needs to read — so we blend `muted` halfway toward `fg` to raise
+    /// contrast while keeping a clear visual distinction from primary
+    /// text.
     #[must_use]
     pub fn from_upstream(p: ThemePalette) -> Self {
         Self {
@@ -113,7 +122,7 @@ impl Palette {
             bg: p.bg,
             border: p.selection,
             accent: p.accent,
-            muted: p.muted,
+            muted: blend(p.muted, p.fg, 0.5),
             error: p.error,
             success: p.success,
             warning: p.warning,
@@ -126,6 +135,25 @@ impl Palette {
     pub fn base_style(self) -> Style {
         Style::default().fg(self.fg).bg(self.bg)
     }
+}
+
+/// Linear interpolation between two `Color`s. `t == 0.0` returns `a`,
+/// `t == 1.0` returns `b`. Only RGB inputs blend; anything else (named
+/// colors, indexed palette, `Color::Reset`) falls through to `a` because
+/// we don't have a defined channel space for them.
+///
+/// Used to lift `muted` toward `fg` so upstream themes whose `muted` is
+/// a low-contrast comment color stay readable; see
+/// [`Palette::from_upstream`].
+fn blend(a: Color, b: Color, t: f32) -> Color {
+    let (Color::Rgb(ar, ag, ab), Color::Rgb(br, bg, bb)) = (a, b) else {
+        return a;
+    };
+    let mix = |x: u8, y: u8| {
+        let v = (1.0 - t) * f32::from(x) + t * f32::from(y);
+        v.round().clamp(0.0, 255.0) as u8
+    };
+    Color::Rgb(mix(ar, br), mix(ag, bg), mix(ab, bb))
 }
 
 #[cfg(test)]
