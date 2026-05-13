@@ -3,8 +3,14 @@
 //! Mirrors `crates/savvagent/src/plugin/builtin/themes/catalog.rs`.
 //! Persistence and env detection land in later tasks.
 
-use std::path::PathBuf;
+// Temporary while PR 2 lands the catalog standalone. PR 3 wires the
+// internal:language plugin to consume LANGUAGES + supported() + lookup()
+// + load()/save()/detect_initial() from non-test code, at which point
+// this attribute should be removed.
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Shipped language entry. Static; the catalog is a const slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,10 +25,26 @@ pub struct Language {
 
 /// The shipped languages, in display order (English first).
 const LANGUAGES: &[Language] = &[
-    Language { code: "en", english_name: "English", native_name: "English" },
-    Language { code: "es", english_name: "Spanish", native_name: "Español" },
-    Language { code: "pt", english_name: "Portuguese", native_name: "Português" },
-    Language { code: "hi", english_name: "Hindi", native_name: "हिन्दी" },
+    Language {
+        code: "en",
+        english_name: "English",
+        native_name: "English",
+    },
+    Language {
+        code: "es",
+        english_name: "Spanish",
+        native_name: "Español",
+    },
+    Language {
+        code: "pt",
+        english_name: "Portuguese",
+        native_name: "Português",
+    },
+    Language {
+        code: "hi",
+        english_name: "Hindi",
+        native_name: "हिन्दी",
+    },
 ];
 
 /// Returns the shipped catalog, in display order.
@@ -50,9 +72,7 @@ fn normalize_env_locale(raw: &str) -> Option<String> {
     if trimmed.is_empty() || matches!(trimmed, "C" | "POSIX") {
         return None;
     }
-    let head = trimmed
-        .split(|c: char| c == '_' || c == '-' || c == '.' || c == '@')
-        .next()?;
+    let head = trimmed.split(['_', '-', '.', '@']).next()?;
     if head.is_empty() {
         return None;
     }
@@ -123,7 +143,9 @@ pub fn save(code: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let cfg = LanguageConfig { language: code.to_string() };
+    let cfg = LanguageConfig {
+        language: code.to_string(),
+    };
     let text = toml::to_string(&cfg).expect("LanguageConfig serialization is infallible");
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, text)?;
@@ -154,7 +176,7 @@ pub fn detect_initial() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{HomeGuard, HOME_LOCK};
+    use crate::test_helpers::{HOME_LOCK, HomeGuard};
     use std::io::Write;
 
     #[test]
@@ -183,18 +205,21 @@ mod tests {
     fn normalize_env_locale_cases() {
         let cases: &[(&str, Option<&str>)] = &[
             ("es_ES.UTF-8", Some("es")),
-            ("pt_BR@euro",  Some("pt")),
-            ("en-US",       Some("en")),
-            ("hi",          Some("hi")),
-            ("C",           None),
-            ("POSIX",       None),
-            ("",            None),
-            ("   ",         None),
+            ("pt_BR@euro", Some("pt")),
+            ("en-US", Some("en")),
+            ("hi", Some("hi")),
+            ("C", None),
+            ("POSIX", None),
+            ("", None),
+            ("   ", None),
         ];
         for (input, expected) in cases {
             let got = normalize_env_locale(input);
             let want = expected.map(String::from);
-            assert_eq!(got, want, "normalize_env_locale({input:?}) -> {got:?}, expected {want:?}");
+            assert_eq!(
+                got, want,
+                "normalize_env_locale({input:?}) -> {got:?}, expected {want:?}"
+            );
         }
     }
 
@@ -298,17 +323,24 @@ mod tests {
         let prev = std::env::var("HOME").ok();
         // SAFETY: HOME_LOCK serialises env mutation; the env-touching tests in
         // this module all hold the lock for their duration.
-        unsafe { std::env::remove_var("HOME"); }
+        unsafe {
+            std::env::remove_var("HOME");
+        }
 
         let result = save("es");
         // Restore HOME before any assert that could panic — we don't want a
         // failing assertion to leave the env in a bad state for sibling tests.
         if let Some(p) = prev {
             // SAFETY: same as above.
-            unsafe { std::env::set_var("HOME", p); }
+            unsafe {
+                std::env::set_var("HOME", p);
+            }
         }
 
-        assert!(result.is_ok(), "save with unset HOME must be a silent Ok(())");
+        assert!(
+            result.is_ok(),
+            "save with unset HOME must be a silent Ok(())"
+        );
     }
 
     #[test]
@@ -323,14 +355,22 @@ mod tests {
 
         // Env says Spanish — should win because the file's value is invalid.
         // SAFETY: HOME_LOCK is held; sibling tests follow the same pattern.
-        unsafe { std::env::set_var("LANG", "es_ES.UTF-8"); }
-        unsafe { std::env::remove_var("LC_ALL"); }
-        unsafe { std::env::remove_var("LC_MESSAGES"); }
+        unsafe {
+            std::env::set_var("LANG", "es_ES.UTF-8");
+        }
+        unsafe {
+            std::env::remove_var("LC_ALL");
+        }
+        unsafe {
+            std::env::remove_var("LC_MESSAGES");
+        }
 
         assert_eq!(detect_initial(), "es");
 
         // Cleanup.
         // SAFETY: same.
-        unsafe { std::env::remove_var("LANG"); }
+        unsafe {
+            std::env::remove_var("LANG");
+        }
     }
 }
