@@ -238,6 +238,14 @@ async fn main() -> Result<()> {
     if let Err(err) = res {
         eprintln!("{err:?}");
     }
+
+    // If `/update` succeeded during this session, the on-disk binary is
+    // a newer version than the one we're still running. Surface a hint
+    // on stderr now that the alt-screen has torn down.
+    if let Some((from, to)) = plugin::builtin::self_update::pending_restart_hint() {
+        eprintln!("savvagent: installed v{to} (was v{from}). Restart to use the new version.");
+    }
+
     Ok(())
 }
 

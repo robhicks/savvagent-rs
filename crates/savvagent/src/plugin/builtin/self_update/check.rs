@@ -134,6 +134,10 @@ impl ReleasesFetcher for GithubReleasesFetcher {
 /// Drive the full version-check flow: short-circuit on dev builds,
 /// otherwise call the fetcher and compare. Returns [`UpdateState::CheckFailed`]
 /// on any fetch error (logged at `debug` upstream).
+///
+/// The function is intentionally cache-free — the plugin's `on_event`
+/// handler wraps this call with cache read/write so unit tests of the
+/// compare/fetch logic can run without touching the filesystem.
 pub async fn check_for_update<F: ReleasesFetcher + ?Sized>(
     current_version: &str,
     install_method: InstallMethod,
@@ -151,12 +155,16 @@ pub async fn check_for_update<F: ReleasesFetcher + ?Sized>(
         }
     };
 
-    match compare_versions(current_version, &tag) {
+    classify_tag(current_version, &tag)
+}
+
+/// Pure helper: turn a (`current_version`, `tag`) pair into an
+/// [`UpdateState`]. Used by [`check_for_update`] on the fresh-fetch path
+/// and by the plugin's cached path in `on_event`.
+pub fn classify_tag(current_version: &str, tag: &str) -> UpdateState {
+    match compare_versions(current_version, tag) {
         Comparison::Behind => {
-            // Both parses succeeded inside compare_versions; re-parse here
-            // to populate the UpdateState payload. The double-parse cost is
-            // negligible (one path per launch).
-            let tag_str = tag.strip_prefix(['v', 'V']).unwrap_or(&tag);
+            let tag_str = tag.strip_prefix(['v', 'V']).unwrap_or(tag);
             match (Version::parse(current_version), Version::parse(tag_str)) {
                 (Ok(current), Ok(latest)) => UpdateState::Available { current, latest },
                 _ => UpdateState::CheckFailed,
@@ -166,7 +174,7 @@ pub async fn check_for_update<F: ReleasesFetcher + ?Sized>(
         Comparison::Unparseable => {
             tracing::debug!(
                 current = current_version,
-                latest = %tag,
+                latest = tag,
                 "self-update: could not parse version strings"
             );
             UpdateState::CheckFailed
