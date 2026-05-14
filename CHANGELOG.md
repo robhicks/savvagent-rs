@@ -6,6 +6,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.14.1 — self-update cache invalidation on out-of-band upgrade (2026-05-14)
+
+### Fixed
+
+- **`/update` no longer reports "Already on the latest version" when a
+  newer release is genuinely available.** The 24-hour update-check cache
+  at `~/.savvagent/update-check.json` was being trusted on every launch
+  inside its TTL, even when the running binary had moved *past* the
+  cached `latest_tag`. A user who launched while on `v0.12.0` (cache
+  recorded `latest_tag: v0.12.0`), then upgraded out-of-band to `v0.13.0`
+  via `cargo install` / a downloaded tarball / a package manager, would
+  start `v0.13.0` and have the plugin classify `0.13.0 > v0.12.0` as
+  `Ahead → UpToDate` — silently hiding any newer release (`v0.14.0` in
+  this case) that GitHub had since published. The plugin now treats a
+  cache whose tag is older than (or unparseable against) the running
+  binary as a cache miss and re-fetches, restoring the auto-install +
+  banner + `/update` path. Unparseable cached tags are also re-fetched
+  rather than swallowed as `CheckFailed`.
+
 ## v0.14.0 — default system prompt + tool-description trust boundary (2026-05-14)
 
 ### Added
