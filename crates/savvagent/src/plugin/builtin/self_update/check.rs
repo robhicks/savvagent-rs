@@ -37,7 +37,10 @@ pub enum UpdateState {
     /// The running binary matches or exceeds the latest release.
     UpToDate,
     /// A newer release is available; carries both versions so the banner
-    /// can render the transition.
+    /// can render the transition. Transient — the `HostStarting` task
+    /// flips to [`UpdateState::Installing`] immediately after producing
+    /// this state, so users typically only see it on the first frame
+    /// after detection.
     Available {
         /// Running binary version (from `CARGO_PKG_VERSION`).
         current: Version,
@@ -45,13 +48,35 @@ pub enum UpdateState {
         /// `v` stripped).
         latest: Version,
     },
-    /// `/update` succeeded; the on-disk binary is now `to` but the
+    /// Background install in progress (downloading + running the cargo-dist
+    /// installer script). Set by the `HostStarting` task right before it
+    /// invokes the installer; replaced with [`UpdateState::Updated`] or
+    /// [`UpdateState::InstallFailed`] when the installer exits.
+    Installing {
+        /// Running binary version.
+        current: Version,
+        /// Version being installed.
+        latest: Version,
+    },
+    /// Background install attempted and failed. The user can retry via
+    /// `/update`, which re-runs the installer.
+    InstallFailed {
+        /// Running binary version.
+        current: Version,
+        /// Version that failed to install.
+        latest: Version,
+        /// Combined stdout/stderr from the installer subprocess (or the
+        /// download error message). Surfaced verbatim in the banner and
+        /// retry note.
+        error: String,
+    },
+    /// Install succeeded; the on-disk binaries are now `to` but the
     /// running process is still `from`. The banner row reflects this so
     /// the user is prompted to restart.
     Updated {
-        /// Version the running process was when `/update` started.
+        /// Version the running process was when the install started.
         from: Version,
-        /// Version of the newly-installed on-disk binary.
+        /// Version of the newly-installed on-disk binaries.
         to: Version,
     },
     /// Network / parse / IO error during the check. Logged at `debug` only;
