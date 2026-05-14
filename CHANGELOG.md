@@ -6,6 +6,59 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.13.0 — /changelog viewer + auto-install all binaries (2026-05-14)
+
+Two threads ship together:
+
+1. **`/changelog` opens an in-TUI viewer.** A new built-in plugin
+   (`internal:changelog`) fetches
+   `https://raw.githubusercontent.com/robhicks/savvagent-rs/master/CHANGELOG.md`
+   and renders it through `tui-markdown` on a dedicated screen, so users
+   can read release history without leaving the TUI. Keybindings:
+   `j`/`k` and `↑`/`↓` for line scroll, `PageUp`/`PageDown`,
+   `g`/`G` for page-top/bottom, `r` to retry on fetch failure,
+   `Esc`/`q` to close. No auto-open after self-update — it's an
+   on-demand command. (`tui-markdown` is pinned to `0.3` with
+   `default-features = false` to skip the `highlight-code` stack —
+   syntect + ansi-to-tui — that the changelog doesn't need.)
+2. **`/update` now swaps every binary in the release archive, and
+   does it automatically on launch.** The v0.12.1 "Known limitations"
+   are resolved: previously `/update` only replaced the main
+   `savvagent` binary, leaving the six helpers
+   (`savvagent-anthropic`, `savvagent-gemini`, `savvagent-openai`,
+   `savvagent-tool-fs`, `savvagent-tool-bash`, `savvagent-tool-grep`)
+   pinned to whatever version was already on disk. v0.13.0 introduces
+   a `CargoDistInstaller` that pipes the per-release
+   `savvagent-installer.sh` (or `.ps1` on Windows) through the shell,
+   replacing every binary in the archive via the same trusted path
+   used for fresh installs. Update detection is also no longer
+   gated on user action: the TUI runs the install in the background
+   on startup and `/update` is now a retry/force-now command rather
+   than the primary trigger. Two new `UpdateState` variants —
+   `Installing` and `InstallFailed` — track in-flight installs and
+   surface failures in the status banner.
+
+### Added
+
+- `internal:changelog` built-in plugin and `/changelog` slash command
+  (PR #70, closes #68). Locale strings added in en/es/hi/pt.
+
+### Changed
+
+- `internal:self-update` runs the cargo-dist installer on startup so
+  every binary in the release archive is replaced on the next
+  restart. `/update` becomes a retry/force-now affordance. (PR #69,
+  closes #67.) New `UpdateState::Installing` and
+  `UpdateState::InstallFailed` entries cover the new lifecycle.
+
+### Upgrade notes
+
+- Users running v0.11.0, v0.12.0, or v0.12.1 must re-run the install
+  script once to land on v0.13.0 — those releases shipped an
+  incorrect `bin_path_in_archive` and cannot self-upgrade. From
+  v0.13.0 onwards the auto-install path takes over and no manual
+  re-runs are needed.
+
 ## v0.12.1 — self-update cache hygiene (2026-05-13)
 
 ### Fixed

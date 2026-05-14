@@ -38,12 +38,13 @@ unpack it, and put the binaries on your `$PATH`. Each archive ships with a
 
 After installing, run `savvagent` in your project, `/connect` once to store
 an API key in the OS keyring, and you're done. The TUI checks for updates
-on launch and, as of the next release, installs them automatically in the
-background — all binaries in the release archive are replaced in place,
-not just the main `savvagent` executable. The banner above the prompt
-reports progress; restart savvagent to use the new version. (v0.11.0
-through v0.12.1 only swapped the main binary; the six helpers stayed at
-the prior version until the user re-ran the installer manually.)
+on launch and installs them automatically in the background — all binaries
+in the release archive are replaced in place, not just the main `savvagent`
+executable. The banner above the prompt reports progress; restart savvagent
+to use the new version. (`/update` becomes a retry/force-now command;
+v0.11.0 through v0.12.1 only swapped the main binary and required a manual
+installer re-run, so users on those versions must re-run the install script
+once to land on v0.13.0 — auto-install takes over from there.)
 
 ## Repository layout
 
