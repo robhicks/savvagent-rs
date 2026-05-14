@@ -104,6 +104,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossterm = "0.29"
 ratatui = { version = "0.30", features = ["crossterm_0_29"] }
 ratatui-themes = "0.2.0"
+# Markdown → ratatui Text renderer used by `internal:changelog`. We turn
+# off `highlight-code` (the default feature) to avoid pulling in syntect
+# + ansi-to-tui — CHANGELOG.md doesn't need source-level syntax
+# highlighting, and the highlighters add ~MB to the binary.
+tui-markdown = { version = "0.3", default-features = false }
 tui-textarea = { package = "tui-textarea-2", version = "0.10" }
 ratatui-explorer = "0.3"
 ratatui-code-editor = "0.0.3"
