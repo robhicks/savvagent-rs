@@ -6,6 +6,64 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.14.0 — default system prompt + tool-description trust boundary (2026-05-14)
+
+### Added
+
+- **Default system prompt.** The host now builds and attaches a dynamic
+  system prompt at every session start, introducing Savvagent's
+  identity, behavior expectations, the names of wired tools, the
+  environment (OS, project root, git presence, version), and output
+  conventions. Closes the long-standing failure mode where the model
+  would claim "I cannot access GitHub" despite having a shell tool with
+  network access available — the prompt now explicitly translates
+  "shell wired" into "gh / curl / git / rg / package managers are
+  available, use them."
+- `HostConfig::with_app_version` lets embedders pass the binary's
+  `CARGO_PKG_VERSION` so the prompt's Environment section shows the
+  installed version (not the `savvagent-host` crate version). The TUI
+  wires this automatically; library embedders can pass any
+  `impl Into<String>`.
+- `HostConfig::with_default_prompt_disabled` lets embedders that want
+  to fully own the system message suppress the built-in default layer.
+
+### Changed
+
+- `project::system_prompt` removed; replaced by the 3-layer
+  `project::layered_prompt` (default → embedder override →
+  `SAVVAGENT.md` body). All three layers compose with H1 section
+  headers; whitespace-only layers are silently dropped; non-empty
+  layers render verbatim so code fences and indentation in
+  `SAVVAGENT.md` survive.
+
+### Breaking for embedders
+
+- Default-installed embedders now receive a non-empty system prompt
+  even when they did not set `HostConfig::system_prompt`. To preserve
+  the previous "empty system field" behavior, call
+  `HostConfig::with_default_prompt_disabled()` AND leave
+  `system_prompt` unset AND point `project_root` at a directory with
+  no `SAVVAGENT.md`.
+
+### Security
+
+- Tool descriptions supplied by MCP tool servers are no longer
+  promoted into the system prompt. Names are listed under an
+  explicitly-framed informational block as code spans; descriptions
+  still flow to the model via the request's typed `tools` field.
+  Third-party MCP tool servers can no longer inject policy-conflicting
+  instructions through their `description` strings.
+- Tool names themselves are defensively sanitized at render time:
+  ASCII control characters (including `\n`, `\r`, `\t`), Unicode
+  LINE SEPARATOR (`U+2028`), and PARAGRAPH SEPARATOR (`U+2029`) are
+  replaced with `?`; backticks are replaced with `'` so the wrapping
+  code span cannot be escaped. MCP enforces no charset on tool names,
+  so this is a defensive measure against future third-party servers.
+- The shell-capability paragraph is gated on a trusted
+  `ToolRegistry::bash_available()` signal sourced from the embedder's
+  `tool-bash`-marker endpoint configuration — not from matching tool
+  names like `"run"`, which a third-party tool could spoof.
+
 ## v0.13.0 — /changelog viewer + auto-install all binaries (2026-05-14)
 
 Two threads ship together:

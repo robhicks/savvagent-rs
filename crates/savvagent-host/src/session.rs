@@ -940,16 +940,11 @@ fn bootstrap_bash_net_resolver() -> BashNetResolverHandle {
 /// `SAVVAGENT.md` body (optional). The default-prompt layer reads
 /// `tools.bash_available()` so the rendered shell-capability paragraph
 /// reflects what the host actually wired.
-fn build_layered_system_prompt(
-    config: &HostConfig,
-    tools: &ToolRegistry,
-) -> Option<String> {
+fn build_layered_system_prompt(config: &HostConfig, tools: &ToolRegistry) -> Option<String> {
     let default_prompt_text = if config.default_prompt_enabled {
         let app_version = match config.app_version.as_deref() {
             Some(v) => crate::default_prompt::AppVersion::App(v),
-            None => crate::default_prompt::AppVersion::HostCrateFallback(
-                env!("CARGO_PKG_VERSION"),
-            ),
+            None => crate::default_prompt::AppVersion::HostCrateFallback(env!("CARGO_PKG_VERSION")),
         };
         let env = crate::default_prompt::PromptEnv::probe(
             &config.project_root,

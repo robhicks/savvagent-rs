@@ -182,10 +182,7 @@ fn render_affordances(out: &mut String, tools: &[ToolDef], bash_available: bool)
 fn render_environment(out: &mut String, env: &PromptEnv<'_>) {
     out.push_str("## Environment\n\n");
     out.push_str(&format!("- OS: {} ({})\n", env.os, env.arch));
-    out.push_str(&format!(
-        "- Project root: {}\n",
-        env.project_root.display()
-    ));
+    out.push_str(&format!("- Project root: {}\n", env.project_root.display()));
     out.push_str(&format!(
         "- Git repository: {}\n",
         if env.git_present { "yes" } else { "no" }
@@ -265,10 +262,7 @@ mod tests {
     #[test]
     fn build_with_no_tools_says_no_tools_connected() {
         let s = build(&env(), &[]);
-        assert!(
-            s.contains("No tools are currently connected"),
-            "{s}"
-        );
+        assert!(s.contains("No tools are currently connected"), "{s}");
         assert!(!s.contains("The host has wired the following tools"));
     }
 
@@ -356,17 +350,11 @@ mod tests {
         let s = build(&env(), &tools);
         // U+2028 must not survive sanitization, preventing any attempt
         // to split the tool name across lines.
-        assert!(
-            !s.contains("\u{2028}"),
-            "U+2028 survived sanitization: {s}"
-        );
+        assert!(!s.contains("\u{2028}"), "U+2028 survived sanitization: {s}");
         // The tool name is listed but with the separator replaced by '?',
         // preventing markdown injection even if an LLM preprocessor
         // incorrectly interprets U+2028 as a line break.
-        assert!(
-            s.contains("evil?"),
-            "sanitized tool name not found: {s}"
-        );
+        assert!(s.contains("evil?"), "sanitized tool name not found: {s}");
     }
 
     #[test]
@@ -374,10 +362,7 @@ mod tests {
         let mut e = env();
         e.bash_available = true;
         let s = build(&e, &[tooldef("run", "")]);
-        assert!(
-            s.contains("A shell tool is wired for this session"),
-            "{s}"
-        );
+        assert!(s.contains("A shell tool is wired for this session"), "{s}");
         assert!(s.contains("`gh`"));
         assert!(s.contains("`curl`"));
         assert!(s.contains("`git`"));
@@ -427,10 +412,7 @@ mod tests {
         let mut e = env();
         e.app_version = AppVersion::HostCrateFallback("0.14.0");
         let s = build(&e, &[]);
-        assert!(
-            s.contains("Savvagent host crate version: 0.14.0"),
-            "{s}"
-        );
+        assert!(s.contains("Savvagent host crate version: 0.14.0"), "{s}");
     }
 
     #[test]

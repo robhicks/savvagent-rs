@@ -135,6 +135,40 @@ provider has a key on file.
 
 `@` opens a file picker that inserts `@path` into the prompt.
 
+### Default behavior
+
+Savvagent attaches a dynamic system prompt at the start of every
+session, even when no `SAVVAGENT.md` is present and no override is
+configured. The prompt covers:
+
+- **Identity** — who Savvagent is and how it runs.
+- **Behavior expectations** — use available tools proactively; don't
+  claim a limitation without checking the tools first.
+- **Tool affordances** — the *names* of the tools wired for this
+  session (descriptions reach the model through the typed `tools`
+  field, not via the system prompt). When the shell tool is wired,
+  an explicit paragraph reminds the model that `gh`, `curl`, `git`,
+  `rg`, package managers, and any installed CLI are reachable.
+- **Environment** — OS, project root, git presence, Savvagent version.
+- **Conventions** — `path/to/file.rs:42` link format; brief edit
+  summaries.
+
+To extend the prompt for your project, add a `SAVVAGENT.md` to the
+project root. Its body is appended after the default and after any
+embedder-supplied override, so your project guidance wins on
+ambiguous points.
+
+To suppress the default layer (embedders only):
+
+```rust
+let config = HostConfig::new(provider, model)
+    .with_default_prompt_disabled();
+```
+
+This affects only the built-in default layer — the embedder
+`system_prompt` override and `SAVVAGENT.md` body still compose if
+present.
+
 ## Development workflow
 
 ```bash
