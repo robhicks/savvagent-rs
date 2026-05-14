@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine,
-    StyledSpan, TextMods,
+    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine, StyledSpan,
+    TextMods,
 };
 
 /// What the screen is currently showing.
@@ -412,7 +412,10 @@ mod tests {
         let effs = s.on_key(key(KeyCodePortable::Char('r'))).await.unwrap();
         assert!(effs.is_empty());
         // No state change.
-        assert!(matches!(*s.state.lock().unwrap(), ChangelogState::Loaded { .. }));
+        assert!(matches!(
+            *s.state.lock().unwrap(),
+            ChangelogState::Loaded { .. }
+        ));
         assert_eq!(s.scroll_offset, 3);
     }
 

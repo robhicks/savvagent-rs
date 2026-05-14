@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, Screen,
-    ScreenArgs, ScreenLayout, ScreenSpec, SlashSpec,
+    Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, Screen, ScreenArgs,
+    ScreenLayout, ScreenSpec, SlashSpec,
 };
 
 pub mod fetch;
@@ -98,9 +98,7 @@ impl Plugin for ChangelogPlugin {
                 spawn_fetch_task(Arc::clone(&self.fetcher), state);
                 Ok(Box::new(screen))
             }
-            (SCREEN_ID, _other) => Err(PluginError::InvalidArgs(
-                "/changelog takes no args".into(),
-            )),
+            (SCREEN_ID, _other) => Err(PluginError::InvalidArgs("/changelog takes no args".into())),
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
         }
     }
@@ -110,10 +108,7 @@ impl Plugin for ChangelogPlugin {
 /// into the supplied shared state cell. Free function so it's directly
 /// testable and so the retry path (later) can call it without holding
 /// `&self`.
-fn spawn_fetch_task(
-    fetcher: Arc<dyn ChangelogFetcher>,
-    state: Arc<Mutex<ChangelogState>>,
-) {
+fn spawn_fetch_task(fetcher: Arc<dyn ChangelogFetcher>, state: Arc<Mutex<ChangelogState>>) {
     tokio::spawn(async move {
         let new_state = match fetcher.fetch().await {
             Ok(markdown) => ChangelogState::Loaded {
@@ -238,10 +233,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_fetch_task_writes_failed_on_error() {
         let state = Arc::new(Mutex::new(ChangelogState::Loading));
-        spawn_fetch_task(
-            Arc::new(StubFetcher::err("DNS error")),
-            Arc::clone(&state),
-        );
+        spawn_fetch_task(Arc::new(StubFetcher::err("DNS error")), Arc::clone(&state));
         for _ in 0..100 {
             tokio::task::yield_now().await;
             if let ChangelogState::Failed { error } = &*state.lock().unwrap() {

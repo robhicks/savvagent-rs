@@ -581,9 +581,6 @@ mod tests {
             ScreenArgs::PluginsManager.screen_id(),
             Some("plugins.manager")
         );
-        assert_eq!(
-            ScreenArgs::Changelog.screen_id(),
-            Some("changelog")
-        );
+        assert_eq!(ScreenArgs::Changelog.screen_id(), Some("changelog"));
     }
 }
