@@ -697,7 +697,13 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
 /// modal. Mirrors the legacy `InputMode::ViewingFile`/`EditingFile`
 /// chrome but is driven by the screen stack instead of the deprecated
 /// input-mode state machine.
-fn paint_file_screen(f: &mut Frame, area: Rect, app: &crate::app::App, palette: Palette, edit: bool) {
+fn paint_file_screen(
+    f: &mut Frame,
+    area: Rect,
+    app: &crate::app::App,
+    palette: Palette,
+    edit: bool,
+) {
     let popup = centered_rect(80, 80, area);
     f.render_widget(Clear, popup);
     f.buffer_mut().set_style(popup, palette.base_style());
@@ -712,11 +718,7 @@ fn paint_file_screen(f: &mut Frame, area: Rect, app: &crate::app::App, palette: 
     } else {
         ("picker.view-file.modal-title", "picker.view-file.tips")
     };
-    let title = format!(
-        " {}: {} ",
-        rust_i18n::t!(title_key),
-        path_str
-    );
+    let title = format!(" {}: {} ", rust_i18n::t!(title_key), path_str);
     let hint = rust_i18n::t!(hint_key).to_string();
 
     let block = Block::default()

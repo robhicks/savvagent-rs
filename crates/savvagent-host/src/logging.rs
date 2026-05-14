@@ -15,7 +15,12 @@ use std::path::{Path, PathBuf};
 /// Layout: `~/.savvagent/logs/tools/<binary-basename>.log`.
 fn tools_log_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".savvagent").join("logs").join("tools"))
+    Some(
+        PathBuf::from(home)
+            .join(".savvagent")
+            .join("logs")
+            .join("tools"),
+    )
 }
 
 /// Open (creating, append) a per-tool stderr log file for `command`.
@@ -25,8 +30,8 @@ fn tools_log_dir() -> Option<PathBuf> {
 /// On any I/O failure the caller should fall back to `Stdio::null()` — the
 /// goal is "never bleed into the TUI", never "fail to spawn".
 pub(crate) fn tool_stderr_log_file(command: &Path) -> io::Result<File> {
-    let dir = tools_log_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is unset"))?;
+    let dir =
+        tools_log_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is unset"))?;
     std::fs::create_dir_all(&dir)?;
     let stem = command
         .file_name()

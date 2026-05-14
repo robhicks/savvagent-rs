@@ -44,9 +44,7 @@ impl Screen for EditFileScreen {
             // the legacy save-on-close behavior) and clears editor state.
             KeyCodePortable::Esc => Ok(vec![Effect::CloseScreen]),
             // Ctrl-S triggers an explicit save without closing.
-            KeyCodePortable::Char('s') if key.modifiers.ctrl => {
-                Ok(vec![Effect::SaveActiveFile])
-            }
+            KeyCodePortable::Char('s') if key.modifiers.ctrl => Ok(vec![Effect::SaveActiveFile]),
             // Everything else is consumed by the editor via main.rs's
             // pre-screen-dispatch routing — by the time we get here, the
             // key has already been routed to `App::editor.input(...)`.
@@ -112,6 +110,14 @@ mod tests {
     #[test]
     fn render_returns_empty() {
         let s = EditFileScreen::new("/tmp/x.rs".into());
-        assert!(s.render(Region { x: 0, y: 0, width: 80, height: 24 }).is_empty());
+        assert!(
+            s.render(Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 24
+            })
+            .is_empty()
+        );
     }
 }

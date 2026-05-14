@@ -94,7 +94,10 @@ pub fn build_editor_keybindings_screen() -> ScrollableKeybindingsScreen {
         section("picker.editor-keybindings.section-modal", modal_rows()),
         section("picker.editor-keybindings.section-cursor", cursor_rows()),
         section("picker.editor-keybindings.section-editing", editing_rows()),
-        section("picker.editor-keybindings.section-clipboard", clipboard_rows()),
+        section(
+            "picker.editor-keybindings.section-clipboard",
+            clipboard_rows(),
+        ),
         section("picker.editor-keybindings.section-history", history_rows()),
         section("picker.editor-keybindings.section-mouse", mouse_rows()),
         section("picker.editor-keybindings.section-notes", notes_rows()),
@@ -179,7 +182,10 @@ fn mouse_rows() -> Vec<KeybindingRow> {
 /// sees the key, so the editor's copy binding is shadowed; we surface
 /// this so users aren't surprised when Ctrl+C exits the TUI mid-edit.
 fn notes_rows() -> Vec<KeybindingRow> {
-    vec![row("Ctrl+C", "picker.editor-keybindings.row.note-ctrl-c-quits")]
+    vec![row(
+        "Ctrl+C",
+        "picker.editor-keybindings.row.note-ctrl-c-quits",
+    )]
 }
 
 fn row(chord: &str, description_key: &str) -> KeybindingRow {

@@ -87,7 +87,11 @@ pub async fn list_models(provider: &GeminiProvider) -> Result<ListModelsResponse
                 .any(|s| s == "generateContent")
         })
         .map(|m| {
-            let bare_id = m.name.strip_prefix("models/").unwrap_or(&m.name).to_string();
+            let bare_id = m
+                .name
+                .strip_prefix("models/")
+                .unwrap_or(&m.name)
+                .to_string();
             let display_name = m.display_name.or_else(|| m.description.clone());
             ModelInfo {
                 id: bare_id,

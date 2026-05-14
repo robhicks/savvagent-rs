@@ -93,7 +93,15 @@ mod tests {
     #[test]
     fn render_returns_empty() {
         let s = ViewFileScreen::new("/tmp/x.rs".into());
-        assert!(s.render(Region { x: 0, y: 0, width: 80, height: 24 }).is_empty());
+        assert!(
+            s.render(Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 24
+            })
+            .is_empty()
+        );
     }
 
     #[test]

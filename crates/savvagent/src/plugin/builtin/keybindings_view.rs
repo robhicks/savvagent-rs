@@ -7,8 +7,8 @@
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine,
-    StyledSpan, TextMods, ThemeColor,
+    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine, StyledSpan,
+    TextMods, ThemeColor,
 };
 
 /// A single keybinding row: chord on the left, description on the right.
@@ -213,7 +213,10 @@ mod tests {
             "id",
             vec![
                 section("Has rows", vec![("X", "desc")]),
-                KeybindingSection { title: "Empty".into(), rows: vec![] },
+                KeybindingSection {
+                    title: "Empty".into(),
+                    rows: vec![],
+                },
             ],
             StyledLine::plain("tips"),
         );
@@ -224,7 +227,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("Has rows"), "got: {joined}");
-        assert!(!joined.contains("Empty"), "empty section should not appear; got: {joined}");
+        assert!(
+            !joined.contains("Empty"),
+            "empty section should not appear; got: {joined}"
+        );
     }
 
     #[tokio::test]

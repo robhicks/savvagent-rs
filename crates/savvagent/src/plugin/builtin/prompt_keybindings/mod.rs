@@ -140,20 +140,38 @@ fn cursor_rows() -> Vec<KeybindingRow> {
     vec![
         row("←/→", "picker.prompt-keybindings.row.cursor-char"),
         row("↑/↓", "picker.prompt-keybindings.row.cursor-line"),
-        row("Home / Ctrl+A", "picker.prompt-keybindings.row.cursor-line-start"),
-        row("End / Ctrl+E", "picker.prompt-keybindings.row.cursor-line-end"),
+        row(
+            "Home / Ctrl+A",
+            "picker.prompt-keybindings.row.cursor-line-start",
+        ),
+        row(
+            "End / Ctrl+E",
+            "picker.prompt-keybindings.row.cursor-line-end",
+        ),
         row("Ctrl+←/→", "picker.prompt-keybindings.row.cursor-word"),
-        row("Alt+B / Alt+F", "picker.prompt-keybindings.row.cursor-word-alt"),
+        row(
+            "Alt+B / Alt+F",
+            "picker.prompt-keybindings.row.cursor-word-alt",
+        ),
         row("PgUp / PgDn", "picker.prompt-keybindings.row.cursor-page"),
-        row("Alt+< / Alt+>", "picker.prompt-keybindings.row.cursor-top-bottom"),
+        row(
+            "Alt+< / Alt+>",
+            "picker.prompt-keybindings.row.cursor-top-bottom",
+        ),
     ]
 }
 
 /// Editing (tui-textarea built-ins).
 fn editing_rows() -> Vec<KeybindingRow> {
     vec![
-        row("Backspace / Ctrl+H", "picker.prompt-keybindings.row.delete-prev"),
-        row("Delete / Ctrl+D", "picker.prompt-keybindings.row.delete-next"),
+        row(
+            "Backspace / Ctrl+H",
+            "picker.prompt-keybindings.row.delete-prev",
+        ),
+        row(
+            "Delete / Ctrl+D",
+            "picker.prompt-keybindings.row.delete-next",
+        ),
         row(
             "Ctrl+W / Alt+Backspace",
             "picker.prompt-keybindings.row.delete-word-back",

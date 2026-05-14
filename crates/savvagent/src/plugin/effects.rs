@@ -1884,8 +1884,10 @@ mod tests {
         let indexes = std::sync::Arc::new(tokio::sync::RwLock::new(indexes));
 
         let commands = build_palette_commands(&registry, &indexes).await;
-        let by_name: std::collections::HashMap<String, bool> =
-            commands.into_iter().map(|c| (c.name, c.needs_arg)).collect();
+        let by_name: std::collections::HashMap<String, bool> = commands
+            .into_iter()
+            .map(|c| (c.name, c.needs_arg))
+            .collect();
 
         // Slashes whose no-arg behavior is meaningful (open a picker)
         // must dispatch on selection, not prefill.
@@ -1916,8 +1918,8 @@ mod tests {
     #[tokio::test]
     async fn connect_picker_lists_all_provider_plugins() {
         use crate::plugin::manifests::Indexes;
-        use crate::plugin::registry::PluginRegistry;
         use crate::plugin::register_builtins;
+        use crate::plugin::registry::PluginRegistry;
 
         let set = register_builtins();
         let registry = PluginRegistry::new(set);

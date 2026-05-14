@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Effect, KeyCodePortable, KeyEventPortable, ModelEntry, PluginError, Region, Screen,
-    StyledLine, StyledSpan, TextMods, ThemeColor,
+    Effect, KeyCodePortable, KeyEventPortable, ModelEntry, PluginError, Region, Screen, StyledLine,
+    StyledSpan, TextMods, ThemeColor,
 };
 
 /// Model picker screen. Renders one row per advertised model; Enter
@@ -24,10 +24,7 @@ impl ModelPickerScreen {
     /// `current_id` (when present). When `current_id` isn't in
     /// `models`, the cursor starts at the top of the list.
     pub fn new(current_id: String, models: Vec<ModelEntry>) -> Self {
-        let cursor = models
-            .iter()
-            .position(|m| m.id == current_id)
-            .unwrap_or(0);
+        let cursor = models.iter().position(|m| m.id == current_id).unwrap_or(0);
         Self {
             models,
             cursor,

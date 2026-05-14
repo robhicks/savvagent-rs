@@ -71,9 +71,8 @@ impl ModelsPref {
 /// the file atomically. Errors propagate; the caller decides whether to
 /// surface them to the user (typically a warn + `push_note`).
 pub async fn save_for_provider(provider_id: &str, model_id: &str) -> Result<()> {
-    let path = models_toml_path().context(
-        "neither $HOME nor $USERPROFILE is set; cannot locate ~/.savvagent/models.toml",
-    )?;
+    let path = models_toml_path()
+        .context("neither $HOME nor $USERPROFILE is set; cannot locate ~/.savvagent/models.toml")?;
     let mut pref = load_from_path(&path);
     pref.providers
         .insert(provider_id.to_string(), model_id.to_string());
@@ -136,8 +135,11 @@ async fn save_to_path(pref: &ModelsPref, path: &std::path::Path) -> Result<()> {
             // Best-effort cleanup so we don't leak a tmp file the next
             // save would just overwrite anyway.
             let _ = tokio::fs::remove_file(&tmp).await;
-            Err(anyhow::Error::from(e)
-                .context(format!("rename {} -> {}", tmp.display(), path.display())))
+            Err(anyhow::Error::from(e).context(format!(
+                "rename {} -> {}",
+                tmp.display(),
+                path.display()
+            )))
         }
     }
 }
@@ -165,6 +167,8 @@ mod tests {
         assert_eq!(pref.get("anthropic"), None);
     }
 
+    // HOME_LOCK is std::Mutex (shared with sync tests) and must span the await.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn roundtrip_preserves_other_providers() {
         let _lock = HOME_LOCK.lock().unwrap();
@@ -212,6 +216,7 @@ anthropic = "should-be-ignored"
         );
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
     async fn save_atomic_no_partial_write() {
         let _lock = HOME_LOCK.lock().unwrap();

@@ -242,9 +242,7 @@ mod tests {
             Effect::PromptApiKey { provider_id } => {
                 assert_eq!(provider_id.as_str(), PROVIDER_ID);
             }
-            other => panic!(
-                "expected PromptApiKey even with pre-installed client; got {other:?}"
-            ),
+            other => panic!("expected PromptApiKey even with pre-installed client; got {other:?}"),
         }
     }
 

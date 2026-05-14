@@ -999,9 +999,8 @@ async fn apply_pending_model_change(
     // Persist only when the requesting effect asked for it.
     if pending.persist {
         match models_pref::save_for_provider(spec.id, &pending.id).await {
-            Ok(()) => app.push_note(
-                rust_i18n::t!("notes.model-persisted", provider = spec.id).to_string(),
-            ),
+            Ok(()) => app
+                .push_note(rust_i18n::t!("notes.model-persisted", provider = spec.id).to_string()),
             Err(e) => {
                 tracing::warn!(error = ?e, provider = spec.id,
                     "models.toml save failed");
@@ -1863,14 +1862,10 @@ async fn run_app(
                         // still work via fallthrough); Ctrl+Y otherwise
                         // pastes in tui-textarea, but desktop muscle
                         // memory of Ctrl+Y=redo wins here.
-                        KeyCode::Char('z')
-                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
+                        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.input_textarea.undo();
                         }
-                        KeyCode::Char('y')
-                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
+                        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             app.input_textarea.redo();
                         }
                         KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -2082,9 +2077,7 @@ async fn run_app(
                             _ => {
                                 // No stored key — stay in the modal so
                                 // the user can keep typing.
-                                app.push_note(
-                                    rust_i18n::t!("notes.api-key-empty").to_string(),
-                                );
+                                app.push_note(rust_i18n::t!("notes.api-key-empty").to_string());
                             }
                         }
                     }

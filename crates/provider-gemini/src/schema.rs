@@ -118,8 +118,14 @@ fn walk_object(map: &Map<String, Value>, defs: &Map<String, Value>, depth: u32) 
     let mut out = Map::with_capacity(map.len());
     for (key, value) in map {
         match key.as_str() {
-            "$schema" | "$id" | "$comment" | "$defs" | "definitions"
-            | "additionalProperties" | "unevaluatedProperties" | "patternProperties" => continue,
+            "$schema"
+            | "$id"
+            | "$comment"
+            | "$defs"
+            | "definitions"
+            | "additionalProperties"
+            | "unevaluatedProperties"
+            | "patternProperties" => continue,
             "type" => {
                 rewrite_type(value, &mut out);
             }
@@ -403,7 +409,10 @@ mod tests {
         });
         let out = sanitize(&input);
         let count = &out["properties"]["count"];
-        assert!(count.get("anyOf").is_none(), "anyOf should have collapsed: {count}");
+        assert!(
+            count.get("anyOf").is_none(),
+            "anyOf should have collapsed: {count}"
+        );
         assert_eq!(count["nullable"], json!(true));
         assert_eq!(count["type"], json!("string"));
         assert_eq!(count["enum"], json!(["all"]));
@@ -525,7 +534,10 @@ mod tests {
         match value {
             Value::Object(map) => {
                 for k in FORBIDDEN {
-                    assert!(map.get(*k).is_none(), "found forbidden key `{k}` in {value}");
+                    assert!(
+                        map.get(*k).is_none(),
+                        "found forbidden key `{k}` in {value}"
+                    );
                 }
                 // Forbid `type: ["X", "null"]` arrays anywhere.
                 if let Some(t) = map.get("type") {
