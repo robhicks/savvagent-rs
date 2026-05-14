@@ -944,7 +944,7 @@ fn build_layered_system_prompt(config: &HostConfig, tools: &ToolRegistry) -> Opt
     let default_prompt_text = if config.default_prompt_enabled {
         let app_version = match config.app_version.as_deref() {
             Some(v) => crate::default_prompt::AppVersion::App(v),
-            None => crate::default_prompt::AppVersion::HostCrateFallback(env!("CARGO_PKG_VERSION")),
+            None => crate::default_prompt::AppVersion::HostCrateFallback,
         };
         let env = crate::default_prompt::PromptEnv::probe(
             &config.project_root,

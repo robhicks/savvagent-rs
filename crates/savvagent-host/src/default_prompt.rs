@@ -17,20 +17,32 @@ use std::path::Path;
 use savvagent_protocol::ToolDef;
 
 /// App-version label source. See [`crate::HostConfig::with_app_version`].
+///
+/// `HostCrateFallback` is a unit variant — the actual fallback string
+/// is the `savvagent-host` crate's `CARGO_PKG_VERSION`, expanded at
+/// render time inside this crate. Encoding the choice as a discriminant
+/// (rather than a payload) means no caller can accidentally render the
+/// fallback label with the wrong string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppVersion<'a> {
     /// Embedder-supplied label, e.g. the TUI binary's `CARGO_PKG_VERSION`.
     /// Rendered as `Savvagent version: <version>`.
     App(&'a str),
-    /// No embedder version provided. Falls back to the `savvagent-host`
-    /// crate version. Rendered as `Savvagent host crate version:
-    /// <version>` to flag the distinction for library callers.
-    HostCrateFallback(&'static str),
+    /// No embedder version provided. The renderer fills in the
+    /// `savvagent-host` crate's `CARGO_PKG_VERSION` and labels the
+    /// line `Savvagent host crate version: <version>` to flag the
+    /// distinction for library callers.
+    HostCrateFallback,
 }
 
 /// Snapshot of the host environment used to render the default prompt.
 /// Cheap to construct; pure to read.
+///
+/// Marked `#[non_exhaustive]` so external callers must go through
+/// [`Self::probe`] (or wait for new fields). In-crate construction via
+/// struct literal stays ergonomic for tests.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct PromptEnv<'a> {
     /// Root directory of the user's project.
     pub project_root: &'a Path,
@@ -189,9 +201,10 @@ fn render_environment(out: &mut String, env: &PromptEnv<'_>) {
     ));
     let version_line = match &env.app_version {
         AppVersion::App(v) => format!("- Savvagent version: {v}"),
-        AppVersion::HostCrateFallback(v) => {
-            format!("- Savvagent host crate version: {v}")
-        }
+        AppVersion::HostCrateFallback => format!(
+            "- Savvagent host crate version: {}",
+            env!("CARGO_PKG_VERSION")
+        ),
     };
     out.push_str(&version_line);
 }
@@ -410,12 +423,12 @@ mod tests {
     #[test]
     fn build_version_line_uses_host_crate_label_for_fallback() {
         let mut e = env();
-        e.app_version = AppVersion::HostCrateFallback("test-host-ver");
+        e.app_version = AppVersion::HostCrateFallback;
         let s = build(&e, &[]);
-        assert!(
-            s.contains("Savvagent host crate version: test-host-ver"),
-            "{s}"
-        );
+        // The label is what we pin; the version itself is whatever the
+        // savvagent-host crate's CARGO_PKG_VERSION expands to at compile
+        // time. Asserting on the prefix avoids hardcoding the version.
+        assert!(s.contains("Savvagent host crate version:"), "{s}");
     }
 
     #[test]
