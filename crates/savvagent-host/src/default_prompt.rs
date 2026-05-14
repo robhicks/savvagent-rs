@@ -31,7 +31,6 @@ pub enum AppVersion<'a> {
 /// Snapshot of the host environment used to render the default prompt.
 /// Cheap to construct; pure to read.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Consumed by Task 8 (Host::start wiring); allow removed then.
 pub struct PromptEnv<'a> {
     /// Root directory of the user's project.
     pub project_root: &'a Path,
@@ -47,6 +46,30 @@ pub struct PromptEnv<'a> {
     pub bash_available: bool,
     /// App version label source.
     pub app_version: AppVersion<'a>,
+}
+
+impl<'a> PromptEnv<'a> {
+    /// Construct a `PromptEnv` by probing `project_root` for a `.git`
+    /// entry. The OS/arch/bash/app-version fields are wired by the
+    /// caller — they're known at the host construction site.
+    #[allow(dead_code)] // Consumed by Task 8 (Host::start wiring); allow removed then.
+    pub fn probe(
+        project_root: &'a Path,
+        os: &'static str,
+        arch: &'static str,
+        bash_available: bool,
+        app_version: AppVersion<'a>,
+    ) -> Self {
+        let git_present = std::fs::metadata(project_root.join(".git")).is_ok();
+        Self {
+            project_root,
+            os,
+            arch,
+            git_present,
+            bash_available,
+            app_version,
+        }
+    }
 }
 
 const IDENTITY: &str = "\
@@ -153,6 +176,26 @@ fn render_affordances(out: &mut String, tools: &[ToolDef], bash_available: bool)
     }
 }
 
+fn render_environment(out: &mut String, env: &PromptEnv<'_>) {
+    out.push_str("## Environment\n\n");
+    out.push_str(&format!("- OS: {} ({})\n", env.os, env.arch));
+    out.push_str(&format!(
+        "- Project root: {}\n",
+        env.project_root.display()
+    ));
+    out.push_str(&format!(
+        "- Git repository: {}\n",
+        if env.git_present { "yes" } else { "no" }
+    ));
+    let version_line = match &env.app_version {
+        AppVersion::App(v) => format!("- Savvagent version: {v}"),
+        AppVersion::HostCrateFallback(v) => {
+            format!("- Savvagent host crate version: {v}")
+        }
+    };
+    out.push_str(&version_line);
+}
+
 /// Render the default prompt. Pure over `(env, tools)`. The builder
 /// reads `tool.name` only — descriptions are NOT included verbatim.
 #[allow(dead_code)] // Consumed by Task 8 (Host::start wiring); allow removed then.
@@ -163,6 +206,8 @@ pub fn build(env: &PromptEnv<'_>, tools: &[ToolDef]) -> String {
     out.push_str(BEHAVIOR);
     out.push_str("\n\n");
     render_affordances(&mut out, tools, env.bash_available);
+    out.push_str("\n\n");
+    render_environment(&mut out, env);
     out.push_str("\n\n");
     out.push_str(CONVENTIONS);
     out
@@ -345,5 +390,71 @@ mod tests {
             !s.contains("A shell tool is wired"),
             "shell paragraph leaked when bash_available=false: {s}"
         );
+    }
+
+    use tempfile::tempdir;
+
+    #[test]
+    fn build_environment_includes_os_arch_root_and_git_state() {
+        let mut e = env();
+        e.git_present = true;
+        let s = build(&e, &[]);
+        assert!(s.contains("## Environment"), "{s}");
+        assert!(s.contains("OS: linux (x86_64)"));
+        assert!(s.contains("Project root: /tmp/proj"));
+        assert!(s.contains("Git repository: yes"));
+    }
+
+    #[test]
+    fn build_environment_renders_no_git() {
+        let s = build(&env(), &[]);
+        assert!(s.contains("Git repository: no"), "{s}");
+    }
+
+    #[test]
+    fn build_version_line_uses_app_label_for_app_variant() {
+        let mut e = env();
+        e.app_version = AppVersion::App("1.2.3");
+        let s = build(&e, &[]);
+        assert!(s.contains("Savvagent version: 1.2.3"), "{s}");
+        assert!(!s.contains("host crate version"));
+    }
+
+    #[test]
+    fn build_version_line_uses_host_crate_label_for_fallback() {
+        let mut e = env();
+        e.app_version = AppVersion::HostCrateFallback("0.14.0");
+        let s = build(&e, &[]);
+        assert!(
+            s.contains("Savvagent host crate version: 0.14.0"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn probe_marks_git_present_when_dot_git_exists() {
+        let d = tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let p = PromptEnv::probe(
+            d.path(),
+            "linux",
+            "x86_64",
+            false,
+            AppVersion::App("0.14.0"),
+        );
+        assert!(p.git_present);
+    }
+
+    #[test]
+    fn probe_marks_git_absent_when_dot_git_missing() {
+        let d = tempdir().unwrap();
+        let p = PromptEnv::probe(
+            d.path(),
+            "linux",
+            "x86_64",
+            false,
+            AppVersion::App("0.14.0"),
+        );
+        assert!(!p.git_present);
     }
 }
