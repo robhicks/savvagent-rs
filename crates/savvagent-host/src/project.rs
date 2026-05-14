@@ -257,8 +257,6 @@ mod tests {
         assert!(parsed.body.is_none());
     }
 
-    use super::layered_prompt;
-
     #[test]
     fn layered_all_three_renders_three_sections() {
         let s = layered_prompt(Some("DEFAULT"), Some("OVERRIDE"), Some("BODY")).unwrap();
@@ -339,8 +337,12 @@ mod tests {
 
     #[test]
     fn layered_preserves_code_fences_in_project_body() {
-        // Project guidance often opens with a code fence. Preserve verbatim.
-        let body = "```rust\nfn main() {}\n```";
+        // A SAVVAGENT.md that opens with a blank line then a code fence:
+        // `trim()` would strip the leading newline; verbatim render
+        // preserves it. This is the load-bearing test for the
+        // verbatim-render rule when the surrounding whitespace itself
+        // carries meaning.
+        let body = "\n```rust\nfn main() {}\n```\n";
         let s = layered_prompt(None, None, Some(body)).unwrap();
         assert!(s.contains(body), "code fence altered:\n{s}");
     }
