@@ -208,17 +208,15 @@ mod tests {
     #[tokio::test]
     async fn create_screen_with_unknown_id_returns_screen_not_found() {
         let p = ChangelogPlugin::with_fetcher(Arc::new(StubFetcher::ok("# x")));
-        let err = p
-            .create_screen("not-changelog", ScreenArgs::Changelog)
-            .unwrap_err();
-        assert!(matches!(err, PluginError::ScreenNotFound(_)));
+        let result = p.create_screen("not-changelog", ScreenArgs::Changelog);
+        assert!(matches!(result, Err(PluginError::ScreenNotFound(_))));
     }
 
     #[tokio::test]
     async fn create_screen_with_wrong_args_returns_invalid_args() {
         let p = ChangelogPlugin::with_fetcher(Arc::new(StubFetcher::ok("# x")));
-        let err = p.create_screen(SCREEN_ID, ScreenArgs::None).unwrap_err();
-        assert!(matches!(err, PluginError::InvalidArgs(_)));
+        let result = p.create_screen(SCREEN_ID, ScreenArgs::None);
+        assert!(matches!(result, Err(PluginError::InvalidArgs(_))));
     }
 
     #[tokio::test]

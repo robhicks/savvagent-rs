@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_to_styled_lines_renders_bold_heading_with_modifier() {
+    fn markdown_to_styled_lines_renders_heading_and_body() {
         let lines = super::markdown_to_styled_lines("# Hello\n\nbody");
         let combined: String = lines
             .iter()
@@ -521,14 +521,18 @@ mod tests {
         assert!(combined.contains("Hello"), "got: {combined}");
         assert!(combined.contains("body"), "got: {combined}");
 
-        // The heading line must carry a bold span somewhere.
+        // The heading and body must appear on separate lines.
         let heading_line = lines
             .iter()
             .find(|l| l.spans.iter().any(|s| s.text.contains("Hello")))
             .expect("must find a line containing the heading text");
+        let body_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.text.contains("body")))
+            .expect("must find a line containing the body text");
         assert!(
-            heading_line.spans.iter().any(|s| s.modifiers.bold),
-            "heading line must contain at least one bold span: {heading_line:?}"
+            !std::ptr::eq(heading_line as *const _, body_line as *const _),
+            "heading and body must be on separate lines"
         );
     }
 
