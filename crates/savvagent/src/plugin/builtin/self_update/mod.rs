@@ -29,14 +29,16 @@ pub mod install_method;
 /// read.
 pub mod check;
 
-/// `/update` apply path: the [`BinarySwapper`] trait and its
-/// `self_update`-backed production impl.
+/// Install path: the [`Installer`] trait and its cargo-dist-backed
+/// production impl. Replaces every binary in the release archive (the
+/// main `savvagent` binary plus six helpers) by invoking the same
+/// installer script that ships with each GitHub Release.
 pub mod apply;
 
 /// 24-hour cache for the GitHub Releases query result.
 pub mod cache;
 
-pub use apply::{BinarySwapper, SelfUpdateBinarySwapper, apply_update};
+pub use apply::{CargoDistInstaller, Installer, apply_update};
 pub use check::{GithubReleasesFetcher, ReleasesFetcher, UpdateState, check_for_update};
 pub use install_method::{InstallMethod, detect};
 
@@ -134,11 +136,11 @@ pub struct SelfUpdatePlugin {
     state: Arc<Mutex<UpdateState>>,
     /// Fetcher used by the spawned check task. The default constructor
     /// installs [`GithubReleasesFetcher`]; tests inject a stub via
-    /// [`SelfUpdatePlugin::with_fetcher`].
+    /// [`SelfUpdatePlugin::with_fetcher_and_installer`].
     fetcher: Arc<dyn ReleasesFetcher>,
-    /// Binary swapper used by `/update`. Defaults to
-    /// [`SelfUpdateBinarySwapper`]; tests substitute a stub.
-    swapper: Arc<dyn BinarySwapper>,
+    /// Installer used by the auto-install path and `/update` retries.
+    /// Defaults to [`CargoDistInstaller`]; tests substitute a stub.
+    installer: Arc<dyn Installer>,
     /// Optional override for the on-disk cache file path. When `None`,
     /// the spawned check task resolves the path via [`cache::cache_path`]
     /// (i.e. `$HOME/.savvagent/update-check.json`). Tests that exercise
@@ -151,28 +153,21 @@ pub struct SelfUpdatePlugin {
 
 impl SelfUpdatePlugin {
     /// Construct a new [`SelfUpdatePlugin`] backed by the production
-    /// [`GithubReleasesFetcher`] and [`SelfUpdateBinarySwapper`].
+    /// [`GithubReleasesFetcher`] and [`CargoDistInstaller`].
     pub fn new() -> Self {
-        Self::with_fetcher_and_swapper(
+        Self::with_fetcher_and_installer(
             Arc::new(GithubReleasesFetcher),
-            Arc::new(SelfUpdateBinarySwapper),
+            Arc::new(CargoDistInstaller),
         )
     }
 
-    /// Construct a [`SelfUpdatePlugin`] with a custom fetcher; production
-    /// swapper. Tests that don't exercise `/update` use this.
-    #[cfg(test)]
-    pub fn with_fetcher(fetcher: Arc<dyn ReleasesFetcher>) -> Self {
-        Self::with_fetcher_and_swapper(fetcher, Arc::new(SelfUpdateBinarySwapper))
-    }
-
-    /// Construct a [`SelfUpdatePlugin`] with custom fetcher AND swapper.
+    /// Construct a [`SelfUpdatePlugin`] with custom fetcher AND installer.
     /// Honors the `SAVVAGENT_NO_UPDATE_CHECK` env var and
     /// `--no-update-check` CLI flag — when either is set the plugin
     /// starts in [`UpdateState::Disabled`] and `on_event` is a no-op.
-    pub fn with_fetcher_and_swapper(
+    pub fn with_fetcher_and_installer(
         fetcher: Arc<dyn ReleasesFetcher>,
-        swapper: Arc<dyn BinarySwapper>,
+        installer: Arc<dyn Installer>,
     ) -> Self {
         let initial = if opt_out_active() {
             UpdateState::Disabled
@@ -183,7 +178,7 @@ impl SelfUpdatePlugin {
             install_method: detect(),
             state: Arc::new(Mutex::new(initial)),
             fetcher,
-            swapper,
+            installer,
             cache_path_override: None,
         }
     }
@@ -254,15 +249,24 @@ impl Plugin for SelfUpdatePlugin {
             return Ok(vec![]);
         }
 
-        // Decide what to do based on the current state — and clone the
-        // versions out so we can release the lock before the (potentially
-        // long-running) async swap call.
+        // Auto-install kicks off the moment the HostStarting check
+        // detects a new release, so /update is mostly a retry/status
+        // command. Resolve the action under the lock, then release it
+        // before any await — install can take several seconds.
         let action = {
             let guard = self.state.lock().unwrap();
             match &*guard {
-                UpdateState::Available { current, latest } => {
-                    Action::Apply(current.clone(), latest.clone())
-                }
+                UpdateState::Available { current, latest }
+                | UpdateState::InstallFailed {
+                    current, latest, ..
+                } => Action::Install(current.clone(), latest.clone()),
+                UpdateState::Installing { latest, .. } => Action::Note(
+                    rust_i18n::t!(
+                        "self-update.note-install-in-progress",
+                        latest = latest.to_string()
+                    )
+                    .to_string(),
+                ),
                 UpdateState::Disabled => {
                     Action::Note(rust_i18n::t!("self-update.note-disabled").to_string())
                 }
@@ -278,31 +282,13 @@ impl Plugin for SelfUpdatePlugin {
 
         match action {
             Action::Note(text) => Ok(vec![note_effect(text)]),
-            Action::Apply(current, latest) => {
-                let starting_note =
-                    rust_i18n::t!("self-update.note-updating", latest = latest.to_string())
-                        .to_string();
-                match apply_update(self.swapper.as_ref(), current, latest.clone()).await {
-                    Ok(new_state) => {
-                        if let UpdateState::Updated { from, to } = &new_state {
-                            record_restart_hint(from.clone(), to.clone());
-                        }
-                        *self.state.lock().unwrap() = new_state;
-                        let ok_note = rust_i18n::t!(
-                            "self-update.note-update-ok",
-                            latest = latest.to_string()
-                        )
-                        .to_string();
-                        Ok(vec![note_effect(starting_note), note_effect(ok_note)])
-                    }
-                    Err(e) => {
-                        let fail_note =
-                            rust_i18n::t!("self-update.note-update-fail", err = e.to_string())
-                                .to_string();
-                        Ok(vec![note_effect(starting_note), note_effect(fail_note)])
-                    }
-                }
-            }
+            Action::Install(current, latest) => Ok(run_install(
+                Arc::clone(&self.state),
+                Arc::clone(&self.installer),
+                current,
+                latest,
+            )
+            .await),
         }
     }
 
@@ -319,10 +305,13 @@ impl Plugin for SelfUpdatePlugin {
 
         // Spawn the version check on the runtime so the hook dispatcher
         // returns immediately. The task consults the 24h cache before
-        // hitting the network and persists the latest tag on a fresh
-        // fetch.
+        // hitting the network, persists the latest tag on a fresh fetch,
+        // and — if the check classifies the release as Available — kicks
+        // off the cargo-dist installer in the same task so the user
+        // doesn't have to type /update.
         let state = Arc::clone(&self.state);
         let fetcher = Arc::clone(&self.fetcher);
+        let installer = Arc::clone(&self.installer);
         let install_method = self.install_method;
         let current_version = env!("CARGO_PKG_VERSION").to_string();
         let cache_path_override = self.cache_path_override.clone();
@@ -373,8 +362,24 @@ impl Plugin for SelfUpdatePlugin {
                 fresh
             };
 
+            // Capture the versions before publishing the check result so
+            // we can fall through into the auto-install path without
+            // re-locking immediately to read them back.
+            let pending_install = if let UpdateState::Available { current, latest } = &result {
+                Some((current.clone(), latest.clone()))
+            } else {
+                None
+            };
+
             if let Ok(mut guard) = state.lock() {
                 *guard = result;
+            }
+
+            if let Some((current, latest)) = pending_install {
+                // Kicked off automatically — discard the returned effects
+                // because nothing in this background task can push notes;
+                // the banner is the user-visible signal.
+                let _ = run_install(state, installer, current, latest).await;
             }
         });
 
@@ -398,6 +403,16 @@ impl Plugin for SelfUpdatePlugin {
                 latest = latest.to_string()
             )
             .to_string(),
+            UpdateState::Installing { latest, .. } => {
+                rust_i18n::t!("self-update.banner-installing", latest = latest.to_string())
+                    .to_string()
+            }
+            UpdateState::InstallFailed { latest, error, .. } => rust_i18n::t!(
+                "self-update.banner-install-failed",
+                latest = latest.to_string(),
+                err = error.clone()
+            )
+            .to_string(),
             UpdateState::Updated { to, .. } => {
                 rust_i18n::t!("self-update.banner-updated", latest = to.to_string()).to_string()
             }
@@ -418,7 +433,55 @@ impl Plugin for SelfUpdatePlugin {
 /// action under the lock and execute it after the lock is dropped.
 enum Action {
     Note(String),
-    Apply(semver::Version, semver::Version),
+    Install(semver::Version, semver::Version),
+}
+
+/// Run the installer for `latest` and update plugin `state` accordingly.
+/// Shared by the auto-install path in `on_event` and the retry path in
+/// `handle_slash`. Mutates `state` to [`UpdateState::Installing`] before
+/// awaiting the installer, then to [`UpdateState::Updated`] (recording a
+/// restart hint) or [`UpdateState::InstallFailed`] on completion.
+///
+/// Returns the effects to push into the transcript: nothing in the
+/// auto-install path (the banner is the user-visible signal), three
+/// notes in the slash path (starting → outcome). The single shared
+/// implementation keeps the state-machine in one place; the caller
+/// decides whether to surface the returned effects.
+async fn run_install(
+    state: Arc<Mutex<UpdateState>>,
+    installer: Arc<dyn Installer>,
+    current: semver::Version,
+    latest: semver::Version,
+) -> Vec<Effect> {
+    let starting_note =
+        rust_i18n::t!("self-update.note-updating", latest = latest.to_string()).to_string();
+
+    *state.lock().unwrap() = UpdateState::Installing {
+        current: current.clone(),
+        latest: latest.clone(),
+    };
+
+    match apply_update(installer.as_ref(), current.clone(), latest.clone()).await {
+        Ok(new_state) => {
+            if let UpdateState::Updated { from, to } = &new_state {
+                record_restart_hint(from.clone(), to.clone());
+            }
+            *state.lock().unwrap() = new_state;
+            let ok_note = rust_i18n::t!("self-update.note-update-ok", latest = latest.to_string())
+                .to_string();
+            vec![note_effect(starting_note), note_effect(ok_note)]
+        }
+        Err(e) => {
+            let error = e.to_string();
+            *state.lock().unwrap() = UpdateState::InstallFailed {
+                current,
+                latest,
+                error: error.clone(),
+            };
+            let fail_note = rust_i18n::t!("self-update.note-update-fail", err = error).to_string();
+            vec![note_effect(starting_note), note_effect(fail_note)]
+        }
+    }
 }
 
 #[cfg(test)]
@@ -427,6 +490,8 @@ mod tests {
     use crate::test_helpers::HOME_LOCK;
     use async_trait::async_trait;
     use semver::Version;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// In-test releases fetcher that returns a fixed tag.
     struct FixedFetcher(&'static str);
@@ -436,6 +501,66 @@ mod tests {
         async fn latest_tag(&self) -> anyhow::Result<String> {
             Ok(self.0.to_string())
         }
+    }
+
+    /// In-test installer: records each `install()` invocation and returns
+    /// the configured outcome. Defaults to success; `with_error` flips
+    /// the outcome to a fixed error message.
+    struct StubInstaller {
+        result: Mutex<Result<(), String>>,
+        invocations: AtomicUsize,
+        last_version: Mutex<Option<Version>>,
+    }
+
+    impl StubInstaller {
+        fn ok() -> Self {
+            Self {
+                result: Mutex::new(Ok(())),
+                invocations: AtomicUsize::new(0),
+                last_version: Mutex::new(None),
+            }
+        }
+        fn err(msg: &str) -> Self {
+            Self {
+                result: Mutex::new(Err(msg.into())),
+                invocations: AtomicUsize::new(0),
+                last_version: Mutex::new(None),
+            }
+        }
+        fn invocation_count(&self) -> usize {
+            self.invocations.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Installer for StubInstaller {
+        async fn install(&self, latest: &Version) -> anyhow::Result<()> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            *self.last_version.lock().unwrap() = Some(latest.clone());
+            match &*self.result.lock().unwrap() {
+                Ok(()) => Ok(()),
+                Err(msg) => Err(anyhow::anyhow!(msg.clone())),
+            }
+        }
+    }
+
+    /// Construct a plugin pre-seeded into the supplied state, with a
+    /// stubbed fetcher (never invoked here) and the supplied installer.
+    /// The HOME_LOCK guard is held only long enough to set the locale +
+    /// build the plugin; clippy's `await_holding_lock` is a hard error
+    /// in this crate.
+    fn locked_plugin_with_state(
+        installer: Arc<StubInstaller>,
+        state: UpdateState,
+    ) -> SelfUpdatePlugin {
+        let _lock = HOME_LOCK.lock().unwrap();
+        rust_i18n::set_locale("en");
+        let p = SelfUpdatePlugin::with_fetcher_and_installer(
+            Arc::new(FixedFetcher("v0.11.0")),
+            installer,
+        );
+        *p.state.lock().unwrap() = state;
+        p
     }
 
     fn dummy_region() -> Region {
@@ -510,59 +635,44 @@ mod tests {
     fn opt_out_cli_flag_disables() {
         assert!(opt_out_from(
             |_| None,
-            vec!["savvagent".to_string(), "--no-update-check".to_string(),],
+            vec!["savvagent".to_string(), "--no-update-check".to_string()],
         ));
     }
 
     #[test]
     fn opt_out_returns_false_when_neither_set() {
-        assert!(!opt_out_from(|_| None, vec!["savvagent".to_string()],));
+        assert!(!opt_out_from(|_| None, vec!["savvagent".to_string()]));
     }
 
     // --- render_slot ---
 
     #[test]
     fn render_slot_returns_empty_for_unknown_state() {
-        let _lock = HOME_LOCK.lock().unwrap();
-        rust_i18n::set_locale("en");
-
-        let p = SelfUpdatePlugin::with_fetcher(Arc::new(FixedFetcher("v99.99.99")));
-        let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
-        assert!(lines.is_empty());
+        let p = locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::Unknown);
+        assert!(p.render_slot(BANNER_SLOT_ID, dummy_region()).is_empty());
     }
 
     #[test]
     fn render_slot_returns_empty_for_up_to_date() {
-        let _lock = HOME_LOCK.lock().unwrap();
-        rust_i18n::set_locale("en");
-
-        let p = SelfUpdatePlugin::with_fetcher(Arc::new(FixedFetcher("v99.99.99")));
-        *p.state.lock().unwrap() = UpdateState::UpToDate;
-        let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
-        assert!(lines.is_empty());
+        let p = locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::UpToDate);
+        assert!(p.render_slot(BANNER_SLOT_ID, dummy_region()).is_empty());
     }
 
     #[test]
     fn render_slot_returns_empty_for_disabled() {
-        let _lock = HOME_LOCK.lock().unwrap();
-        rust_i18n::set_locale("en");
-
-        let p = SelfUpdatePlugin::with_fetcher(Arc::new(FixedFetcher("v99.99.99")));
-        *p.state.lock().unwrap() = UpdateState::Disabled;
-        let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
-        assert!(lines.is_empty());
+        let p = locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::Disabled);
+        assert!(p.render_slot(BANNER_SLOT_ID, dummy_region()).is_empty());
     }
 
     #[test]
     fn render_slot_renders_banner_when_available() {
-        let _lock = HOME_LOCK.lock().unwrap();
-        rust_i18n::set_locale("en");
-
-        let p = SelfUpdatePlugin::with_fetcher(Arc::new(FixedFetcher("v99.99.99")));
-        *p.state.lock().unwrap() = UpdateState::Available {
-            current: Version::parse("0.10.0").unwrap(),
-            latest: Version::parse("0.11.0").unwrap(),
-        };
+        let p = locked_plugin_with_state(
+            Arc::new(StubInstaller::ok()),
+            UpdateState::Available {
+                current: Version::parse("0.10.0").unwrap(),
+                latest: Version::parse("0.11.0").unwrap(),
+            },
+        );
         let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
         assert_eq!(lines.len(), 1);
         let text = &lines[0].spans[0].text;
@@ -570,36 +680,70 @@ mod tests {
             text.contains("0.10.0") && text.contains("0.11.0"),
             "expected both versions in banner, got: {text}"
         );
+    }
+
+    #[test]
+    fn render_slot_renders_installing_banner() {
+        let p = locked_plugin_with_state(
+            Arc::new(StubInstaller::ok()),
+            UpdateState::Installing {
+                current: Version::parse("0.10.0").unwrap(),
+                latest: Version::parse("0.11.0").unwrap(),
+            },
+        );
+        let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
+        assert_eq!(lines.len(), 1);
+        let text = &lines[0].spans[0].text;
+        assert!(
+            text.contains("0.11.0"),
+            "expected latest version in installing banner: {text}"
+        );
+    }
+
+    #[test]
+    fn render_slot_renders_install_failed_banner() {
+        let p = locked_plugin_with_state(
+            Arc::new(StubInstaller::ok()),
+            UpdateState::InstallFailed {
+                current: Version::parse("0.10.0").unwrap(),
+                latest: Version::parse("0.11.0").unwrap(),
+                error: "network down".into(),
+            },
+        );
+        let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
+        assert_eq!(lines.len(), 1);
+        let text = &lines[0].spans[0].text;
+        assert!(
+            text.contains("0.11.0") && text.contains("network down"),
+            "expected version + error in install-failed banner: {text}"
+        );
         assert!(
             text.contains("/update"),
-            "expected /update hint, got: {text}"
+            "expected retry hint pointing at /update: {text}"
         );
     }
 
     #[test]
     fn render_slot_ignores_other_slot_ids() {
-        let _lock = HOME_LOCK.lock().unwrap();
-        rust_i18n::set_locale("en");
-
-        let p = SelfUpdatePlugin::with_fetcher(Arc::new(FixedFetcher("v99.99.99")));
-        *p.state.lock().unwrap() = UpdateState::Available {
-            current: Version::parse("0.10.0").unwrap(),
-            latest: Version::parse("0.11.0").unwrap(),
-        };
-        let lines = p.render_slot("home.tips", dummy_region());
-        assert!(lines.is_empty());
+        let p = locked_plugin_with_state(
+            Arc::new(StubInstaller::ok()),
+            UpdateState::Available {
+                current: Version::parse("0.10.0").unwrap(),
+                latest: Version::parse("0.11.0").unwrap(),
+            },
+        );
+        assert!(p.render_slot("home.tips", dummy_region()).is_empty());
     }
 
     #[test]
     fn render_slot_renders_updated_banner_when_state_is_updated() {
-        let _lock = HOME_LOCK.lock().unwrap();
-        rust_i18n::set_locale("en");
-
-        let p = SelfUpdatePlugin::with_fetcher(Arc::new(FixedFetcher("v99.99.99")));
-        *p.state.lock().unwrap() = UpdateState::Updated {
-            from: Version::parse("0.10.0").unwrap(),
-            to: Version::parse("0.11.0").unwrap(),
-        };
+        let p = locked_plugin_with_state(
+            Arc::new(StubInstaller::ok()),
+            UpdateState::Updated {
+                from: Version::parse("0.10.0").unwrap(),
+                to: Version::parse("0.11.0").unwrap(),
+            },
+        );
         let lines = p.render_slot(BANNER_SLOT_ID, dummy_region());
         assert_eq!(lines.len(), 1);
         let text = &lines[0].spans[0].text;
@@ -615,86 +759,23 @@ mod tests {
 
     // --- /update handle_slash ---
 
-    /// In-test binary swapper: records the call and returns the
-    /// configured outcome.
-    struct StubSwapper {
-        result: Mutex<Result<(), String>>,
-        invoked: Mutex<bool>,
-    }
-
-    impl StubSwapper {
-        fn ok() -> Self {
-            Self {
-                result: Mutex::new(Ok(())),
-                invoked: Mutex::new(false),
-            }
-        }
-        fn err(msg: &str) -> Self {
-            Self {
-                result: Mutex::new(Err(msg.into())),
-                invoked: Mutex::new(false),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl BinarySwapper for StubSwapper {
-        async fn swap(&self, _: &Version, _: &Version) -> anyhow::Result<()> {
-            *self.invoked.lock().unwrap() = true;
-            match &*self.result.lock().unwrap() {
-                Ok(()) => Ok(()),
-                Err(msg) => Err(anyhow::anyhow!(msg.clone())),
-            }
-        }
-    }
-
-    fn make_plugin_in_available_state(
-        swapper: Arc<StubSwapper>,
-    ) -> (SelfUpdatePlugin, Arc<StubSwapper>) {
-        let plugin = SelfUpdatePlugin::with_fetcher_and_swapper(
-            Arc::new(FixedFetcher("v0.11.0")),
-            swapper.clone(),
-        );
-        *plugin.state.lock().unwrap() = UpdateState::Available {
-            current: Version::parse("0.10.0").unwrap(),
-            latest: Version::parse("0.11.0").unwrap(),
-        };
-        (plugin, swapper)
-    }
-
-    use std::sync::Mutex;
-
-    /// Acquire HOME_LOCK only long enough to set the locale + build the
-    /// plugin, then drop the guard before any `.await` (clippy's
-    /// `await_holding_lock` is a hard error in this crate). Locale flips
-    /// during the subsequent await window do not affect these tests
-    /// because the assertions check structural properties (effect
-    /// counts, state transitions, error-message passthrough) rather
-    /// than locale-specific text.
-    fn locked_make_available_plugin(swapper: Arc<StubSwapper>) -> SelfUpdatePlugin {
-        let _lock = HOME_LOCK.lock().unwrap();
-        rust_i18n::set_locale("en");
-        let (plugin, _) = make_plugin_in_available_state(swapper);
-        plugin
-    }
-
     #[tokio::test]
-    async fn slash_update_when_available_calls_swapper_and_transitions_state() {
-        let swapper = Arc::new(StubSwapper::ok());
-        let mut plugin = locked_make_available_plugin(swapper.clone());
+    async fn slash_update_when_available_runs_installer_and_transitions_to_updated() {
+        let installer = Arc::new(StubInstaller::ok());
+        let mut plugin = locked_plugin_with_state(
+            installer.clone(),
+            UpdateState::Available {
+                current: Version::parse("0.10.0").unwrap(),
+                latest: Version::parse("0.11.0").unwrap(),
+            },
+        );
 
         let effects = plugin.handle_slash("update", vec![]).await.unwrap();
 
-        assert!(
-            *swapper.invoked.lock().unwrap(),
-            "swapper.swap() must be called"
-        );
+        assert_eq!(installer.invocation_count(), 1);
         // Two notes pushed: starting + success.
         assert_eq!(effects.len(), 2);
-        assert!(matches!(effects[0], Effect::PushNote { .. }));
-        assert!(matches!(effects[1], Effect::PushNote { .. }));
 
-        // State transitioned to Updated.
         match plugin.state() {
             UpdateState::Updated { from, to } => {
                 assert_eq!(from.to_string(), "0.10.0");
@@ -705,18 +786,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slash_update_when_swap_fails_keeps_state_in_available() {
-        let swapper = Arc::new(StubSwapper::err("disk full"));
-        let mut plugin = locked_make_available_plugin(swapper);
+    async fn slash_update_when_install_fails_transitions_to_install_failed() {
+        let installer = Arc::new(StubInstaller::err("network down"));
+        let mut plugin = locked_plugin_with_state(
+            installer,
+            UpdateState::Available {
+                current: Version::parse("0.10.0").unwrap(),
+                latest: Version::parse("0.11.0").unwrap(),
+            },
+        );
 
         let effects = plugin.handle_slash("update", vec![]).await.unwrap();
 
-        // Two notes: starting + failure (with err text passthrough — the
-        // err substring is not localized, it's the source error message).
+        // Two notes: starting + failure (with err text passthrough).
         assert_eq!(effects.len(), 2);
         if let Effect::PushNote { line } = &effects[1] {
             assert!(
-                line.spans[0].text.contains("disk full"),
+                line.spans[0].text.contains("network down"),
                 "fail note must include error: {}",
                 line.spans[0].text
             );
@@ -724,22 +810,64 @@ mod tests {
             panic!("expected PushNote effect");
         }
 
-        // State stays Available so the user can retry.
-        assert!(matches!(plugin.state(), UpdateState::Available { .. }));
+        match plugin.state() {
+            UpdateState::InstallFailed { latest, error, .. } => {
+                assert_eq!(latest.to_string(), "0.11.0");
+                assert!(error.contains("network down"), "got error: {error}");
+            }
+            other => panic!("expected InstallFailed state, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_update_when_install_failed_retries_install() {
+        let installer = Arc::new(StubInstaller::ok());
+        let mut plugin = locked_plugin_with_state(
+            installer.clone(),
+            UpdateState::InstallFailed {
+                current: Version::parse("0.10.0").unwrap(),
+                latest: Version::parse("0.11.0").unwrap(),
+                error: "previous failure".into(),
+            },
+        );
+
+        let effects = plugin.handle_slash("update", vec![]).await.unwrap();
+
+        assert_eq!(
+            installer.invocation_count(),
+            1,
+            "/update on InstallFailed must re-run the installer"
+        );
+        assert_eq!(effects.len(), 2);
+        assert!(matches!(plugin.state(), UpdateState::Updated { .. }));
+    }
+
+    #[tokio::test]
+    async fn slash_update_during_installing_returns_in_progress_note_only() {
+        let installer = Arc::new(StubInstaller::ok());
+        let mut plugin = locked_plugin_with_state(
+            installer.clone(),
+            UpdateState::Installing {
+                current: Version::parse("0.10.0").unwrap(),
+                latest: Version::parse("0.11.0").unwrap(),
+            },
+        );
+
+        let effects = plugin.handle_slash("update", vec![]).await.unwrap();
+
+        assert_eq!(effects.len(), 1);
+        assert_eq!(
+            installer.invocation_count(),
+            0,
+            "must not re-enter the installer while one is already running"
+        );
+        assert!(matches!(plugin.state(), UpdateState::Installing { .. }));
     }
 
     #[tokio::test]
     async fn slash_update_when_no_update_returns_no_update_note() {
-        let mut plugin = {
-            let _lock = HOME_LOCK.lock().unwrap();
-            rust_i18n::set_locale("en");
-            let p = SelfUpdatePlugin::with_fetcher_and_swapper(
-                Arc::new(FixedFetcher("v0.10.0")),
-                Arc::new(StubSwapper::ok()),
-            );
-            *p.state.lock().unwrap() = UpdateState::UpToDate;
-            p
-        };
+        let mut plugin =
+            locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::UpToDate);
 
         let effects = plugin.handle_slash("update", vec![]).await.unwrap();
         assert_eq!(effects.len(), 1);
@@ -748,84 +876,136 @@ mod tests {
 
     #[tokio::test]
     async fn slash_update_when_disabled_returns_disabled_note() {
-        let mut plugin = {
-            let _lock = HOME_LOCK.lock().unwrap();
-            rust_i18n::set_locale("en");
-            let p = SelfUpdatePlugin::with_fetcher_and_swapper(
-                Arc::new(FixedFetcher("v99.99.99")),
-                Arc::new(StubSwapper::ok()),
-            );
-            *p.state.lock().unwrap() = UpdateState::Disabled;
-            p
-        };
-
+        let mut plugin =
+            locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::Disabled);
         let effects = plugin.handle_slash("update", vec![]).await.unwrap();
         assert_eq!(effects.len(), 1);
     }
 
     #[tokio::test]
     async fn slash_ignores_other_commands() {
-        let mut plugin = SelfUpdatePlugin::with_fetcher_and_swapper(
-            Arc::new(FixedFetcher("v0.11.0")),
-            Arc::new(StubSwapper::ok()),
-        );
+        let mut plugin =
+            locked_plugin_with_state(Arc::new(StubInstaller::ok()), UpdateState::UpToDate);
         let effects = plugin.handle_slash("not-update", vec![]).await.unwrap();
         assert!(effects.is_empty());
     }
 
+    // --- on_event auto-install path ---
+
+    fn make_on_event_plugin(
+        fetcher: Arc<dyn ReleasesFetcher>,
+        installer: Arc<StubInstaller>,
+        cache_path: std::path::PathBuf,
+    ) -> SelfUpdatePlugin {
+        SelfUpdatePlugin::with_fetcher_and_installer(fetcher, installer)
+            .with_cache_path_override(cache_path)
+    }
+
+    /// Spin until the plugin's state matches `predicate` or the iteration
+    /// budget is exhausted. Yields between checks so the spawned task
+    /// driven by `on_event` can run on the same runtime.
+    async fn wait_for_state(
+        plugin: &SelfUpdatePlugin,
+        predicate: impl Fn(&UpdateState) -> bool,
+    ) -> UpdateState {
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+            let s = plugin.state();
+            if predicate(&s) {
+                return s;
+            }
+        }
+        panic!(
+            "state predicate never matched; final state: {:?}",
+            plugin.state()
+        );
+    }
+
     #[tokio::test]
-    async fn host_starting_spawns_check_that_updates_state() {
-        // Inject a stub that reports a newer version so the resulting
-        // state is `Available` (or `Disabled` if the runtime's
-        // current_exe() detects a dev build).
-        //
-        // The cache-path override is mandatory here: `on_event` writes the
+    async fn host_starting_auto_installs_on_available_then_writes_cache() {
+        // The cache-path override is mandatory: `on_event` writes the
         // fetched tag to disk, and without the override the production
         // path would scribble `v99.99.99` into the developer's real
         // `~/.savvagent/update-check.json`, poisoning the next 24h of
         // launches for the installed binary.
         let tmp = tempfile::tempdir().unwrap();
         let cache_path = tmp.path().join("update-check.json");
-        let fetcher = Arc::new(FixedFetcher("v99.99.99"));
-        let mut p =
-            SelfUpdatePlugin::with_fetcher(fetcher).with_cache_path_override(cache_path.clone());
+        let installer = Arc::new(StubInstaller::ok());
+        let mut p = make_on_event_plugin(
+            Arc::new(FixedFetcher("v99.99.99")),
+            installer.clone(),
+            cache_path.clone(),
+        );
         let install_method = p.install_method();
 
         p.on_event(HostEvent::HostStarting).await.unwrap();
 
-        // The spawned task runs on the tokio runtime; yield repeatedly
-        // until the state transitions away from Unknown. Bound to a
-        // sensible iteration cap so a regression doesn't hang the suite.
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-            let s = p.state();
-            if !matches!(s, UpdateState::Unknown) {
-                match install_method {
-                    InstallMethod::Dev => {
-                        assert_eq!(s, UpdateState::Disabled);
-                        // Dev builds bail before the cache layer runs, so
-                        // the override file must NOT have been written.
-                        assert!(
-                            !cache_path.exists(),
-                            "dev short-circuit must not write cache"
-                        );
-                    }
-                    InstallMethod::Installed => {
-                        assert!(matches!(s, UpdateState::Available { .. }));
-                        // Regression guard: the spawned task must have
-                        // written the stub fetcher's tag to the override
-                        // path (NOT to `$HOME/.savvagent/update-check.json`).
-                        // Confirms `cache_path_override` is wired all the
-                        // way through to `cache::save`.
-                        let entry = cache::load(&cache_path)
-                            .expect("cache file must be written at the override path");
-                        assert_eq!(entry.latest_tag, "v99.99.99");
-                    }
-                }
-                return;
+        let final_state = wait_for_state(&p, |s| {
+            !matches!(
+                s,
+                UpdateState::Unknown
+                    | UpdateState::Available { .. }
+                    | UpdateState::Installing { .. }
+            )
+        })
+        .await;
+
+        match install_method {
+            InstallMethod::Dev => {
+                assert_eq!(final_state, UpdateState::Disabled);
+                assert!(
+                    !cache_path.exists(),
+                    "dev short-circuit must not write cache"
+                );
+                assert_eq!(
+                    installer.invocation_count(),
+                    0,
+                    "dev short-circuit must not invoke the installer"
+                );
+            }
+            InstallMethod::Installed => {
+                assert!(
+                    matches!(final_state, UpdateState::Updated { .. }),
+                    "expected auto-install to land in Updated, got: {final_state:?}"
+                );
+                assert_eq!(installer.invocation_count(), 1);
+                let entry = cache::load(&cache_path)
+                    .expect("cache file must be written at the override path");
+                assert_eq!(entry.latest_tag, "v99.99.99");
             }
         }
-        panic!("state never transitioned away from Unknown");
+    }
+
+    #[tokio::test]
+    async fn host_starting_install_failure_transitions_to_install_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let installer = Arc::new(StubInstaller::err("download failed"));
+        let mut p = make_on_event_plugin(
+            Arc::new(FixedFetcher("v99.99.99")),
+            installer.clone(),
+            cache_path,
+        );
+
+        // Skip the assertion on Dev hosts; the dev short-circuit bypasses
+        // the installer entirely so the failure path can't be exercised.
+        if matches!(p.install_method(), InstallMethod::Dev) {
+            return;
+        }
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+
+        let final_state =
+            wait_for_state(&p, |s| matches!(s, UpdateState::InstallFailed { .. })).await;
+
+        match final_state {
+            UpdateState::InstallFailed { error, latest, .. } => {
+                assert_eq!(latest.to_string(), "99.99.99");
+                assert!(error.contains("download failed"), "got: {error}");
+            }
+            other => unreachable!("predicate guarantees InstallFailed: {other:?}"),
+        }
+        assert_eq!(installer.invocation_count(), 1);
     }
 
     #[tokio::test]
@@ -835,15 +1015,18 @@ mod tests {
         // change that lifts the early-return cannot silently start writing
         // to the developer's real `$HOME` cache.
         let tmp = tempfile::tempdir().unwrap();
-        let fetcher = Arc::new(FixedFetcher("v99.99.99"));
-        let mut p = SelfUpdatePlugin::with_fetcher(fetcher)
-            .with_cache_path_override(tmp.path().join("update-check.json"));
+        let installer = Arc::new(StubInstaller::ok());
+        let mut p = make_on_event_plugin(
+            Arc::new(FixedFetcher("v99.99.99")),
+            installer.clone(),
+            tmp.path().join("update-check.json"),
+        );
 
-        // TurnStart should not touch the state.
         p.on_event(HostEvent::TurnStart { turn_id: 1 })
             .await
             .unwrap();
         tokio::task::yield_now().await;
         assert_eq!(p.state(), UpdateState::Unknown);
+        assert_eq!(installer.invocation_count(), 0);
     }
 }

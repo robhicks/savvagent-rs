@@ -37,12 +37,13 @@ unpack it, and put the binaries on your `$PATH`. Each archive ships with a
 `.sha256` next to it for verification.
 
 After installing, run `savvagent` in your project, `/connect` once to store
-an API key in the OS keyring, and you're done. From v0.11.0 onwards the
-TUI checks for updates on launch; from v0.12.1 `/update` performs the
-upgrade in-place — no need to re-run the installer. (v0.11.0 and v0.12.0
-each shipped with a bug that broke the apply step; users on those
-releases need to re-run the install script once to reach v0.12.1 — see
-the CHANGELOG.)
+an API key in the OS keyring, and you're done. The TUI checks for updates
+on launch and, as of the next release, installs them automatically in the
+background — all binaries in the release archive are replaced in place,
+not just the main `savvagent` executable. The banner above the prompt
+reports progress; restart savvagent to use the new version. (v0.11.0
+through v0.12.1 only swapped the main binary; the six helpers stayed at
+the prior version until the user re-ran the installer manually.)
 
 ## Repository layout
 
@@ -118,7 +119,7 @@ provider has a key on file.
 | `/theme` | Open the theme picker (no args), or switch directly: `/theme tokyo-night`. Persists to `~/.savvagent/theme.toml`. |
 | `/language` | Open the locale picker. Persists to `~/.savvagent/language.toml`. Ships with en / es / pt / hi; falls back to en for missing keys. |
 | `/plugins` | Open the plugin manager — toggle optional plugins on/off; core plugins can't be disabled. Persists to `~/.savvagent/plugins.toml`. |
-| `/update` | Download and install the latest release in-place. The TUI also surfaces an "Update available" banner above the prompt when a newer tag exists. Opt out with `SAVVAGENT_NO_UPDATE_CHECK=1` or `--no-update-check`. |
+| `/update` | Re-run the latest-release install. As of the next release the TUI installs available updates automatically on launch (the banner above the prompt reports progress); `/update` is only needed to retry after a failed install or to force the install before the next polling window. Replaces every binary in the release archive — `savvagent` plus the six helpers. Opt out with `SAVVAGENT_NO_UPDATE_CHECK=1` or `--no-update-check`. |
 | `/save` | Write the current transcript to `~/.savvagent/transcripts/<unix>.json`. |
 | `/resume` | Re-open a previously-saved transcript and continue from where it ended. With no args opens a picker; takes an absolute path or a bare basename relative to `~/.savvagent/transcripts/`. |
 | `/clear` | Reset the conversation history (and the visible log). |
