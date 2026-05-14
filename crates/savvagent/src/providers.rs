@@ -62,7 +62,7 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         id: "gemini",
         display_name: "Google Gemini",
         api_key_env: "GEMINI_API_KEY",
-        default_model: "gemini-1.5-flash",
+        default_model: "gemini-2.5-flash",
         api_key_required: true,
         build: build_gemini,
         health_check: None,

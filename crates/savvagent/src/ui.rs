@@ -118,15 +118,34 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     // widget that doesn't set its own bg picks up the theme background.
     frame.buffer_mut().set_style(area, palette.base_style());
 
+    // Build the prompt textarea up-front so we can ask tui-textarea how
+    // tall it wants to be (driven by wrap mode + min/max rows configured
+    // on `app.input_textarea`). The measured height drives the input
+    // constraint below so the box grows with multi-line / wrapped input
+    // and shrinks back to its 3-row minimum when cleared.
+    let mut textarea = app.input_textarea.clone();
+    textarea.set_block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.border).bg(palette.bg))
+            .padding(Padding::horizontal(1)),
+    );
+    textarea.set_style(palette.base_style());
+    // tui-textarea defaults the cursor-line style to UNDERLINED, which
+    // ends up underlining the whole one-line prompt. Override to the
+    // base style so the input renders flat like the rest of the UI.
+    textarea.set_cursor_line_style(palette.base_style());
+    let input_rows = textarea.measure(area.width).preferred_rows;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header
-            Constraint::Min(1),    // log
-            Constraint::Length(1), // banner (plugin slot: home.banner)
-            Constraint::Length(1), // tips (plugin slot: home.tips)
-            Constraint::Length(3), // input
-            Constraint::Length(1), // footer (plugin slots: home.footer.*)
+            Constraint::Length(3),          // header
+            Constraint::Min(1),             // log
+            Constraint::Length(1),          // banner (plugin slot: home.banner)
+            Constraint::Length(1),          // tips (plugin slot: home.tips)
+            Constraint::Length(input_rows), // input (dynamic, clamped by textarea min/max rows)
+            Constraint::Length(1),          // footer (plugin slots: home.footer.*)
         ])
         .split(area);
 
@@ -191,14 +210,6 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     let tips_para = Paragraph::new(tips_lines).style(palette.base_style());
     frame.render_widget(tips_para, chunks[3]);
 
-    let mut textarea = app.input_textarea.clone();
-    textarea.set_block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.border).bg(palette.bg))
-            .padding(Padding::horizontal(1)),
-    );
-    textarea.set_style(palette.base_style());
     frame.render_widget(&textarea, chunks[4]);
 
     // Footer row — three horizontal segments from plugin slots.
@@ -256,7 +267,18 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
     // Screen-stack: if any screen is on top, paint it over the home chrome.
     if let Some((top_screen, layout)) = app.screen_stack.top() {
-        paint_screen(frame, area, top_screen, layout, palette);
+        // view-file / edit-file are marker screens whose actual content
+        // lives in `App::editor` (ratatui-code-editor). Render the
+        // editor widget directly in a bordered popup with a title that
+        // matches the legacy `InputMode::ViewingFile`/`EditingFile`
+        // chrome. Other screens go through the styled-line render path.
+        let top_id = top_screen.id();
+        let is_file_screen = top_id == "view-file" || top_id == "edit-file";
+        if is_file_screen {
+            paint_file_screen(frame, area, app, palette, top_id == "edit-file");
+        } else {
+            paint_screen(frame, area, top_screen, layout, palette);
+        }
     }
 
     if matches!(
@@ -670,6 +692,56 @@ fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<
 /// would bleed through under any plugin span that only sets `fg` — which
 /// makes upstream themes (Solarized Light, Catppuccin Latte, Tokyo Night
 /// Day, …) look like floating text rather than a popup.
+/// Render the marker `view-file` / `edit-file` screen by drawing the
+/// ratatui-code-editor widget held in `App::editor` inside a bordered
+/// modal. Mirrors the legacy `InputMode::ViewingFile`/`EditingFile`
+/// chrome but is driven by the screen stack instead of the deprecated
+/// input-mode state machine.
+fn paint_file_screen(f: &mut Frame, area: Rect, app: &crate::app::App, palette: Palette, edit: bool) {
+    let popup = centered_rect(80, 80, area);
+    f.render_widget(Clear, popup);
+    f.buffer_mut().set_style(popup, palette.base_style());
+
+    let path_str = app
+        .active_file_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let (title_key, hint_key) = if edit {
+        ("picker.edit-file.modal-title", "picker.edit-file.tips")
+    } else {
+        ("picker.view-file.modal-title", "picker.view-file.tips")
+    };
+    let title = format!(
+        " {}: {} ",
+        rust_i18n::t!(title_key),
+        path_str
+    );
+    let hint = rust_i18n::t!(hint_key).to_string();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.border).bg(palette.bg))
+        .title(Line::styled(title, palette.base_style().fg(palette.fg)))
+        .title_bottom(Line::from(format!(" {hint} ")).right_aligned())
+        .style(palette.base_style());
+
+    let inner = popup.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    f.render_widget(block, popup);
+
+    if let Some(editor) = &app.editor {
+        f.render_widget(editor, inner);
+        if edit {
+            if let Some((x, y)) = editor.get_visible_cursor(&inner) {
+                f.set_cursor_position((x, y));
+            }
+        }
+    }
+}
+
 fn paint_screen(
     f: &mut Frame,
     area: Rect,

@@ -246,6 +246,20 @@ impl ThemePalette {
     }
 }
 
+/// Catalog entry for one model advertised by the active provider, surfaced
+/// in the `/model` picker. Constructed from
+/// [`savvagent_protocol::ListModelsResponse::models`] at host bring-up and
+/// on every `/model` change so the picker stays in sync with what the
+/// provider actually serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelEntry {
+    /// Bare model id (e.g. `"gemini-2.5-flash"`, no `"models/"` prefix).
+    pub id: String,
+    /// Human-readable display name shown in the picker UI. Falls back to
+    /// `id` when the provider doesn't return one.
+    pub display_name: String,
+}
+
 /// Identifying handle for a saved conversation transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptHandle {
@@ -295,6 +309,16 @@ pub enum ScreenArgs {
         /// Code of the locale currently active (used to pre-select the cursor row).
         current_code: String,
     },
+    /// Open the model picker, scrolled to the currently-active model.
+    ModelPicker {
+        /// Id of the model currently active on the connected provider (used
+        /// to pre-select the cursor row and render the active-row marker).
+        current_id: String,
+        /// Catalog of models advertised by the active provider. May be
+        /// empty if the provider's `list_models` failed or returned no
+        /// entries; the picker renders an explanatory note in that case.
+        models: Vec<ModelEntry>,
+    },
 }
 
 impl ScreenArgs {
@@ -320,6 +344,7 @@ impl ScreenArgs {
             ScreenArgs::EditFile { .. } => Some("edit-file"),
             ScreenArgs::PluginsManager => Some("plugins.manager"),
             ScreenArgs::LanguagePicker { .. } => Some("language.picker"),
+            ScreenArgs::ModelPicker { .. } => Some("model.picker"),
         }
     }
 }
@@ -479,6 +504,28 @@ mod tests {
     }
 
     #[test]
+    fn model_entry_is_constructible() {
+        let m = ModelEntry {
+            id: "gemini-2.5-flash".into(),
+            display_name: "Gemini 2.5 Flash".into(),
+        };
+        assert_eq!(m.id, "gemini-2.5-flash");
+        assert_eq!(m.display_name, "Gemini 2.5 Flash");
+    }
+
+    #[test]
+    fn screen_args_model_picker_pairs_with_model_picker_id() {
+        let args = ScreenArgs::ModelPicker {
+            current_id: "gemini-2.5-flash".into(),
+            models: vec![ModelEntry {
+                id: "gemini-2.5-flash".into(),
+                display_name: "Gemini 2.5 Flash".into(),
+            }],
+        };
+        assert_eq!(args.screen_id(), Some("model.picker"));
+    }
+
+    #[test]
     fn screen_args_screen_id_pairs_every_non_none_variant() {
         assert_eq!(ScreenArgs::None.screen_id(), None);
         assert_eq!(
@@ -513,6 +560,14 @@ mod tests {
             }
             .screen_id(),
             Some("language.picker")
+        );
+        assert_eq!(
+            ScreenArgs::ModelPicker {
+                current_id: "gemini-2.5-flash".into(),
+                models: vec![],
+            }
+            .screen_id(),
+            Some("model.picker")
         );
         assert_eq!(
             ScreenArgs::PluginsManager.screen_id(),

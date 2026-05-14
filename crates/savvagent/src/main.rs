@@ -33,6 +33,7 @@ mod i18n_smoke {
 
 mod app;
 mod creds;
+mod models_pref;
 mod palette;
 mod plugin;
 mod providers;
@@ -48,7 +49,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use app::{
-    App, BashCommandError, Entry, InputMode, collect_transcript_entries, parse_bash_command,
+    App, BashCommandError, Entry, InputMode, collect_transcript_entries, make_input_textarea,
+    parse_bash_command,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
@@ -58,7 +60,6 @@ use savvagent_host::{
 };
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
-use tui_textarea::TextArea;
 
 /// Worker → main-loop messages.
 enum WorkerMsg {
@@ -279,8 +280,11 @@ async fn bootstrap_host(
         };
         match build_in_process_host(spec, &key, project_root, tool_bins).await {
             Ok(host) => {
-                let model = std::env::var("SAVVAGENT_MODEL")
-                    .unwrap_or_else(|_| spec.default_model.to_string());
+                // SAVVAGENT_MODEL > persisted models.toml > spec.default_model.
+                // `build_in_process_host` itself reads the same chain via
+                // `resolve_initial_model_for`; we recompute here so the
+                // value advertised in the header matches.
+                let model = resolve_initial_model_for(spec);
                 return Some((host, model, Some(spec.id)));
             }
             Err(e) => {
@@ -300,7 +304,9 @@ async fn build_in_process_host(
     project_root: &Path,
     tool_bins: &ToolBins,
 ) -> Result<Arc<Host>> {
-    let model = std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| spec.default_model.to_string());
+    // SAVVAGENT_MODEL > persisted in ~/.savvagent/models.toml >
+    // spec.default_model. See [`resolve_initial_model_for`].
+    let model = resolve_initial_model_for(spec);
     build_in_process_host_with_model(spec, api_key, project_root, tool_bins, model).await
 }
 
@@ -397,13 +403,36 @@ async fn current_host(slot: &HostSlot) -> Option<Arc<Host>> {
 }
 
 fn init_tracing() {
+    // The TUI owns the terminal once it enters ratatui's alternate screen,
+    // so tracing must NEVER write to stderr — a single line would corrupt
+    // the rendered UI. Route everything to a daily append log under
+    // `~/.savvagent/logs/`. If the file can't be opened (no $HOME, perms),
+    // fall back to a sink so we still register a global subscriber (and
+    // therefore still silence stderr from `tracing` macros) instead of
+    // landing back on the default stderr writer.
+    let writer: Box<dyn std::io::Write + Send + 'static> = match open_savvagent_log() {
+        Ok(file) => Box::new(file),
+        Err(_) => Box::new(std::io::sink()),
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
-        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(writer))
         .try_init();
+}
+
+fn open_savvagent_log() -> std::io::Result<std::fs::File> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is unset"))?;
+    let dir = PathBuf::from(home).join(".savvagent").join("logs");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("savvagent.log"))
 }
 
 fn transcript_dir() -> PathBuf {
@@ -458,8 +487,17 @@ async fn dispatch_slash_command(
             return;
         }
         "/model" => {
-            handle_model_command(app, rest, host_slot, project_root, tool_bins).await;
-            return;
+            // Typed-arg invocations (`/model <id>`) and the no-host case
+            // still flow through `handle_model_command`'s legacy path:
+            // it validates against `Host::list_models`, rebuilds the
+            // host, and surfaces a useful note when nothing is
+            // connected yet. With no args AND an active host, fall
+            // through to the plugin router so the `internal:model`
+            // plugin can open the picker screen.
+            if !rest.is_empty() || current_host(host_slot).await.is_none() {
+                handle_model_command(app, rest, host_slot, project_root, tool_bins).await;
+                return;
+            }
         }
         "/resume" => {
             handle_resume_command(app, rest, host_slot).await;
@@ -497,6 +535,7 @@ async fn dispatch_slash_command(
                         rust_i18n::t!("notes.command-failed", err = format!("{e:#}")).to_string(),
                     ));
                 }
+                apply_pending_model_change(app, host_slot, project_root, tool_bins).await;
                 return;
             }
             Err(crate::plugin::slash::SlashError::Unknown(_)) => {
@@ -838,6 +877,159 @@ async fn do_resume_from_path(app: &mut App, host_slot: &HostSlot, path: &Path) {
     }
 }
 
+/// Refresh [`App::cached_models`] from the active host's `list_models`.
+/// On failure (provider doesn't advertise list_models, network error,
+/// no active host), fall back to a single-entry catalog containing just
+/// the current model so the picker still has something to render. This
+/// is the "show error + default-only" scope agreed for MVP.
+async fn refresh_cached_models(app: &mut App, host_slot: &HostSlot) {
+    let fallback = vec![savvagent_plugin::ModelEntry {
+        id: app.model.clone(),
+        display_name: app.model.clone(),
+    }];
+    let Some(host) = current_host(host_slot).await else {
+        app.cached_models = fallback;
+        return;
+    };
+    match host.list_models().await {
+        Ok(resp) => {
+            let models: Vec<savvagent_plugin::ModelEntry> = resp
+                .models
+                .into_iter()
+                .map(|m| savvagent_plugin::ModelEntry {
+                    display_name: m
+                        .display_name
+                        .clone()
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| m.id.clone()),
+                    id: m.id,
+                })
+                .collect();
+            if models.is_empty() {
+                tracing::debug!("list_models returned an empty catalog; using fallback");
+                app.cached_models = fallback;
+            } else {
+                app.cached_models = models;
+            }
+        }
+        Err(e) => {
+            tracing::debug!(error = ?e, "list_models failed; using single-entry fallback");
+            app.cached_models = fallback;
+        }
+    }
+}
+
+/// Drain `app.pending_model_change` (set by `Effect::SetActiveModel`)
+/// and forward the request to [`perform_model_change`]. No-op when
+/// nothing is queued.
+async fn apply_pending_model_change(
+    app: &mut App,
+    host_slot: &HostSlot,
+    project_root: &Path,
+    tool_bins: &ToolBins,
+) {
+    let Some(pending) = app.pending_model_change.take() else {
+        return;
+    };
+    let Some(spec_id) = app.active_provider_id else {
+        app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
+        return;
+    };
+    let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) else {
+        app.push_note(rust_i18n::t!("notes.model-unknown-provider", id = spec_id).to_string());
+        return;
+    };
+    let key = if spec.api_key_required {
+        match creds::load(spec.id) {
+            Ok(Some(k)) => k,
+            Ok(None) => {
+                app.push_note(rust_i18n::t!("notes.model-no-saved-key").to_string());
+                return;
+            }
+            Err(e) => {
+                app.push_note(
+                    rust_i18n::t!("notes.keyring-error", err = format!("{e:#}")).to_string(),
+                );
+                return;
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    // Validate against the advertised list when available (mirrors
+    // handle_model_command). When the active host can't enumerate
+    // models we proceed optimistically — the provider rejects an
+    // invalid id at first turn instead.
+    if let Some(host) = current_host(host_slot).await {
+        let list_result = host.list_models().await;
+        let outcome = resolve_model_change(&pending.id, list_result.as_ref());
+        match outcome {
+            ModelChangeOutcome::Reject { note } => {
+                app.push_note(note);
+                return;
+            }
+            ModelChangeOutcome::Proceed { warning } => {
+                if let Some(w) = warning {
+                    if let Err(ref e) = list_result {
+                        tracing::warn!(?e, "list_models failed; proceeding optimistically");
+                    }
+                    app.push_note(w);
+                }
+            }
+        }
+    }
+
+    perform_model_change(
+        spec,
+        &key,
+        pending.id.clone(),
+        host_slot,
+        project_root,
+        tool_bins,
+        app,
+    )
+    .await;
+
+    // Refresh the picker's catalog cache; if the new model came with a
+    // larger advertised set than the previous one, the picker should
+    // see it on next open.
+    refresh_cached_models(app, host_slot).await;
+
+    // Persist only when the requesting effect asked for it.
+    if pending.persist {
+        match models_pref::save_for_provider(spec.id, &pending.id).await {
+            Ok(()) => app.push_note(
+                rust_i18n::t!("notes.model-persisted", provider = spec.id).to_string(),
+            ),
+            Err(e) => {
+                tracing::warn!(error = ?e, provider = spec.id,
+                    "models.toml save failed");
+                app.push_note(
+                    rust_i18n::t!("notes.model-pref-save-failed", err = format!("{e:#}"))
+                        .to_string(),
+                );
+            }
+        }
+    }
+}
+
+/// Resolve the effective model id for `provider_id`, applying the
+/// precedence: `SAVVAGENT_MODEL` env var (highest) > persisted in
+/// `~/.savvagent/models.toml` > `spec.default_model`.
+fn resolve_initial_model_for(spec: &ProviderSpec) -> String {
+    if let Ok(env_model) = std::env::var("SAVVAGENT_MODEL") {
+        if !env_model.is_empty() {
+            return env_model;
+        }
+    }
+    let pref = models_pref::ModelsPref::load();
+    if let Some(persisted) = pref.get(spec.id) {
+        return persisted.to_string();
+    }
+    spec.default_model.to_string()
+}
+
 /// Rebuild the host with `new_model` against the same provider + key, swap
 /// the host slot atomically, and clear conversation state (turn ids from
 /// the old session would dangle otherwise).
@@ -884,6 +1076,8 @@ async fn perform_model_change(
     app.update_metrics();
     app.model = new_model;
     app.push_note(rust_i18n::t!("notes.model-is-now", model = app.model.clone()).to_string());
+    // Keep the picker cache aligned with the new host's advertised set.
+    refresh_cached_models(app, host_slot).await;
 }
 
 /// `/sandbox` (no args) shows current status.
@@ -1165,7 +1359,11 @@ async fn perform_connect(
 
     app.connected = true;
     app.active_provider_id = Some(spec.id);
-    app.model = std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| spec.default_model.to_string());
+    // SAVVAGENT_MODEL > persisted in ~/.savvagent/models.toml >
+    // spec.default_model. Match the precedence used in build_in_process_host
+    // so the header model matches what the host was actually built with.
+    app.model = resolve_initial_model_for(spec);
+    refresh_cached_models(app, host_slot).await;
     // Align the splash sandbox indicator with the now-active host's config.
     // If the user lands on `/connect` within the 3s splash window, this
     // refresh makes the banner reflect what tools will actually be wrapped
@@ -1584,6 +1782,35 @@ async fn run_app(
                 drain_pending_bash_net(app, &host_slot).await;
                 return Ok(());
             }
+            // view-file / edit-file are marker screens — most keys are
+            // routed straight to the ratatui-code-editor instance in
+            // `App::editor`. Only Esc (close), `q` (view-file only),
+            // and Ctrl-S (edit-file only) go through `Screen::on_key`
+            // to produce CloseScreen / SaveActiveFile effects.
+            let top_id = app
+                .screen_stack
+                .top()
+                .map(|(s, _)| s.id())
+                .unwrap_or_default();
+            if top_id == "view-file" || top_id == "edit-file" {
+                let is_close = matches!(key.code, KeyCode::Esc)
+                    || (top_id == "view-file" && key.code == KeyCode::Char('q'));
+                let is_save_in_edit = top_id == "edit-file"
+                    && matches!(key.code, KeyCode::Char('s'))
+                    && key.modifiers.contains(KeyModifiers::CONTROL);
+                if !is_close && !is_save_in_edit {
+                    if let Some(editor) = app.editor.as_mut() {
+                        let term_area = terminal.size()?;
+                        let popup = ui::centered_rect(80, 80, term_area.into());
+                        let inner = popup.inner(ratatui::layout::Margin {
+                            horizontal: 1,
+                            vertical: 1,
+                        });
+                        let _ = editor.input(*key, &inner);
+                    }
+                    continue;
+                }
+            }
             let effs = {
                 let (top_screen, _layout) =
                     app.screen_stack.top_mut().expect("just checked non-empty");
@@ -1598,6 +1825,7 @@ async fn run_app(
             if let Err(e) = crate::plugin::effects::apply_effects(app, effs).await {
                 tracing::warn!(error = %e, "apply_effects from screen failed");
             }
+            apply_pending_model_change(app, &host_slot, &project_root, &tool_bins).await;
             continue;
         }
 
@@ -1620,26 +1848,30 @@ async fn run_app(
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            // Legacy Ctrl-P: open palette via keybinding router for symmetry.
-                            let portable = crate::plugin::convert::key_event_to_portable(*key);
-                            if let (Some(_reg), Some(idx)) =
-                                (&app.plugin_registry, &app.plugin_indexes)
-                            {
-                                let action = {
-                                    let idx_guard = idx.read().await;
-                                    let router = crate::plugin::keybindings::KeybindingRouter::new(
-                                        &idx_guard,
-                                    );
-                                    router.route(&portable, None)
-                                };
-                                if let Some(action) = action {
-                                    dispatch_bound_action(app, action).await;
-                                    continue;
-                                }
-                            }
-                            // Fallback if plugin runtime not installed.
-                            app.open_command_palette();
+                        // Shift+Enter inserts a newline in the prompt. Only
+                        // terminals that speak the Kitty keyboard protocol
+                        // (pushed in `tui::init`) report the SHIFT modifier
+                        // on Enter — on others, Shift+Enter is
+                        // indistinguishable from Enter and the arm below
+                        // submits. Documented as a tradeoff in `tui.rs`.
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            app.input_textarea.insert_newline();
+                        }
+                        // Ctrl+Z → undo, Ctrl+Y → redo. Mirrors the
+                        // Windows/Linux desktop convention. tui-textarea
+                        // ships undo on Ctrl+U / redo on Ctrl+R (which
+                        // still work via fallthrough); Ctrl+Y otherwise
+                        // pastes in tui-textarea, but desktop muscle
+                        // memory of Ctrl+Y=redo wins here.
+                        KeyCode::Char('z')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            app.input_textarea.undo();
+                        }
+                        KeyCode::Char('y')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            app.input_textarea.redo();
                         }
                         KeyCode::Enter if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                             let value = app.input_textarea.lines().join("\n");
@@ -1647,7 +1879,7 @@ async fn run_app(
                                 continue;
                             }
                             if value.starts_with('/') {
-                                app.input_textarea = TextArea::default();
+                                app.input_textarea = make_input_textarea(Vec::<String>::new());
                                 dispatch_slash_command(
                                     app,
                                     &value,
@@ -1663,11 +1895,11 @@ async fn run_app(
                                 app.push_note(
                                     rust_i18n::t!("notes.not-connected-connect-first").to_string(),
                                 );
-                                app.input_textarea = TextArea::default();
+                                app.input_textarea = make_input_textarea(Vec::<String>::new());
                                 continue;
                             };
                             app.push_user(value.clone());
-                            app.input_textarea = TextArea::default();
+                            app.input_textarea = make_input_textarea(Vec::<String>::new());
                             app.is_loading = true;
                             // Fire HostEvent::PromptSubmitted so hook
                             // subscribers (transcript loggers, telemetry,
@@ -1717,7 +1949,7 @@ async fn run_app(
                             });
                         }
                         KeyCode::Esc => {
-                            app.input_textarea = TextArea::default();
+                            app.input_textarea = make_input_textarea(Vec::<String>::new());
                         }
                         KeyCode::Char('@') => {
                             app.input_textarea.input(evt);
@@ -1742,6 +1974,13 @@ async fn run_app(
                                 };
                                 if let Some(action) = action {
                                     dispatch_bound_action(app, action).await;
+                                    apply_pending_model_change(
+                                        app,
+                                        &host_slot,
+                                        &project_root,
+                                        &tool_bins,
+                                    )
+                                    .await;
                                     handled = true;
                                 }
                             }
@@ -1816,15 +2055,41 @@ async fn run_app(
             },
             InputMode::EnteringApiKey => match key.code {
                 KeyCode::Esc => app.cancel_connect(),
-                KeyCode::Enter => {
-                    if let Some((spec, key)) = app.take_pending_api_key() {
+                KeyCode::Enter => match app.take_pending_api_key() {
+                    Some((spec, Some(key))) => {
                         app.input_mode = InputMode::Editing;
                         perform_connect(spec, key, &host_slot, &project_root, &tool_bins, app)
                             .await;
-                    } else {
-                        app.push_note(rust_i18n::t!("notes.api-key-empty").to_string());
                     }
-                }
+                    Some((spec, None)) => {
+                        // Empty submit — fall back to the stored
+                        // credential if one exists. This is the
+                        // one-keystroke "use stored key" path that the
+                        // placeholder advertises.
+                        match creds::load(spec.id) {
+                            Ok(Some(stored)) => {
+                                app.cancel_connect();
+                                perform_connect(
+                                    spec,
+                                    stored,
+                                    &host_slot,
+                                    &project_root,
+                                    &tool_bins,
+                                    app,
+                                )
+                                .await;
+                            }
+                            _ => {
+                                // No stored key — stay in the modal so
+                                // the user can keep typing.
+                                app.push_note(
+                                    rust_i18n::t!("notes.api-key-empty").to_string(),
+                                );
+                            }
+                        }
+                    }
+                    None => {}
+                },
                 _ => {
                     app.api_key_textarea.input(evt);
                 }

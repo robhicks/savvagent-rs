@@ -37,6 +37,16 @@ pub enum Effect {
         /// Whether to persist the selection to ~/.savvagent/language.toml.
         persist: bool,
     },
+    /// Switch the active provider's model. The runtime resolves the active
+    /// provider, rebuilds its in-process host with `id`, optionally persists
+    /// the choice to `~/.savvagent/models.toml`, and refreshes
+    /// `App::cached_models`. Emitted by the model-picker screen on Enter.
+    SetActiveModel {
+        /// Bare model id (e.g. `"gemini-2.5-flash"`, no `"models/"` prefix).
+        id: String,
+        /// Whether to persist the selection to `~/.savvagent/models.toml`.
+        persist: bool,
+    },
     /// Switch the active LLM provider.
     SetActiveProvider {
         /// Stable identifier of the provider to activate.
@@ -82,6 +92,22 @@ pub enum Effect {
     },
     /// Shut down the application cleanly.
     Quit,
+    /// Open the API-key entry modal for `provider_id`. Provider plugins
+    /// emit this from `/connect <provider>` when the keyring has no
+    /// credential for the provider, so the user lands on a masked input
+    /// instead of a dead-end "key not found" note. The runtime resolves
+    /// the id against its provider catalog to populate the prompt
+    /// (display name, environment-variable hint); on submit it persists
+    /// the key to the keyring and re-runs the connect flow.
+    PromptApiKey {
+        /// Stable identifier of the provider whose key to collect.
+        provider_id: ProviderId,
+    },
+    /// Persist the currently-open file editor's buffer to disk. Emitted
+    /// by the `edit-file` screen plugin on Ctrl-S. The runtime resolves
+    /// the target path from `App::active_file_path` and the buffer from
+    /// `App::editor`; if neither is populated the effect is a no-op.
+    SaveActiveFile,
     /// Enable or disable a registered plugin by id. The runtime updates its
     /// enabled-set, rebuilds derived indexes, and (if the plugin is
     /// [`crate::manifest::PluginKind::Optional`]) persists the new state
@@ -172,6 +198,21 @@ mod tests {
                 assert!(!enabled);
             }
             _ => panic!("expected TogglePlugin"),
+        }
+    }
+
+    #[test]
+    fn set_active_model_carries_id_and_persist() {
+        let eff = Effect::SetActiveModel {
+            id: "gemini-2.5-flash".into(),
+            persist: true,
+        };
+        match eff {
+            Effect::SetActiveModel { id, persist } => {
+                assert_eq!(id, "gemini-2.5-flash");
+                assert!(persist);
+            }
+            _ => panic!("expected SetActiveModel"),
         }
     }
 

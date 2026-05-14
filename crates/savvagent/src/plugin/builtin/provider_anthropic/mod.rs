@@ -113,6 +113,7 @@ impl Plugin for ProviderAnthropicPlugin {
             name: format!("connect {PROVIDER_ID}"),
             summary: format!("Connect to {DISPLAY_NAME}"),
             args_hint: None,
+            requires_arg: false,
         }];
         contributions.slots = vec![SlotSpec {
             slot_id: "home.footer.left".into(),
@@ -131,16 +132,15 @@ impl Plugin for ProviderAnthropicPlugin {
     }
 
     async fn handle_slash(&mut self, _: &str, _: Vec<String>) -> Result<Vec<Effect>, PluginError> {
-        if self.try_connect_from_keyring().is_some() {
-            return Ok(vec![Effect::RegisterProvider {
-                id: ProviderId::new(PROVIDER_ID).expect("valid"),
-                display_name: DISPLAY_NAME.into(),
-            }]);
-        }
-        Ok(vec![Effect::PushNote {
-            line: StyledLine::plain(format!(
-                "{DISPLAY_NAME} API key not found in keyring. Run `/connect` from the home view to enter one."
-            )),
+        // `/connect <provider>` (via the picker or directly) always
+        // opens the API-key entry modal so the user can re-key — even
+        // if a credential is already in the keyring. Pressing Enter on
+        // an empty input falls back to the stored key (see the modal's
+        // submit handler), so the stored-key path remains one keystroke.
+        // Silent auto-connect on startup happens in `on_event(HostStarting)`,
+        // not here.
+        Ok(vec![Effect::PromptApiKey {
+            provider_id: ProviderId::new(PROVIDER_ID).expect("valid"),
         }])
     }
 
@@ -188,10 +188,11 @@ mod tests {
     use super::*;
 
     /// With no keyring entry available (CI default), `/connect anthropic`
-    /// must emit a [`Effect::PushNote`] explaining the situation rather
-    /// than a `RegisterProvider` effect with no client behind it.
+    /// must emit [`Effect::PromptApiKey`] so the runtime opens the
+    /// masked input — not a dead-end note telling the user to do
+    /// what they just did.
     #[tokio::test]
-    async fn no_creds_emits_pushnote() {
+    async fn no_creds_emits_prompt_api_key() {
         // Best-effort: clear any existing entry so the keyring read returns
         // `Ok(None)` on platforms that have a backend. On CI (no backend),
         // load() returns Ok(None) regardless.
@@ -199,11 +200,52 @@ mod tests {
 
         let mut p = ProviderAnthropicPlugin::new();
         let effs = p.handle_slash("connect anthropic", vec![]).await.unwrap();
-        assert!(
-            matches!(effs[0], Effect::PushNote { .. }),
-            "expected PushNote when no creds available, got {:?}",
-            effs
-        );
+        match &effs[0] {
+            Effect::PromptApiKey { provider_id } => {
+                assert_eq!(provider_id.as_str(), PROVIDER_ID);
+            }
+            other => panic!("expected PromptApiKey, got {other:?}"),
+        }
+    }
+
+    /// `/connect <provider>` must open the API-key modal *even when the
+    /// plugin already has a constructed client* — letting the user
+    /// re-key from the picker. Pre-fix behavior short-circuited and
+    /// silently emitted `RegisterProvider`, denying re-key.
+    #[tokio::test]
+    async fn handle_slash_with_existing_client_still_prompts() {
+        use async_trait::async_trait;
+        use savvagent_mcp::ProviderClient;
+        use savvagent_protocol::{
+            CompleteRequest, CompleteResponse, ListModelsResponse, ProviderError, StreamEvent,
+        };
+        use tokio::sync::mpsc;
+
+        struct StubClient;
+        #[async_trait]
+        impl ProviderClient for StubClient {
+            async fn complete(
+                &self,
+                _: CompleteRequest,
+                _: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                unreachable!()
+            }
+            async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+                unreachable!()
+            }
+        }
+
+        let mut p = ProviderAnthropicPlugin::with_test_client(Box::new(StubClient));
+        let effs = p.handle_slash("connect anthropic", vec![]).await.unwrap();
+        match &effs[0] {
+            Effect::PromptApiKey { provider_id } => {
+                assert_eq!(provider_id.as_str(), PROVIDER_ID);
+            }
+            other => panic!(
+                "expected PromptApiKey even with pre-installed client; got {other:?}"
+            ),
+        }
     }
 
     #[test]

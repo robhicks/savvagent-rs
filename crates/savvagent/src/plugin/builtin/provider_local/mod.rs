@@ -109,6 +109,7 @@ impl Plugin for ProviderLocalPlugin {
             name: format!("connect {PROVIDER_ID}"),
             summary: format!("Connect to {DISPLAY_NAME}"),
             args_hint: None,
+            requires_arg: false,
         }];
         contributions.slots = vec![SlotSpec {
             slot_id: "home.footer.left".into(),

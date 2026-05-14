@@ -89,6 +89,7 @@ mod tests {
                 name: "echo".into(),
                 summary: "".into(),
                 args_hint: None,
+                requires_arg: false,
             }];
             Manifest {
                 id: PluginId::new(&self.0).expect("valid test id"),

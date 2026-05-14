@@ -26,8 +26,8 @@ pub mod event;
 pub use event::{HookKind, HostEvent};
 
 pub use types::{
-    ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, PluginId, ProviderId, Region,
-    ScreenArgs, ScreenInstanceId, ThemeEntry, ThemePalette, Timestamp, TranscriptHandle,
+    ChordPortable, KeyCodePortable, KeyEventPortable, KeyMods, ModelEntry, PluginId, ProviderId,
+    Region, ScreenArgs, ScreenInstanceId, ThemeEntry, ThemePalette, Timestamp, TranscriptHandle,
 };
 
 pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};

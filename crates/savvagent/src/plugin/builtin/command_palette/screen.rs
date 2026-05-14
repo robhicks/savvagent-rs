@@ -15,7 +15,9 @@ pub struct PaletteCommand {
     pub name: String,
     /// One-line summary from the plugin's `SlashSpec.summary`.
     pub description: String,
-    /// `true` if the command's `SlashSpec.args_hint` is `Some(_)`.
+    /// `true` if the command's `SlashSpec.requires_arg` is set — the
+    /// palette then prefills the textarea with `"/cmd "` on selection
+    /// instead of dispatching the slash with empty args.
     pub needs_arg: bool,
 }
 

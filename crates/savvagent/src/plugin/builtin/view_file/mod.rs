@@ -36,6 +36,7 @@ impl Plugin for ViewFilePlugin {
             name: "view".into(),
             summary: rust_i18n::t!("slash.view-summary").to_string(),
             args_hint: Some("<path>".into()),
+            requires_arg: true,
         }];
         contributions.screens = vec![ScreenSpec {
             id: "view-file".into(),
@@ -77,10 +78,12 @@ impl Plugin for ViewFilePlugin {
     }
 
     fn create_screen(&self, id: &str, args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
+        // The screen is a marker; `apply_effects::open_screen` constructs
+        // the actual screen (with the resolved path) after loading the file
+        // into `App::editor`, and replaces this placeholder before the
+        // screen lands on the stack.
         match (id, args) {
-            ("view-file", ScreenArgs::ViewFile { path }) => {
-                Ok(Box::new(ViewFileScreen::open(path)?))
-            }
+            ("view-file", ScreenArgs::ViewFile { path }) => Ok(Box::new(ViewFileScreen::new(path))),
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
         }
     }

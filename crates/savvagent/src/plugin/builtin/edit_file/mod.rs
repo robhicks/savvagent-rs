@@ -36,6 +36,7 @@ impl Plugin for EditFilePlugin {
             name: "edit".into(),
             summary: rust_i18n::t!("slash.edit-summary").to_string(),
             args_hint: Some("<path>".into()),
+            requires_arg: true,
         }];
         contributions.screens = vec![ScreenSpec {
             id: "edit-file".into(),
@@ -77,10 +78,9 @@ impl Plugin for EditFilePlugin {
     }
 
     fn create_screen(&self, id: &str, args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
+        // Marker screen; see view_file/mod.rs for the same pattern.
         match (id, args) {
-            ("edit-file", ScreenArgs::EditFile { path }) => {
-                Ok(Box::new(EditFileScreen::open(path)?))
-            }
+            ("edit-file", ScreenArgs::EditFile { path }) => Ok(Box::new(EditFileScreen::new(path))),
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
         }
     }

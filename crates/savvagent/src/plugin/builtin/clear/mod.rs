@@ -32,6 +32,7 @@ impl Plugin for ClearPlugin {
             name: "clear".into(),
             summary: rust_i18n::t!("slash.clear-summary").to_string(),
             args_hint: None,
+            requires_arg: false,
         }];
         Manifest {
             id: PluginId::new("internal:clear").expect("valid built-in id"),

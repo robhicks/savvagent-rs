@@ -19,6 +19,7 @@
 #![warn(missing_docs)]
 
 mod config;
+mod logging;
 mod permissions;
 mod project;
 mod provider;

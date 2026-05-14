@@ -34,6 +34,7 @@ impl Plugin for SavePlugin {
             name: "save".into(),
             summary: rust_i18n::t!("slash.save-summary").to_string(),
             args_hint: Some("[path]".into()),
+            requires_arg: false,
         }];
         Manifest {
             id: PluginId::new("internal:save").expect("valid built-in id"),

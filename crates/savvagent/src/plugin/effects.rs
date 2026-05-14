@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs};
 
-use crate::app::App;
+use crate::app::{App, PendingModelChange};
 use crate::plugin::builtin::command_palette::screen::{PaletteCommand, PaletteScreen};
 use crate::plugin::builtin::plugins_manager::screen::{PluginRow, PluginsManagerScreen};
 use crate::plugin::builtin::plugins_manager::{persistence, summarize_contributions};
@@ -49,7 +49,23 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         Effect::PushNote { line } => app.push_styled_note(line),
         Effect::OpenScreen { id, args } => open_screen(app, &id, args).await?,
         Effect::CloseScreen => {
-            app.screen_stack.pop();
+            // When the screen being popped owns an `App::editor`
+            // instance (view-file / edit-file), tear it down so the
+            // editor stops rendering and the file path slot clears.
+            // edit-file also gets a save-on-close to match the legacy
+            // `InputMode::EditingFile` behavior.
+            if let Some((popped, _)) = app.screen_stack.pop() {
+                let id = popped.id();
+                if id == "edit-file" {
+                    app.save_file();
+                }
+                if id == "view-file" || id == "edit-file" {
+                    app.clear_active_editor();
+                }
+            }
+        }
+        Effect::SaveActiveFile => {
+            app.save_file();
         }
         Effect::SetActiveTheme { slug, persist } => {
             app.set_active_theme_by_slug(slug);
@@ -68,6 +84,13 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             if persist {
                 app.persist_config();
             }
+        }
+        Effect::SetActiveModel { id, persist } => {
+            // Queue the change for `run_app` to drain. The actual host
+            // rebuild lives in `main.rs::perform_model_change` because
+            // `apply_effects` doesn't receive `host_slot`, `project_root`,
+            // or `tool_bins`.
+            app.pending_model_change = Some(PendingModelChange { id, persist });
         }
         Effect::RegisterProvider { id, display_name } => {
             // Map ProviderId → owning PluginId by convention. Every built-in
@@ -185,6 +208,28 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         Effect::ClearLog => app.clear_log(),
         Effect::PrefillInput { text } => app.prefill_input(text),
         Effect::Quit => app.request_quit(),
+        Effect::PromptApiKey { provider_id } => {
+            // Resolve the id against the static provider catalog; the
+            // legacy `enter_api_key_for` flow needs the static spec for
+            // the env-var placeholder and the keyring write that follows
+            // on submit. Unknown ids fall back to a styled note rather
+            // than panicking so plugin authors can't crash the TUI by
+            // emitting `PromptApiKey` for a provider that's not in the
+            // built-in catalog yet.
+            match crate::providers::PROVIDERS
+                .iter()
+                .position(|p| p.id == provider_id.as_str())
+            {
+                Some(idx) => app.enter_api_key_for(idx),
+                None => app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!(
+                        "notes.prompt-api-key-unknown-provider",
+                        id = provider_id.as_str()
+                    )
+                    .to_string(),
+                )),
+            }
+        }
         Effect::TogglePlugin { id, enabled } => {
             apply_toggle_plugin(app, id, enabled).await?;
         }
@@ -341,8 +386,28 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
             current_code: app.active_language.clone(),
         },
         ("connect.picker", _) => ScreenArgs::ConnectPicker,
+        ("model.picker", _) => ScreenArgs::ModelPicker {
+            current_id: app.model.clone(),
+            models: app.cached_models.clone(),
+        },
         (_, other) => other,
     };
+    // Pre-flight side effects that must happen before the screen lands
+    // on the stack. view-file / edit-file load the target file into
+    // `App::editor` so `ui.rs` can render via ratatui-code-editor; if
+    // loading fails (file missing, I/O error) the marker screen is
+    // never pushed and the user just sees the styled note that
+    // `load_file_into_editor` already emitted.
+    let file_path = match (id, &args) {
+        ("view-file", ScreenArgs::ViewFile { path })
+        | ("edit-file", ScreenArgs::EditFile { path }) => Some(path.clone()),
+        _ => None,
+    };
+    if let Some(p) = &file_path {
+        if !app.load_file_into_editor(std::path::PathBuf::from(p)) {
+            return Ok(());
+        }
+    }
     let (reg, idx) = match (&app.plugin_registry, &app.plugin_indexes) {
         (Some(r), Some(i)) => (r.clone(), i.clone()),
         _ => return Err("plugin runtime not installed".into()),
@@ -366,10 +431,10 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
     // For screens whose row/data list lives in `App`/the registry rather
     // than in `ScreenArgs`, build the populated screen ourselves and skip
     // the plugin's `create_screen` (which would just allocate an empty
-    // placeholder we'd immediately discard). Today that's `plugins.manager`
-    // and `palette`; future screens with the same shape (e.g. a hooks
-    // inspector) should follow the same pattern rather than smuggling
-    // state through ScreenArgs.
+    // placeholder we'd immediately discard). Today that's `plugins.manager`,
+    // `palette`, and `connect.picker`; future screens with the same shape
+    // (e.g. a hooks inspector) should follow the same pattern rather than
+    // smuggling state through ScreenArgs.
     let (screen, layout) = if id == "plugins.manager" {
         let layout = {
             let plugin = handle.lock().await;
@@ -403,6 +468,57 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
         let commands = build_palette_commands(&reg, &idx).await;
         let screen: Box<dyn savvagent_plugin::Screen> =
             Box::new(PaletteScreen::with_commands(commands));
+        (screen, layout)
+    } else if id == crate::plugin::builtin::prompt_keybindings::SCREEN_ID {
+        // Build the dynamic plugin-contributed section from the live
+        // keybinding index so new plugin-supplied bindings show up
+        // without anyone having to update the static help text. (The
+        // editor-keybindings screen has no plugin extension surface,
+        // so it falls through to the normal `create_screen` path.)
+        let layout = {
+            let plugin = handle.lock().await;
+            let manifest = plugin.manifest();
+            manifest
+                .contributions
+                .screens
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| format!("plugin {} doesn't declare screen {id}", pid.as_str()))?
+                .layout
+                .clone()
+        };
+        let rows = build_keybindings_plugin_rows(&idx).await;
+        let screen: Box<dyn savvagent_plugin::Screen> = Box::new(
+            crate::plugin::builtin::prompt_keybindings::build_prompt_keybindings_screen(rows),
+        );
+        (screen, layout)
+    } else if id == "connect.picker" {
+        // Source the picker's candidate list from every enabled provider
+        // plugin's manifest, not from past `HostEvent::ProviderRegistered`
+        // notifications. That event only fires after a provider has
+        // successfully built a client — which for the credentialed
+        // providers (Anthropic/Gemini/OpenAI) happens only *after* the
+        // user has already connected them. Reading from manifests makes
+        // the picker list every provider that *could* be connected, which
+        // is what the picker is for.
+        let layout = {
+            let plugin = handle.lock().await;
+            let manifest = plugin.manifest();
+            manifest
+                .contributions
+                .screens
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| format!("plugin {} doesn't declare screen {id}", pid.as_str()))?
+                .layout
+                .clone()
+        };
+        let candidates = build_connect_candidates(&reg).await;
+        let screen: Box<dyn savvagent_plugin::Screen> = Box::new(
+            crate::plugin::builtin::connect::screen::ConnectPickerScreen::with_candidates(
+                candidates,
+            ),
+        );
         (screen, layout)
     } else {
         let plugin = handle.lock().await;
@@ -458,10 +574,101 @@ async fn build_palette_commands(
         commands.push(PaletteCommand {
             name: spec.name.clone(),
             description: spec.summary.clone(),
-            needs_arg: spec.args_hint.is_some(),
+            needs_arg: spec.requires_arg,
         });
     }
     commands
+}
+
+/// Build the `/prompt-keybindings` viewer's plugin section by walking
+/// the keybindings index. Each entry becomes a "Chord — owning plugin"
+/// pair; owning-plugin id is used as the description so the user can
+/// trace a binding back to its source. Sorted by chord for stable
+/// ordering across runs.
+async fn build_keybindings_plugin_rows(
+    idx_handle: &std::sync::Arc<tokio::sync::RwLock<crate::plugin::manifests::Indexes>>,
+) -> Vec<crate::plugin::builtin::keybindings_view::KeybindingRow> {
+    use crate::plugin::builtin::keybindings_view::KeybindingRow;
+    let idx = idx_handle.read().await;
+    let mut rows: Vec<KeybindingRow> = idx
+        .keybindings
+        .iter()
+        .map(|((_scope, chord), (plugin_id, _action))| KeybindingRow {
+            chord: format_chord(chord),
+            description: plugin_id.as_str().to_string(),
+        })
+        .collect();
+    rows.sort_by(|a, b| a.chord.cmp(&b.chord));
+    rows
+}
+
+/// Format a [`savvagent_plugin::ChordPortable`] for the keybindings
+/// viewer. Modifier order matches the conventional `Ctrl+Alt+Shift+X`
+/// display so the rendered chords look familiar.
+fn format_chord(chord: &savvagent_plugin::ChordPortable) -> String {
+    use savvagent_plugin::KeyCodePortable;
+    let mut parts: Vec<&'static str> = Vec::new();
+    if chord.key.modifiers.ctrl {
+        parts.push("Ctrl");
+    }
+    if chord.key.modifiers.alt {
+        parts.push("Alt");
+    }
+    if chord.key.modifiers.shift {
+        parts.push("Shift");
+    }
+    if chord.key.modifiers.meta {
+        parts.push("Meta");
+    }
+    let key_label = match &chord.key.code {
+        KeyCodePortable::Char(' ') => "Space".to_string(),
+        KeyCodePortable::Char(c) => c.to_string(),
+        KeyCodePortable::Backspace => "Backspace".into(),
+        KeyCodePortable::Enter => "Enter".into(),
+        KeyCodePortable::Esc => "Esc".into(),
+        KeyCodePortable::Tab => "Tab".into(),
+        KeyCodePortable::BackTab => "Shift+Tab".into(),
+        KeyCodePortable::Insert => "Insert".into(),
+        KeyCodePortable::Delete => "Delete".into(),
+        KeyCodePortable::Up => "↑".into(),
+        KeyCodePortable::Down => "↓".into(),
+        KeyCodePortable::Left => "←".into(),
+        KeyCodePortable::Right => "→".into(),
+        KeyCodePortable::Home => "Home".into(),
+        KeyCodePortable::End => "End".into(),
+        KeyCodePortable::PageUp => "PgUp".into(),
+        KeyCodePortable::PageDown => "PgDn".into(),
+        KeyCodePortable::F(n) => format!("F{n}"),
+        KeyCodePortable::Unknown => "?".into(),
+    };
+    if parts.is_empty() {
+        key_label
+    } else {
+        format!("{}+{}", parts.join("+"), key_label)
+    }
+}
+
+/// Build the `/connect` picker's candidate list by walking every enabled
+/// plugin's manifest and collecting its declared providers. Sorted
+/// alphabetically by display name so the picker has a stable ordering
+/// across runs.
+async fn build_connect_candidates(
+    reg_handle: &std::sync::Arc<tokio::sync::RwLock<crate::plugin::registry::PluginRegistry>>,
+) -> Vec<(savvagent_plugin::ProviderId, String)> {
+    let reg = reg_handle.read().await;
+    let mut out: Vec<(savvagent_plugin::ProviderId, String)> = Vec::new();
+    let ids: Vec<PluginId> = reg.enabled_ids().cloned().collect();
+    for id in ids {
+        let Some(handle) = reg.get(&id) else {
+            continue;
+        };
+        let manifest = handle.lock().await.manifest();
+        for spec in manifest.contributions.providers {
+            out.push((spec.id, spec.display_name));
+        }
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
 }
 
 /// Build one [`PluginRow`] per registered plugin by walking the registry's
@@ -669,6 +876,36 @@ mod tests {
         );
     }
 
+    /// `Effect::SetActiveModel` must queue a `PendingModelChange` on App;
+    /// the actual host rebuild happens in `main.rs`'s run_app loop where
+    /// the host slot + project root + tool bins are available.
+    #[tokio::test]
+    async fn set_active_model_effect_queues_pending_model_change() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+
+        assert!(app.pending_model_change.is_none());
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetActiveModel {
+                id: "gemini-2.5-pro".into(),
+                persist: true,
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        let pending = app
+            .pending_model_change
+            .expect("SetActiveModel must populate pending_model_change");
+        assert_eq!(pending.id, "gemini-2.5-pro");
+        assert!(pending.persist);
+    }
+
     /// Regression test for the post-v0.9 hotfix that wired `Effect::Quit`
     /// (emitted by the new `internal:quit` plugin) into `App::request_quit`.
     /// Before the fix, `/quit` from the palette landed on the `_ => warn`
@@ -747,21 +984,25 @@ mod tests {
 
     /// End-to-end regression test for the dual-instance provider-plugin
     /// bug. Before the fix, `register_builtins` allocated each provider
-    /// plugin twice — once in the `plugins` map (where slash dispatch
-    /// reached it) and once in the `providers` map (where
-    /// `take_provider_client` looked). The slash handler installed a
-    /// client into instance `B`; `apply_effects::Effect::RegisterProvider`
-    /// then asked instance `A` to hand one over and got `None`, so every
-    /// `/connect <provider>` landed in the "announced but no client was
-    /// constructed" failure branch.
+    /// plugin twice — once in the `plugins` map (where slash/hook
+    /// dispatch reached it) and once in the `providers` map (where
+    /// `take_provider_client` looked). One instance had the client; the
+    /// other was asked to hand it over and returned `None`, so every
+    /// `RegisterProvider` effect landed in the "announced but no client
+    /// was constructed" failure branch.
     ///
-    /// This test exercises the full chain: SlashRouter → handle_slash →
-    /// Effect::RegisterProvider → take_provider_client → register_provider.
-    /// We pre-install a stub client via `with_test_client` so we don't
-    /// touch the user's keyring — the goal is to pin the wiring, not to
-    /// exercise the real credential store.
+    /// This test exercises the full chain via `on_event(HostStarting)`:
+    /// dispatch_host_event → handle on_event → Effect::RegisterProvider
+    /// → take_provider_client → register_provider. (`/connect <provider>`
+    /// no longer emits `RegisterProvider` directly — it always opens
+    /// the API-key modal — so the startup hook path is what still
+    /// drives the dual-instance wiring.)
+    ///
+    /// We pre-install a stub client via `with_test_client` so the
+    /// plugin's `try_connect_from_keyring` short-circuits (since
+    /// `client.is_some()`) without touching the real keyring.
     #[tokio::test]
-    async fn connect_anthropic_with_stub_client_registers_end_to_end() {
+    async fn host_starting_with_stub_client_registers_end_to_end() {
         use crate::plugin::builtin::provider_anthropic::ProviderAnthropicPlugin;
         use crate::plugin::builtin::provider_common::ProviderEntry;
         use crate::plugin::manifests::Indexes;
@@ -810,15 +1051,12 @@ mod tests {
 
         app.install_plugin_runtime(registry, indexes);
 
-        // Dispatch the slash command through the same path the live TUI
-        // uses. Before the fix, this would fail with "no client constructed."
-        let effects = vec![Effect::RunSlash {
-            name: "connect anthropic".into(),
-            args: vec![],
-        }];
-        apply_effects(&mut app, effects)
+        // Dispatch HostStarting through the same hook fan-out the live
+        // TUI uses on app startup. Before the dual-instance fix this
+        // would fail with "no client constructed."
+        dispatch_host_event(&mut app, HostEvent::HostStarting, 0)
             .await
-            .expect("apply_effects must succeed");
+            .expect("dispatch_host_event must succeed");
 
         // The registered_providers map should now contain "anthropic"
         // pointing at our stub client.
@@ -1293,6 +1531,7 @@ mod tests {
                     name: "dup".into(),
                     summary: "".into(),
                     args_hint: None,
+                    requires_arg: false,
                 }];
                 Manifest {
                     id: PluginId::new(&self.id).expect("valid id"),
@@ -1544,6 +1783,191 @@ mod tests {
         );
 
         rust_i18n::set_locale("en");
+    }
+
+    /// Regression test for the missing API-key entry path post-plugin
+    /// migration. Pre-fix, `/connect <provider>` for a credentialed
+    /// provider with no keyring entry emitted only `Effect::PushNote`
+    /// telling the user to do what they just did. Post-fix, the
+    /// provider plugin emits `Effect::PromptApiKey`, which lands the
+    /// user in the masked input modal via the legacy `enter_api_key_for`
+    /// flow.
+    #[tokio::test]
+    async fn prompt_api_key_effect_switches_to_api_key_entry_mode() {
+        use savvagent_plugin::ProviderId;
+
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        assert!(
+            matches!(app.input_mode, crate::app::InputMode::Editing),
+            "precondition: app starts in Editing mode"
+        );
+
+        apply_effects(
+            &mut app,
+            vec![Effect::PromptApiKey {
+                provider_id: ProviderId::new("anthropic").expect("valid"),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        assert!(
+            matches!(app.input_mode, crate::app::InputMode::EnteringApiKey),
+            "Effect::PromptApiKey must transition to EnteringApiKey"
+        );
+        assert!(
+            app.pending_provider.is_some(),
+            "pending_provider must be set so on-submit can route to perform_connect"
+        );
+        assert_eq!(
+            app.pending_provider.unwrap().id,
+            "anthropic",
+            "pending_provider must match the requested id"
+        );
+    }
+
+    /// `Effect::PromptApiKey` with an unknown provider id must push a
+    /// styled note rather than panic. Pins the unknown-id fallback so a
+    /// buggy plugin emitting a stale provider id can't crash the TUI.
+    #[tokio::test]
+    async fn prompt_api_key_with_unknown_provider_pushes_note() {
+        use savvagent_plugin::ProviderId;
+
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        apply_effects(
+            &mut app,
+            vec![Effect::PromptApiKey {
+                provider_id: ProviderId::new("not-a-real-provider").expect("valid id syntax"),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        assert!(
+            matches!(app.input_mode, crate::app::InputMode::Editing),
+            "unknown id must not transition to EnteringApiKey"
+        );
+        assert!(
+            app.entries.iter().any(|e| matches!(
+                e,
+                crate::app::Entry::Note(text) if text.contains("not-a-real-provider")
+            )),
+            "unknown id must push a styled note naming the bad id"
+        );
+    }
+
+    /// Regression test for the palette prefilling optional-arg slashes
+    /// (e.g. `/connect`, `/theme`, `/language`, `/save`) instead of
+    /// firing them. Pre-fix, `build_palette_commands` derived
+    /// `needs_arg` from `spec.args_hint.is_some()` — but optional-arg
+    /// slashes do have a hint (`[provider]`, `[list | <slug>]`, …) and
+    /// were therefore wrongly prefilled. Post-fix, `needs_arg` reads
+    /// `spec.requires_arg`, which is `false` for those slashes.
+    #[tokio::test]
+    async fn palette_commands_use_requires_arg_not_args_hint() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::register_builtins;
+        use crate::plugin::registry::PluginRegistry;
+
+        let set = register_builtins();
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
+        let indexes = std::sync::Arc::new(tokio::sync::RwLock::new(indexes));
+
+        let commands = build_palette_commands(&registry, &indexes).await;
+        let by_name: std::collections::HashMap<String, bool> =
+            commands.into_iter().map(|c| (c.name, c.needs_arg)).collect();
+
+        // Slashes whose no-arg behavior is meaningful (open a picker)
+        // must dispatch on selection, not prefill.
+        for name in ["connect", "theme", "language", "save"] {
+            assert_eq!(
+                by_name.get(name).copied(),
+                Some(false),
+                "/{name} must dispatch on selection (needs_arg=false)"
+            );
+        }
+        // Slashes that genuinely need an argument must prefill.
+        for name in ["view", "edit"] {
+            assert_eq!(
+                by_name.get(name).copied(),
+                Some(true),
+                "/{name} must prefill on selection (needs_arg=true)"
+            );
+        }
+    }
+
+    /// Regression test for the `/connect` picker only showing Ollama.
+    /// Pre-fix, the picker populated from `HostEvent::ProviderRegistered`
+    /// — which only fires after a successful credentialed connect, so the
+    /// keyless local provider was the only entry a fresh user ever saw.
+    /// Post-fix, `open_screen` builds the candidate list from every
+    /// enabled plugin's `contributions.providers`, so all four built-in
+    /// providers appear regardless of credential state.
+    #[tokio::test]
+    async fn connect_picker_lists_all_provider_plugins() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::PluginRegistry;
+        use crate::plugin::register_builtins;
+
+        let set = register_builtins();
+        let registry = PluginRegistry::new(set);
+        let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
+        let candidates = build_connect_candidates(&registry).await;
+
+        let ids: std::collections::HashSet<String> = candidates
+            .iter()
+            .map(|(id, _)| id.as_str().to_string())
+            .collect();
+        for expected in ["anthropic", "gemini", "openai", "local"] {
+            assert!(
+                ids.contains(expected),
+                "expected provider {expected} in picker candidates; got {ids:?}"
+            );
+        }
+
+        // Sanity: also exercise the full open_screen path so we know the
+        // `connect.picker` branch we added is reachable. Build the
+        // indexes (which requires holding the lock — released before await).
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        let indexes = {
+            let reg = registry.read().await;
+            Indexes::build(&reg).await.expect("indexes build")
+        };
+        // Unwrap the Arc<RwLock<_>> back into a registry to hand to
+        // install_plugin_runtime, which wraps it again. Tricky but
+        // localized to this test.
+        let registry = std::sync::Arc::try_unwrap(registry)
+            .map_err(|_| "registry must be uniquely owned")
+            .unwrap()
+            .into_inner();
+        app.install_plugin_runtime(registry, indexes);
+        apply_effects(
+            &mut app,
+            vec![Effect::OpenScreen {
+                id: "connect.picker".into(),
+                args: ScreenArgs::ConnectPicker,
+            }],
+        )
+        .await
+        .expect("open_screen must succeed for connect.picker");
+        assert!(
+            !app.screen_stack.is_empty(),
+            "connect.picker should be pushed onto the stack"
+        );
     }
 
     #[tokio::test]

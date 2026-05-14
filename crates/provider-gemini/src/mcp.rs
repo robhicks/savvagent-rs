@@ -20,7 +20,8 @@ use rmcp::{
 };
 use savvagent_mcp::{EmitError, ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-    self as spp, COMPLETE_TOOL_NAME, CompleteRequest, STREAM_EVENT_KIND, StreamEvent,
+    self as spp, COMPLETE_TOOL_NAME, CompleteRequest, LIST_MODELS_TOOL_NAME, STREAM_EVENT_KIND,
+    StreamEvent,
 };
 
 use crate::GeminiProvider;
@@ -126,6 +127,35 @@ impl GeminiMcpServer {
             }
         }
     }
+
+    /// SPP `list_models` tool. Queries Gemini's `/v1beta/models` and
+    /// filters to entries that advertise `generateContent` support.
+    #[tool(
+        name = "list_models",
+        description = "List models this provider can serve."
+    )]
+    pub async fn list_models_tool(&self) -> Result<CallToolResult, ErrorData> {
+        match self.provider.list_models().await {
+            Ok(resp) => {
+                let value = serde_json::to_value(&resp).map_err(|e| {
+                    ErrorData::internal_error(
+                        format!("failed to serialize ListModelsResponse: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured(value))
+            }
+            Err(spp_err) => {
+                let value = serde_json::to_value(&spp_err).map_err(|e| {
+                    ErrorData::internal_error(
+                        format!("failed to serialize ProviderError: {e}"),
+                        None,
+                    )
+                })?;
+                Ok(CallToolResult::structured_error(value))
+            }
+        }
+    }
 }
 
 #[tool_handler]
@@ -145,8 +175,8 @@ impl ServerHandler for GeminiMcpServer {
                 "SPP-conformant Gemini provider. Call `{}` with a CompleteRequest. \
                  For streaming, attach a progress token in `_meta`; events arrive as \
                  `notifications/progress` with `message` carrying the SPP StreamEvent JSON \
-                 (kind `{}`).",
-                COMPLETE_TOOL_NAME, STREAM_EVENT_KIND
+                 (kind `{}`). Call `{}` (no arguments) for the filtered model list.",
+                COMPLETE_TOOL_NAME, STREAM_EVENT_KIND, LIST_MODELS_TOOL_NAME
             ))
     }
 }

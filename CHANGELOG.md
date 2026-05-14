@@ -6,6 +6,87 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.12.0 — Gemini polish, model picker, TUI integrity (2026-05-13)
+
+Five threads ship together:
+
+1. **Gemini connectivity fixed end-to-end.** Tool schemas (JSON Schema
+   from `schemars`) are now sanitized into the OpenAPI subset Gemini's
+   protobuf parser accepts, and the retired `gemini-1.5-flash` default
+   is replaced with `gemini-2.5-flash`. Gemini also gains `list_models`
+   support so the new picker works there.
+2. **/model is an interactive picker.** No-args `/model` opens a list
+   of the active provider's models with ↑/↓ navigation and Enter to
+   switch. The choice is persisted per provider to
+   `~/.savvagent/models.toml` and re-applied on reconnect.
+3. **TUI rendering integrity.** Tool subprocesses (`tool-fs`,
+   `tool-bash`, `tool-grep`) and the host's own tracing no longer
+   bleed onto ratatui's alternate screen. All `tracing` output now
+   lands in `~/.savvagent/logs/`.
+4. **Keybindings help modals.** New `/prompt-keybindings` and
+   `/editor-keybindings` slash commands open scrollable, sectioned
+   help screens (chrome shared via a new `keybindings_view` module).
+5. **Editor syntax theme.** `view-file` / `edit-file` now syntax-color
+   code using a theme derived from the active TUI palette — switching
+   themes re-themes the editor.
+
+### New features
+
+- `/model` picker — `Effect::SetActiveModel` and
+  `ScreenArgs::ModelPicker` added to the plugin contract. The
+  `internal:model` plugin owns the picker screen and emits
+  `Effect::OpenScreen` for no-args invocations; typed-arg
+  invocations (`/model <id>`) still apply directly.
+- Per-provider model persistence at `~/.savvagent/models.toml`
+  (`schema_version = 1`). Precedence on connect: `SAVVAGENT_MODEL` env
+  var > persisted file > provider default.
+- Gemini `list_models` — queries `v1beta/models`, filters to entries
+  whose `supportedGenerationMethods` includes `generateContent`, and
+  surfaces `gemini-2.5-flash` as the default when present.
+- `/prompt-keybindings` — modal listing the keybindings active in the
+  main prompt input.
+- `/editor-keybindings` — modal listing the ratatui-code-editor
+  keybindings active in `view-file` / `edit-file`.
+
+### Fixes
+
+- **Gemini tool schemas** — a new sanitizer
+  (`provider-gemini::schema`) rewrites incoming JSON Schemas into
+  Gemini's OpenAPI subset before they hit the wire. It inlines
+  `$ref`/`$defs`, drops `$schema`/`$id`/`$comment`/
+  `additionalProperties`/`unevaluatedProperties`/`patternProperties`,
+  converts `type: ["X", "null"]` to `type: "X"` + `nullable: true`,
+  rewrites `const: X` as `enum: [X]`, renames `oneOf` to `anyOf`, and
+  lifts bare `{"type": "null"}` members out of `anyOf` (collapsing
+  single-remaining-member `anyOf` into the parent). Resolves the
+  `Unknown name "$schema"` / `Cannot find field "const"` /
+  `Proto field is not repeating, cannot start list` cascades that
+  previously made every Gemini turn fail at request validation.
+- **Default Gemini model** bumped to `gemini-2.5-flash`; the
+  retired `gemini-1.5-flash` was returning `ModelNotFound`.
+- **TUI alt-screen integrity** — each tool subprocess's stderr is
+  redirected to `~/.savvagent/logs/tools/<binary>.log` after sandbox
+  wrapping; the host's own tracing writes to
+  `~/.savvagent/logs/savvagent.log`. Tool crates' default log level
+  dropped from `info` to `warn`. `RUST_LOG` still overrides for
+  debugging.
+
+### Plugin SDK changes
+
+- `Effect::SetActiveModel { id, persist }` — runtime resolves the
+  active provider, rebuilds its in-process host with `id`, and
+  optionally writes to `~/.savvagent/models.toml`.
+- `ScreenArgs::ModelPicker { current_id, models: Vec<ModelEntry> }`
+  — picker args; `apply_effects::open_screen` patches the variant
+  from `App::cached_models` (refreshed after every connect and
+  model change).
+- `ModelEntry { id, display_name }` — new type, exported from the
+  plugin crate root.
+
+### Dependencies
+
+No new external dependencies.
+
 ## v0.11.0 — TUI Self Update (2026-05-13)
 
 In-band self-update. On launch the TUI asynchronously checks the GitHub

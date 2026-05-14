@@ -37,6 +37,7 @@ impl Plugin for QuitPlugin {
             name: "quit".into(),
             summary: rust_i18n::t!("slash.quit-summary").to_string(),
             args_hint: None,
+            requires_arg: false,
         }];
         Manifest {
             id: PluginId::new("internal:quit").expect("valid built-in id"),

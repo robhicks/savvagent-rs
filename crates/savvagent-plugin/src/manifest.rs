@@ -63,7 +63,20 @@ pub struct SlashSpec {
     /// One-line summary shown in the command palette.
     pub summary: String,
     /// Optional usage hint shown in the command palette after the command name.
+    /// Hint convention: `<path>` denotes a required argument; `[provider]` /
+    /// `[list | <slug>]` denote optional arguments. The string itself is
+    /// purely informational — runtime behavior is driven by
+    /// [`SlashSpec::requires_arg`], not by inspecting the hint shape.
     pub args_hint: Option<String>,
+    /// `true` if invoking the slash with no argument is a usage error.
+    ///
+    /// When `true`, the command palette prefills `"/<name> "` into the
+    /// textarea on selection so the user can complete the command (e.g.
+    /// `/view <path>`) rather than firing it immediately. When `false`,
+    /// the palette dispatches the slash on selection — used by slashes
+    /// whose no-arg behavior is meaningful (`/connect`, `/theme`,
+    /// `/save`, `/language`, …).
+    pub requires_arg: bool,
 }
 
 /// Registration descriptor for a screen contributed by a plugin.

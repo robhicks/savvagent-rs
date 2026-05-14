@@ -10,9 +10,89 @@ use ratatui_code_editor::editor::Editor;
 use ratatui_explorer::{FileExplorer, FileExplorerBuilder, Theme};
 use savvagent_host::{NetOverride, SandboxConfig, ToolCallStatus, TranscriptFile, TurnEvent};
 use serde_json::Value;
-use tui_textarea::TextArea;
+use tui_textarea::{TextArea, WrapMode};
 
 use crate::providers::{PROVIDERS, ProviderSpec};
+
+/// Minimum height (rows, including borders) for the main prompt input.
+/// 1 visible content row + 2 border rows.
+pub const INPUT_MIN_ROWS: u16 = 3;
+/// Maximum height (rows, including borders) for the main prompt input
+/// before further content scrolls. ~8 visible content rows + 2 border rows.
+pub const INPUT_MAX_ROWS: u16 = 10;
+/// Undo/redo history depth for the main prompt. Default in
+/// `tui-textarea` is 50; we raise it so users editing large multi-line
+/// prompts can scrub back through more revisions.
+pub const INPUT_MAX_HISTORIES: usize = 1000;
+
+/// Build an owned ratatui-code-editor theme — `Vec<(token, hex)>` —
+/// from the app's active TUI theme. Callers borrow into the
+/// `Vec<(&str, &str)>` form via [`borrow_editor_theme`] at the
+/// `Editor::new` call site so the upstream constructor sees a clean
+/// slice of references without anything escaping.
+///
+/// The viewer/editor is short-lived, so we rebuild per-open rather
+/// than caching on `App`: catches `/theme`-switches between opens
+/// without a cache-invalidation step.
+pub fn editor_theme_for_active(app: &App) -> Vec<(String, String)> {
+    let palette = crate::palette::Palette::for_theme(app.active_theme);
+    crate::plugin::builtin::themes::editor_theme::build_editor_theme(&palette)
+}
+
+/// Convert an owned editor theme into the borrowed shape
+/// `Editor::new` accepts. The returned slice borrows from `owned`;
+/// keep `owned` alive across the `Editor::new` call.
+pub fn borrow_editor_theme(owned: &[(String, String)]) -> Vec<(&str, &str)> {
+    owned
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect()
+}
+
+/// Map a file path's extension to the language id ratatui-code-editor
+/// uses for syntax highlighting. Falls back to `"text"` for unrecognized
+/// extensions so the editor still loads without highlighting.
+pub fn language_for_path(path: &std::path::Path) -> &'static str {
+    let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
+    match extension {
+        "rs" => "rust",
+        "py" => "python",
+        "js" => "javascript",
+        "ts" => "typescript",
+        "json" => "json",
+        "toml" => "toml",
+        "yml" | "yaml" => "yaml",
+        "md" => "markdown",
+        _ => "text",
+    }
+}
+
+/// Build a fresh, properly-configured main-input [`TextArea`].
+///
+/// Wrap mode is `WordOrGlyph` (soft-wraps long lines at word boundaries,
+/// falls back to graphemes for very long unbroken tokens), the row
+/// range is `INPUT_MIN_ROWS..=INPUT_MAX_ROWS` so `TextArea::measure`
+/// drives a dynamic input box that grows with multi-line / wrapped
+/// content, and undo/redo depth is `INPUT_MAX_HISTORIES`. Used
+/// everywhere we reset or rebuild the prompt textarea so the settings
+/// can't drift across reset paths.
+pub fn make_input_textarea<I, S>(lines: I) -> TextArea<'static>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let collected: Vec<String> = lines.into_iter().map(Into::into).collect();
+    let mut ta = if collected.is_empty() {
+        TextArea::default()
+    } else {
+        TextArea::from(collected)
+    };
+    ta.set_wrap_mode(WrapMode::WordOrGlyph);
+    ta.set_min_rows(INPUT_MIN_ROWS);
+    ta.set_max_rows(INPUT_MAX_ROWS);
+    ta.set_max_histories(INPUT_MAX_HISTORIES);
+    ta
+}
 
 /// Input mode — which sub-widget consumes the next key.
 pub enum InputMode {
@@ -47,6 +127,18 @@ pub enum InputMode {
     },
     /// Transcript picker open — selecting a file for `/resume`.
     SelectingTranscript,
+}
+
+/// Queued model-change request emitted by the model picker. The `run_app`
+/// loop drains this field after each `apply_effects` call because
+/// `apply_effects` doesn't have the `host_slot` / `project_root` /
+/// `tool_bins` arguments [`crate::perform_model_change`] needs.
+#[derive(Debug, Clone)]
+pub struct PendingModelChange {
+    /// Bare model id requested by the picker (no `models/` prefix).
+    pub id: String,
+    /// Whether the change should be persisted to `~/.savvagent/models.toml`.
+    pub persist: bool,
 }
 
 /// Snapshot of a pending [`TurnEvent::PermissionRequested`] used to render
@@ -248,8 +340,8 @@ pub struct App {
 
     pub commands: Vec<Command>,
     pub command_index: usize,
-    /// Live filter typed after `/` while the command palette is open. Without
-    /// the leading slash. Empty when the palette was opened via Ctrl-P.
+    /// Live filter typed after `/` while the command palette is open,
+    /// without the leading slash.
     pub palette_filter: String,
 
     /// True once `/connect` has linked the TUI to a running provider.
@@ -324,6 +416,20 @@ pub struct App {
     /// per-provider client implementations side by side.
     pub registered_providers:
         std::collections::HashMap<String, Box<dyn savvagent_mcp::ProviderClient>>,
+
+    /// Model catalog cache for the `/model` picker. Refreshed after
+    /// each `/connect` and `/model <id>` by calling `host.list_models()`
+    /// and translating its `models` field into `Vec<ModelEntry>`. Empty
+    /// when no host is up or when the active provider's `list_models`
+    /// failed; the picker handles both gracefully.
+    pub cached_models: Vec<savvagent_plugin::ModelEntry>,
+
+    /// Queued by `Effect::SetActiveModel` (emitted by the model picker).
+    /// The `run_app` loop drains this after each `apply_effects` call
+    /// and forwards the request to [`crate::perform_model_change`],
+    /// which owns the `host_slot` / `project_root` / `tool_bins` the
+    /// effect-application layer doesn't have access to.
+    pub pending_model_change: Option<PendingModelChange>,
 }
 
 impl App {
@@ -354,7 +460,7 @@ impl App {
             .expect("failed to initialize file explorer");
 
         let mut app = Self {
-            input_textarea: TextArea::default(),
+            input_textarea: make_input_textarea(Vec::<String>::new()),
             input_mode: InputMode::Editing,
             model,
             transcript_dir,
@@ -392,6 +498,8 @@ impl App {
             plugin_indexes: None,
             screen_stack: crate::plugin::screen_stack::ScreenStack::new(),
             registered_providers: std::collections::HashMap::new(),
+            cached_models: Vec::new(),
+            pending_model_change: None,
         };
         app.refresh_commands();
         app
@@ -611,16 +719,6 @@ impl App {
         ];
     }
 
-    /// Open the command palette. Resets the legacy filter state; actual
-    /// screen opening is handled by `apply_effects(OpenScreen("palette"))`.
-    /// This method is kept for the Ctrl-P fallback path when the plugin
-    /// runtime is not yet installed.
-    pub fn open_command_palette(&mut self) {
-        self.refresh_commands();
-        self.command_index = 0;
-        self.palette_filter.clear();
-    }
-
     /// Indices into `self.commands` that match the current filter. If the
     /// filter is empty, returns every index.
     #[allow(dead_code)]
@@ -689,10 +787,10 @@ impl App {
         self.command_index = 0;
 
         if needs_arg {
-            self.input_textarea = TextArea::from(vec![format!("{name} ")]);
+            self.input_textarea = make_input_textarea(vec![format!("{name} ")]);
             Some(CommandSelection::Prefill(name))
         } else {
-            self.input_textarea = TextArea::default();
+            self.input_textarea = make_input_textarea(Vec::<String>::new());
             Some(CommandSelection::Execute(name))
         }
     }
@@ -716,7 +814,7 @@ impl App {
             current.push('@');
             current.push_str(&path.to_string_lossy());
         }
-        self.input_textarea = TextArea::from(current.lines().map(|s| s.to_string()));
+        self.input_textarea = make_input_textarea(current.lines().map(|s| s.to_string()));
         let row = self.input_textarea.lines().len().saturating_sub(1) as u16;
         let col = self
             .input_textarea
@@ -739,10 +837,60 @@ impl App {
         self.is_file_picker_active = false;
     }
 
+    /// Build a syntax-highlighted [`Editor`] for `path` and install it as
+    /// the active editor. Used by the plugin-driven view/edit flow:
+    /// `apply_effects::open_screen` calls this when a `view-file` or
+    /// `edit-file` screen is pushed so `ui.rs` can render the file via
+    /// ratatui-code-editor. Does **not** mutate `input_mode` — the
+    /// screen stack tracks visibility instead. Returns `true` on
+    /// success; on failure (missing file, I/O error, editor-construct
+    /// error) a styled note is pushed and `false` is returned so the
+    /// caller can skip pushing the marker screen.
+    pub fn load_file_into_editor(&mut self, path: PathBuf) -> bool {
+        if !path.exists() {
+            self.push_note(
+                rust_i18n::t!("notes.file-not-found", path = path.display().to_string())
+                    .to_string(),
+            );
+            return false;
+        }
+        let lang = language_for_path(&path);
+        let owned_theme = editor_theme_for_active(self);
+        match std::fs::read_to_string(&path) {
+            Ok(content) => match Editor::new(lang, &content, borrow_editor_theme(&owned_theme)) {
+                Ok(editor) => {
+                    self.editor = Some(editor);
+                    self.active_file_path = Some(path);
+                    true
+                }
+                Err(e) => {
+                    self.push_note(
+                        rust_i18n::t!("notes.file-editor-error", err = format!("{e:#}"))
+                            .to_string(),
+                    );
+                    false
+                }
+            },
+            Err(e) => {
+                self.push_note(
+                    rust_i18n::t!("notes.file-read-error", err = format!("{e:#}")).to_string(),
+                );
+                false
+            }
+        }
+    }
+
+    /// Clear the active editor + file path. Called by `apply_effects` when a
+    /// `view-file` or `edit-file` screen is popped from the stack.
+    pub fn clear_active_editor(&mut self) {
+        self.editor = None;
+        self.active_file_path = None;
+    }
+
     /// Open `path` in the legacy popup editor (read-only or read-write per
-    /// `edit`). Superseded by the `internal:view-file` / `internal:edit-file`
-    /// Screen plugins; retained until a follow-up PR rips out the legacy
-    /// file-popup mechanism.
+    /// `edit`). Retained for the legacy `InputMode::ViewingFile`/
+    /// `EditingFile` path; new code goes through
+    /// [`Self::load_file_into_editor`] + the screen-stack abstraction.
     #[allow(dead_code)]
     pub fn open_file(&mut self, path: PathBuf, edit: bool) {
         if !path.exists() {
@@ -752,36 +900,23 @@ impl App {
             );
             return;
         }
-        let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("txt");
-        let lang = match extension {
-            "rs" => "rust",
-            "py" => "python",
-            "js" => "javascript",
-            "ts" => "typescript",
-            "json" => "json",
-            "toml" => "toml",
-            "yml" | "yaml" => "yaml",
-            "md" => "markdown",
-            _ => "text",
-        };
+        let lang = language_for_path(&path);
+        let owned_theme = editor_theme_for_active(self);
         match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                match Editor::new(lang, &content, ratatui_code_editor::theme::vesper()) {
-                    Ok(editor) => {
-                        self.editor = Some(editor);
-                        self.active_file_path = Some(path);
-                        self.input_mode = if edit {
-                            InputMode::EditingFile
-                        } else {
-                            InputMode::ViewingFile
-                        };
-                    }
-                    Err(e) => self.push_note(
-                        rust_i18n::t!("notes.file-editor-error", err = format!("{e:#}"))
-                            .to_string(),
-                    ),
+            Ok(content) => match Editor::new(lang, &content, borrow_editor_theme(&owned_theme)) {
+                Ok(editor) => {
+                    self.editor = Some(editor);
+                    self.active_file_path = Some(path);
+                    self.input_mode = if edit {
+                        InputMode::EditingFile
+                    } else {
+                        InputMode::ViewingFile
+                    };
                 }
-            }
+                Err(e) => self.push_note(
+                    rust_i18n::t!("notes.file-editor-error", err = format!("{e:#}")).to_string(),
+                ),
+            },
             Err(e) => self.push_note(
                 rust_i18n::t!("notes.file-read-error", err = format!("{e:#}")).to_string(),
             ),
@@ -936,28 +1071,55 @@ impl App {
     }
 
     /// Advance from provider selection to API-key entry, or cancel if `idx` is OOB.
+    ///
+    /// The placeholder text reflects whether a credential is already
+    /// stored in the keyring: when present, the user can press Enter on
+    /// an empty input to reuse it; otherwise the placeholder just hints
+    /// at the env-var name.
     pub fn enter_api_key_for(&mut self, idx: usize) {
         let Some(spec) = PROVIDERS.get(idx) else {
             self.input_mode = InputMode::Editing;
             return;
         };
+        let has_stored = matches!(crate::creds::load(spec.id), Ok(Some(_)));
         self.pending_provider = Some(spec);
         let mut ta = TextArea::default();
         ta.set_mask_char('●');
-        ta.set_placeholder_text(format!("Paste your {} key", spec.api_key_env));
+        let placeholder = if has_stored {
+            rust_i18n::t!(
+                "prompt.api-key.use-stored-or-paste-new",
+                env = spec.api_key_env
+            )
+            .to_string()
+        } else {
+            rust_i18n::t!("prompt.api-key.paste-new", env = spec.api_key_env).to_string()
+        };
+        ta.set_placeholder_text(placeholder);
         self.api_key_textarea = ta;
         self.input_mode = InputMode::EnteringApiKey;
     }
 
-    /// Read the masked input, then clear it.
-    pub fn take_pending_api_key(&mut self) -> Option<(&'static ProviderSpec, String)> {
-        let spec = self.pending_provider.take()?;
+    /// Read the masked input. Three outcomes:
+    ///
+    /// * `Some((spec, Some(key)))` — user typed a key and submitted;
+    ///   internal state is reset.
+    /// * `Some((spec, None))` — modal was open but the input is empty;
+    ///   pending state is **preserved** so callers can fall back to a
+    ///   stored credential (and, if no stored key exists, restore the
+    ///   modal so the user can retry without losing their place).
+    /// * `None` — no modal was open; callers should ignore.
+    pub fn take_pending_api_key(&mut self) -> Option<(&'static ProviderSpec, Option<String>)> {
+        let spec = *self.pending_provider.as_ref()?;
         let key = self.api_key_textarea.lines().join("");
-        self.api_key_textarea = TextArea::default();
         if key.is_empty() {
-            return None;
+            // Keep pending_provider + textarea so the caller can either
+            // reuse a stored credential or report the error and let the
+            // user keep typing.
+            return Some((spec, None));
         }
-        Some((spec, key))
+        self.pending_provider = None;
+        self.api_key_textarea = TextArea::default();
+        Some((spec, Some(key)))
     }
 
     /// Abort the `/connect` flow and return to the prompt.
@@ -996,7 +1158,7 @@ impl App {
     /// (e.g. `/view`, `/edit`) so the user can complete the line via the
     /// `@` file picker instead of executing the command with no args.
     pub fn prefill_input(&mut self, text: String) {
-        self.input_textarea = TextArea::from(vec![text]);
+        self.input_textarea = make_input_textarea(vec![text]);
         let row = self.input_textarea.lines().len().saturating_sub(1) as u16;
         let col = self
             .input_textarea
@@ -1329,6 +1491,48 @@ mod tests {
 
     fn fresh_app() -> App {
         App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
+    }
+
+    /// `make_input_textarea` must apply the wrap+grow + history-depth
+    /// settings. Reset paths that bypass this helper would silently
+    /// regress to a single-row scrolling input or a 50-entry undo
+    /// stack, so this test pins the configuration.
+    #[test]
+    fn make_input_textarea_configures_wrap_and_row_bounds() {
+        let ta = make_input_textarea(Vec::<String>::new());
+        assert_eq!(ta.wrap_mode(), WrapMode::WordOrGlyph);
+        assert_eq!(ta.min_rows(), INPUT_MIN_ROWS);
+        assert_eq!(ta.max_rows(), INPUT_MAX_ROWS);
+        assert_eq!(ta.max_histories(), INPUT_MAX_HISTORIES);
+
+        let ta_seeded = make_input_textarea(vec!["seed".to_string()]);
+        assert_eq!(ta_seeded.lines(), &["seed".to_string()]);
+        assert_eq!(ta_seeded.wrap_mode(), WrapMode::WordOrGlyph);
+        assert_eq!(ta_seeded.max_histories(), INPUT_MAX_HISTORIES);
+    }
+
+    /// A long single line must report a `preferred_rows` height larger
+    /// than the minimum when wrapped at a narrow width — confirming the
+    /// dynamic-height computation in `ui::render` actually grows the
+    /// input box rather than horizontally scrolling out of view.
+    #[test]
+    fn long_line_measures_taller_than_min_rows() {
+        let mut ta = make_input_textarea(vec!["x".repeat(200)]);
+        // 20 cols outer width → ~18 cols inner content after borders +
+        // 1-col horizontal padding on each side. 200/18 ≈ 12 visual rows
+        // pre-clamp, but `set_max_rows(INPUT_MAX_ROWS=10)` caps the
+        // preferred rows.
+        let m = ta.measure(20);
+        assert!(
+            m.preferred_rows > INPUT_MIN_ROWS,
+            "wrapped long line should grow the input above the minimum; got {}",
+            m.preferred_rows
+        );
+        assert!(
+            m.preferred_rows <= INPUT_MAX_ROWS,
+            "input height must be clamped at INPUT_MAX_ROWS; got {}",
+            m.preferred_rows
+        );
     }
 
     #[test]

@@ -35,6 +35,7 @@ impl Plugin for LanguagePlugin {
             name: "language".into(),
             summary: rust_i18n::t!("slash.language-summary").to_string(),
             args_hint: Some("[list | <code>]".into()),
+            requires_arg: false,
         }];
         contributions.screens = vec![ScreenSpec {
             id: "language.picker".into(),

@@ -38,6 +38,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::config::ToolEndpoint;
+use crate::logging::tool_stderr_log_file;
 use crate::sandbox::{SandboxConfig, SandboxWrapper, apply_sandbox};
 
 /// The substring we use to identify a `tool-bash` binary path. Mirrors the
@@ -352,6 +353,7 @@ impl ToolRegistry {
                         let wrapper = apply_sandbox(&mut cmd, command, project_root, sandbox);
                         let allow_net = sandbox.net_allowed_for(command);
                         log_sandbox_wrapper(&label, &wrapper, allow_net, sandbox.is_enabled());
+                        redirect_tool_stderr(&mut cmd, command);
 
                         let transport = TokioChildProcess::new(cmd)
                             .with_context(|| format!("spawn tool server: {label}"))?;
@@ -623,6 +625,7 @@ fn build_bash_command(
     // The bash spawn path uses the merged-with-override `sandbox` config,
     // so its `is_enabled()` reflects the actual state for this spawn.
     log_sandbox_wrapper(&label, &wrapper, allow_net, sandbox.is_enabled());
+    redirect_tool_stderr(&mut cmd, command);
     cmd
 }
 
@@ -663,6 +666,22 @@ fn log_sandbox_wrapper(
             tracing::info!("sandbox[sandbox-exec]: {label} (allow_net={allow_net})");
         }
     }
+}
+
+/// Redirect a tool subprocess's stderr to a per-tool append log file under
+/// `~/.savvagent/logs/tools/`. Falls back to `Stdio::null()` if the file
+/// can't be opened — the invariant is "never inherit the TUI's terminal",
+/// not "must log everything".
+///
+/// Must be called *after* [`apply_sandbox`] (which can replace the whole
+/// `Command` with a `bwrap`/`sandbox-exec` wrapper and would otherwise drop
+/// our stderr configuration).
+fn redirect_tool_stderr(cmd: &mut tokio::process::Command, command: &Path) {
+    let stderr = match tool_stderr_log_file(command) {
+        Ok(file) => std::process::Stdio::from(file),
+        Err(_) => std::process::Stdio::null(),
+    };
+    cmd.stderr(stderr);
 }
 
 /// Normalize the shape of an MCP tool result into a single `String` payload

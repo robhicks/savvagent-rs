@@ -81,11 +81,13 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::command_palette::CommandPalettePlugin::new()),
         Box::new(builtin::connect::ConnectPlugin::new()),
         Box::new(builtin::edit_file::EditFilePlugin::new()),
+        Box::new(builtin::editor_keybindings::EditorKeybindingsPlugin::new()),
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
         Box::new(builtin::language::LanguagePlugin::new()),
         Box::new(builtin::model::ModelPlugin::new()),
         Box::new(builtin::plugins_manager::PluginsManagerPlugin::new()),
+        Box::new(builtin::prompt_keybindings::PromptKeybindingsPlugin::new()),
         Box::new(builtin::quit::QuitPlugin::new()),
         Box::new(builtin::resume::ResumePlugin::new()),
         Box::new(builtin::save::SavePlugin::new()),
@@ -118,11 +120,13 @@ mod tests {
             "internal:command-palette",
             "internal:connect",
             "internal:edit-file",
+            "internal:editor-keybindings",
             "internal:home-footer",
             "internal:home-tips",
             "internal:language",
             "internal:model",
             "internal:plugins-manager",
+            "internal:prompt-keybindings",
             "internal:quit",
             "internal:resume",
             "internal:save",
@@ -136,7 +140,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 16);
+        assert_eq!(set.plugins.len(), 18);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -163,13 +167,14 @@ mod tests {
         // Registry shape: the post-fix invariant is that the registry's
         // plugins HashMap has one entry per non-provider plugin PLUS one
         // entry per provider plugin (same underlying Arc as the providers
-        // map). v0.11.0 PR 1 adds `internal:self-update`, bringing the
-        // non-provider count to 16; total registry size is 16 + 4 = 20.
+        // map). v0.11.0 PR 1 adds `internal:self-update`; the
+        // prompt/editor keybindings split brings the non-provider count
+        // to 18; total registry size is 18 + 4 = 22.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            20,
-            "registry should have 16 non-provider + 4 provider plugins"
+            22,
+            "registry should have 18 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),

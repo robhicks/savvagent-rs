@@ -211,6 +211,7 @@ mod tests {
                 name: self.1.clone(),
                 summary: "".into(),
                 args_hint: None,
+                requires_arg: false,
             }];
             Manifest {
                 id: PluginId::new(&self.0).expect("valid test id"),

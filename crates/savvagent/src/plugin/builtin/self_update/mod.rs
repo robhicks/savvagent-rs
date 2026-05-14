@@ -212,6 +212,7 @@ impl Plugin for SelfUpdatePlugin {
             name: "update".into(),
             summary: rust_i18n::t!("self-update.slash-summary").to_string(),
             args_hint: None,
+            requires_arg: false,
         }];
 
         Manifest {

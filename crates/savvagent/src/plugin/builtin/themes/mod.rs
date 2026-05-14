@@ -7,6 +7,7 @@
 //! `SelectingTheme` `InputMode` arm in the v0.8 keypath can go away.
 
 pub mod catalog;
+pub mod editor_theme;
 pub mod picker;
 pub mod screen;
 
@@ -44,6 +45,7 @@ impl Plugin for ThemesPlugin {
             name: "theme".into(),
             summary: rust_i18n::t!("slash.theme-summary").to_string(),
             args_hint: Some("[list | <slug>]".into()),
+            requires_arg: false,
         }];
         contributions.screens = vec![ScreenSpec {
             id: "themes.picker".into(),

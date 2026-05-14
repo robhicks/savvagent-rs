@@ -248,7 +248,7 @@ fn tool_to_gemini(t: &spp::ToolDef) -> api::FunctionDeclaration {
     api::FunctionDeclaration {
         name: t.name.clone(),
         description: t.description.clone(),
-        parameters: t.input_schema.clone(),
+        parameters: crate::schema::sanitize(&t.input_schema),
     }
 }
 

@@ -18,6 +18,23 @@ pub mod home_footer;
 /// Tips widget: one-line hint above the prompt; switches text after Connect.
 pub mod home_tips;
 
+/// Scrollable, sectioned keybindings help screen reused by the
+/// `prompt-keybindings` and `editor-keybindings` plugins. Owns the
+/// rendering / scrolling logic so the per-plugin modules just
+/// supply their section data.
+pub mod keybindings_view;
+
+/// `/editor-keybindings` slash + viewer modal listing the keybindings
+/// active inside the ratatui-code-editor (`view-file` / `edit-file`)
+/// screens.
+pub mod editor_keybindings;
+
+/// `/prompt-keybindings` slash + viewer modal listing the keybindings
+/// active in the main prompt input. Includes a dynamic section sourced
+/// from [`crate::plugin::manifests::Indexes`] so plugin-contributed
+/// bindings show up automatically.
+pub mod prompt_keybindings;
+
 /// Language plugin: rust-i18n catalog + /language picker.
 pub mod language;
 

@@ -19,6 +19,8 @@
 
 pub mod api;
 pub mod mcp;
+pub mod models;
+mod schema;
 pub mod stream;
 pub mod translate;
 
@@ -33,7 +35,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use savvagent_mcp::{ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-    CompleteRequest, CompleteResponse, ErrorKind, ProviderError, StreamEvent,
+    CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ProviderError, StreamEvent,
 };
 
 /// Default Gemini API base URL. Override via [`GeminiProviderBuilder::base_url`]
@@ -45,9 +47,9 @@ pub const API_VERSION: &str = "v1beta";
 
 /// SPP provider backed by Gemini's `generateContent` endpoint.
 pub struct GeminiProvider {
-    http: reqwest::Client,
-    api_key: String,
-    base_url: String,
+    pub(crate) http: reqwest::Client,
+    pub(crate) api_key: String,
+    pub(crate) base_url: String,
 }
 
 /// Builder for [`GeminiProvider`]. Use [`GeminiProvider::builder`].
@@ -125,6 +127,10 @@ pub enum BuildError {
 
 #[async_trait]
 impl ProviderHandler for GeminiProvider {
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        models::list_models(self).await
+    }
+
     async fn complete(
         &self,
         req: CompleteRequest,
@@ -184,7 +190,7 @@ fn url_safe_model(model: &str) -> &str {
     model.strip_prefix("models/").unwrap_or(model)
 }
 
-fn map_reqwest_error(e: reqwest::Error) -> ProviderError {
+pub(crate) fn map_reqwest_error(e: reqwest::Error) -> ProviderError {
     let kind = if e.is_timeout() || e.is_connect() {
         ErrorKind::Network
     } else {

@@ -79,6 +79,7 @@ impl Plugin for ProviderGeminiPlugin {
             name: format!("connect {PROVIDER_ID}"),
             summary: format!("Connect to {DISPLAY_NAME}"),
             args_hint: None,
+            requires_arg: false,
         }];
         contributions.slots = vec![SlotSpec {
             slot_id: "home.footer.left".into(),
@@ -97,16 +98,11 @@ impl Plugin for ProviderGeminiPlugin {
     }
 
     async fn handle_slash(&mut self, _: &str, _: Vec<String>) -> Result<Vec<Effect>, PluginError> {
-        if self.try_connect_from_keyring().is_some() {
-            return Ok(vec![Effect::RegisterProvider {
-                id: ProviderId::new(PROVIDER_ID).expect("valid"),
-                display_name: DISPLAY_NAME.into(),
-            }]);
-        }
-        Ok(vec![Effect::PushNote {
-            line: StyledLine::plain(format!(
-                "{DISPLAY_NAME} API key not found in keyring. Run `/connect` from the home view to enter one."
-            )),
+        // See `provider_anthropic::handle_slash` for the always-prompt
+        // rationale: the picker flow lets the user re-key even when a
+        // credential is stored. Enter-on-empty falls back to stored.
+        Ok(vec![Effect::PromptApiKey {
+            provider_id: ProviderId::new(PROVIDER_ID).expect("valid"),
         }])
     }
 
@@ -154,16 +150,17 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn no_creds_emits_pushnote() {
+    async fn no_creds_emits_prompt_api_key() {
         let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.delete_credential());
 
         let mut p = ProviderGeminiPlugin::new();
         let effs = p.handle_slash("connect gemini", vec![]).await.unwrap();
-        assert!(
-            matches!(effs[0], Effect::PushNote { .. }),
-            "expected PushNote when no creds available, got {:?}",
-            effs
-        );
+        match &effs[0] {
+            Effect::PromptApiKey { provider_id } => {
+                assert_eq!(provider_id.as_str(), PROVIDER_ID);
+            }
+            other => panic!("expected PromptApiKey, got {other:?}"),
+        }
     }
 
     #[test]

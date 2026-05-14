@@ -47,6 +47,7 @@ impl Plugin for SplashPlugin {
             name: "splash".into(),
             summary: rust_i18n::t!("slash.splash-summary").to_string(),
             args_hint: None,
+            requires_arg: false,
         }];
         contributions.hooks = vec![HookKind::HostStarting, HookKind::Connect];
 
