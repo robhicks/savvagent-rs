@@ -52,7 +52,10 @@ impl<'a> PromptEnv<'a> {
     /// Construct a `PromptEnv` by probing `project_root` for a `.git`
     /// entry. The OS/arch/bash/app-version fields are wired by the
     /// caller — they're known at the host construction site.
-    #[allow(dead_code)] // Consumed by Task 8 (Host::start wiring); allow removed then.
+    ///
+    /// If `.git` cannot be accessed for any reason (missing, broken
+    /// symlink, permissions error), `git_present` is set to `false`
+    /// and the prompt renders normally.
     pub fn probe(
         project_root: &'a Path,
         os: &'static str,
@@ -198,7 +201,6 @@ fn render_environment(out: &mut String, env: &PromptEnv<'_>) {
 
 /// Render the default prompt. Pure over `(env, tools)`. The builder
 /// reads `tool.name` only — descriptions are NOT included verbatim.
-#[allow(dead_code)] // Consumed by Task 8 (Host::start wiring); allow removed then.
 pub fn build(env: &PromptEnv<'_>, tools: &[ToolDef]) -> String {
     let mut out = String::new();
     out.push_str(IDENTITY);

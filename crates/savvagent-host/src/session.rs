@@ -259,8 +259,7 @@ impl Host {
         let resolver = bootstrap_bash_net_resolver();
         let tools =
             ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
-        let system_prompt =
-            project::system_prompt(&config.project_root, config.system_prompt.as_deref());
+        let system_prompt = build_layered_system_prompt(&config, &tools);
         let policy = config
             .policy
             .clone()
@@ -296,8 +295,7 @@ impl Host {
         let resolver = bootstrap_bash_net_resolver();
         let tools =
             ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
-        let system_prompt =
-            project::system_prompt(&config.project_root, config.system_prompt.as_deref());
+        let system_prompt = build_layered_system_prompt(&config, &tools);
         let policy = config
             .policy
             .clone()
@@ -937,6 +935,41 @@ fn bootstrap_bash_net_resolver() -> BashNetResolverHandle {
     std::sync::Arc::new(BootstrapBashNetResolver)
 }
 
+/// Build the three-layer system prompt for a freshly-connected host:
+/// default-prompt (optional) → embedder override (optional) →
+/// `SAVVAGENT.md` body (optional). The default-prompt layer reads
+/// `tools.bash_available()` so the rendered shell-capability paragraph
+/// reflects what the host actually wired.
+fn build_layered_system_prompt(
+    config: &HostConfig,
+    tools: &ToolRegistry,
+) -> Option<String> {
+    let default_prompt_text = if config.default_prompt_enabled {
+        let app_version = match config.app_version.as_deref() {
+            Some(v) => crate::default_prompt::AppVersion::App(v),
+            None => crate::default_prompt::AppVersion::HostCrateFallback(
+                env!("CARGO_PKG_VERSION"),
+            ),
+        };
+        let env = crate::default_prompt::PromptEnv::probe(
+            &config.project_root,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            tools.bash_available(),
+            app_version,
+        );
+        Some(crate::default_prompt::build(&env, &tools.defs))
+    } else {
+        None
+    };
+    let savvagent_md_body = project::parse_savvagent_md(&config.project_root).body;
+    project::layered_prompt(
+        default_prompt_text.as_deref(),
+        config.system_prompt.as_deref(),
+        savvagent_md_body.as_deref(),
+    )
+}
+
 /// Production resolver installed by [`Host::wire_self_into_resolver`]
 /// after `Host` construction. Holds `Arc`-shared handles into the host's
 /// permission state so `resolve_policy` can emit a
@@ -1119,7 +1152,8 @@ mod policy_tests {
     use async_trait::async_trait;
     use savvagent_mcp::ProviderClient;
     use savvagent_protocol::{
-        CompleteRequest, CompleteResponse, ContentBlock, ProviderError, StopReason, Usage,
+        CompleteRequest, CompleteResponse, ContentBlock, ProviderError, StopReason, StreamEvent,
+        Usage,
     };
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -1536,6 +1570,135 @@ mod policy_tests {
             super::BASH_PROMPT_COMMAND_TRUNCATE,
             "truncated body must be exactly the truncate limit in chars: {visible:?}"
         );
+    }
+
+    /// Records the `system` field of every `CompleteRequest`, then returns
+    /// an `end_turn` response. Used to verify what the host puts in
+    /// `req.system` after layering.
+    struct CapturingProvider {
+        captured: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl CapturingProvider {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<Option<String>>>>) {
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    captured: captured.clone(),
+                },
+                captured,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl ProviderClient for CapturingProvider {
+        async fn complete(
+            &self,
+            req: CompleteRequest,
+            _events: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            self.captured.lock().unwrap().push(req.system.clone());
+            Ok(CompleteResponse {
+                id: "resp-cap".into(),
+                model: req.model,
+                content: vec![ContentBlock::Text {
+                    text: "done".into(),
+                }],
+                stop_reason: StopReason::EndTurn,
+                stop_sequence: None,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn host_start_default_prompt_enabled_attaches_system_message() {
+        let d = tempfile::tempdir().unwrap();
+        let config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(d.path().to_path_buf())
+        .with_app_version("9.9.9")
+        .with_policy(PermissionPolicy::transient(d.path().to_path_buf()));
+
+        let (provider, captured) = CapturingProvider::new();
+        let host = Host::with_components(config, Box::new(provider))
+            .await
+            .unwrap();
+        host.run_turn("hello").await.unwrap();
+
+        let captured = captured.lock().unwrap();
+        let system = captured
+            .first()
+            .expect("at least one completion captured")
+            .as_ref()
+            .expect("system prompt must be Some when default is enabled");
+        assert!(
+            system.contains("# Savvagent default prompt"),
+            "missing default heading in:\n{system}"
+        );
+        assert!(system.contains("You are Savvagent"));
+        assert!(system.contains("Savvagent version: 9.9.9"));
+    }
+
+    #[tokio::test]
+    async fn host_start_default_prompt_disabled_omits_default() {
+        let d = tempfile::tempdir().unwrap();
+        let config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(d.path().to_path_buf())
+        .with_default_prompt_disabled()
+        .with_policy(PermissionPolicy::transient(d.path().to_path_buf()));
+
+        let (provider, captured) = CapturingProvider::new();
+        let host = Host::with_components(config, Box::new(provider))
+            .await
+            .unwrap();
+        host.run_turn("hello").await.unwrap();
+
+        let captured = captured.lock().unwrap();
+        let system = captured.first().expect("at least one completion captured");
+        assert!(
+            system.is_none(),
+            "expected None system when default disabled with no override + no SAVVAGENT.md, got: {system:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_start_default_plus_savvagent_md_composes_in_order() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("SAVVAGENT.md"), "BODY_TEXT\n").unwrap();
+        let config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(d.path().to_path_buf())
+        .with_policy(PermissionPolicy::transient(d.path().to_path_buf()));
+
+        let (provider, captured) = CapturingProvider::new();
+        let host = Host::with_components(config, Box::new(provider))
+            .await
+            .unwrap();
+        host.run_turn("hello").await.unwrap();
+
+        let captured = captured.lock().unwrap();
+        let system = captured.first().unwrap().as_ref().unwrap();
+        let i_default = system.find("# Savvagent default prompt").expect(system);
+        let i_body = system
+            .find("# Project context (from SAVVAGENT.md)")
+            .expect(system);
+        assert!(i_default < i_body, "{system}");
+        assert!(system.contains("BODY_TEXT"));
     }
 }
 

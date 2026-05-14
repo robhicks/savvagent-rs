@@ -92,24 +92,6 @@ fn split_front_matter(text: &str) -> Option<(&str, &str)> {
     Some((yaml, body))
 }
 
-/// Build a system prompt by combining an optional override with the
-/// project context body parsed from `SAVVAGENT.md`. Front-matter (if any)
-/// is consumed by [`crate::permissions::PermissionPolicy`] and *not*
-/// included in the prompt.
-pub fn system_prompt(project_root: &Path, override_prompt: Option<&str>) -> Option<String> {
-    let parsed = parse_savvagent_md(project_root);
-    match (override_prompt, parsed.body) {
-        (Some(p), Some(c)) => Some(format!(
-            "{p}\n\n# Project context (from {PROJECT_CONTEXT_FILE})\n\n{c}"
-        )),
-        (Some(p), None) => Some(p.to_string()),
-        (None, Some(c)) => Some(format!(
-            "# Project context (from {PROJECT_CONTEXT_FILE})\n\n{c}"
-        )),
-        (None, None) => None,
-    }
-}
-
 /// Stitch up to three named layers (default prompt, embedder override,
 /// `SAVVAGENT.md` body) into one system-prompt string. Each present
 /// layer is wrapped with a Markdown H1 heading and separated by blank
@@ -125,8 +107,6 @@ pub fn system_prompt(project_root: &Path, override_prompt: Option<&str>) -> Opti
 /// Ordering is fixed: default → override → body. LLMs weight later
 /// instructions more heavily, so the project body wins on ambiguous
 /// guidance.
-// TODO(Task 8): remove #[allow(dead_code)] once Host::start calls layered_prompt.
-#[allow(dead_code)]
 pub fn layered_prompt(
     default: Option<&str>,
     override_prompt: Option<&str>,
@@ -160,51 +140,6 @@ pub fn layered_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn no_file_no_override_yields_none() {
-        let d = tempdir().unwrap();
-        assert!(system_prompt(d.path(), None).is_none());
-    }
-
-    #[test]
-    fn override_only() {
-        let d = tempdir().unwrap();
-        let s = system_prompt(d.path(), Some("base prompt")).unwrap();
-        assert_eq!(s, "base prompt");
-    }
-
-    #[test]
-    fn merges_context_and_override() {
-        let d = tempdir().unwrap();
-        std::fs::write(d.path().join(PROJECT_CONTEXT_FILE), "use snake_case.").unwrap();
-        let s = system_prompt(d.path(), Some("base")).unwrap();
-        assert!(s.starts_with("base"));
-        assert!(s.contains("use snake_case."));
-    }
-
-    #[test]
-    fn context_only() {
-        let d = tempdir().unwrap();
-        std::fs::write(d.path().join(PROJECT_CONTEXT_FILE), "ctx").unwrap();
-        let s = system_prompt(d.path(), None).unwrap();
-        assert!(s.contains("ctx"));
-    }
-
-    #[test]
-    fn front_matter_is_stripped_from_system_prompt() {
-        let d = tempdir().unwrap();
-        std::fs::write(
-            d.path().join(PROJECT_CONTEXT_FILE),
-            "---\npermissions:\n  allow: []\n---\nuse snake_case.",
-        )
-        .unwrap();
-        let s = system_prompt(d.path(), None).unwrap();
-        assert!(s.contains("use snake_case."));
-        assert!(!s.contains("permissions"), "{}", s);
-        assert!(!s.contains("---"), "{}", s);
-    }
 
     #[test]
     fn front_matter_permissions_round_trip() {
