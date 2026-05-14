@@ -406,6 +406,7 @@ impl ToolRegistry {
     /// True iff the embedder wired a `tool-bash`-marker endpoint in
     /// `HostConfig::tools`. Cannot be flipped by tool-server-supplied
     /// data (e.g. a third-party tool advertising `name == "run"`).
+    #[allow(dead_code)] // Consumed by Task 8 (Host::start wiring); allow removed then.
     pub(crate) fn bash_available(&self) -> bool {
         self.lazy_bash.is_some()
     }
