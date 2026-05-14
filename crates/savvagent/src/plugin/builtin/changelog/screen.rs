@@ -98,11 +98,16 @@ impl Screen for ChangelogScreen {
             ],
             ChangelogState::Loaded { lines } => {
                 let visible = region.height as usize;
-                if visible == 0 || self.scroll_offset >= lines.len() {
+                if visible == 0 || lines.is_empty() {
                     return vec![];
                 }
-                let end = (self.scroll_offset + visible).min(lines.len());
-                lines[self.scroll_offset..end].to_vec()
+                // Clamp the offset so a "scroll past the end" press (G,
+                // PageDown overshoot) leaves the last `visible` lines
+                // filling the viewport, matching vim/less convention.
+                let max_offset = lines.len().saturating_sub(visible);
+                let effective_offset = self.scroll_offset.min(max_offset);
+                let end = (effective_offset + visible).min(lines.len());
+                lines[effective_offset..end].to_vec()
             }
         }
     }
@@ -317,27 +322,27 @@ mod tests {
         }
     }
 
-    async fn screen_with(state: ChangelogState) -> ChangelogScreen {
+    fn screen_with(state: ChangelogState) -> ChangelogScreen {
         ChangelogScreen::new(Arc::new(Mutex::new(state)))
     }
 
     #[tokio::test]
     async fn esc_emits_close_screen() {
-        let mut s = screen_with(ChangelogState::Loading).await;
+        let mut s = screen_with(ChangelogState::Loading);
         let effs = s.on_key(key(KeyCodePortable::Esc)).await.unwrap();
         assert!(matches!(effs[0], Effect::CloseScreen));
     }
 
     #[tokio::test]
     async fn q_emits_close_screen() {
-        let mut s = screen_with(ChangelogState::Loading).await;
+        let mut s = screen_with(ChangelogState::Loading);
         let effs = s.on_key(key(KeyCodePortable::Char('q'))).await.unwrap();
         assert!(matches!(effs[0], Effect::CloseScreen));
     }
 
     #[tokio::test]
     async fn down_and_j_increment_scroll_offset() {
-        let mut s = screen_with(loaded_state(50)).await;
+        let mut s = screen_with(loaded_state(50));
         s.on_key(key(KeyCodePortable::Down)).await.unwrap();
         assert_eq!(s.scroll_offset, 1);
         s.on_key(key(KeyCodePortable::Char('j'))).await.unwrap();
@@ -346,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn up_and_k_decrement_scroll_offset_with_clamp_at_zero() {
-        let mut s = screen_with(loaded_state(50)).await;
+        let mut s = screen_with(loaded_state(50));
         s.scroll_offset = 2;
         s.on_key(key(KeyCodePortable::Up)).await.unwrap();
         s.on_key(key(KeyCodePortable::Char('k'))).await.unwrap();
@@ -358,14 +363,14 @@ mod tests {
 
     #[tokio::test]
     async fn page_down_advances_by_page_size() {
-        let mut s = screen_with(loaded_state(200)).await;
+        let mut s = screen_with(loaded_state(200));
         s.on_key(key(KeyCodePortable::PageDown)).await.unwrap();
         assert_eq!(s.scroll_offset, super::PAGE_SIZE);
     }
 
     #[tokio::test]
     async fn page_up_retreats_by_page_size_with_clamp() {
-        let mut s = screen_with(loaded_state(200)).await;
+        let mut s = screen_with(loaded_state(200));
         s.scroll_offset = 5;
         s.on_key(key(KeyCodePortable::PageUp)).await.unwrap();
         assert_eq!(s.scroll_offset, 0);
@@ -373,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn lower_g_jumps_to_top_and_upper_g_jumps_to_bottom() {
-        let mut s = screen_with(loaded_state(50)).await;
+        let mut s = screen_with(loaded_state(50));
         s.on_key(key(KeyCodePortable::Char('G'))).await.unwrap();
         // 'G' sets the offset to last-line-index; render-time clamp
         // narrows further once region.height is known.
@@ -386,8 +391,7 @@ mod tests {
     async fn r_in_failed_state_resets_to_loading() {
         let mut s = screen_with(ChangelogState::Failed {
             error: "boom".into(),
-        })
-        .await;
+        });
         s.scroll_offset = 7;
 
         let effs = s.on_key(key(KeyCodePortable::Char('r'))).await.unwrap();
@@ -403,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn r_outside_failed_state_is_ignored() {
-        let mut s = screen_with(loaded_state(10)).await;
+        let mut s = screen_with(loaded_state(10));
         s.scroll_offset = 3;
         let effs = s.on_key(key(KeyCodePortable::Char('r'))).await.unwrap();
         assert!(effs.is_empty());
@@ -481,20 +485,29 @@ mod tests {
     }
 
     #[test]
-    fn render_loaded_clamps_scroll_offset_when_past_end() {
-        // scroll_offset bigger than the line count must not blow up;
-        // render returns an empty window rather than panicking.
+    fn render_loaded_clamps_scroll_offset_to_show_last_page_when_past_end() {
+        // scroll_offset bigger than (len - visible) must leave the last
+        // visible lines filling the viewport — vim/less convention. The
+        // assertion guards against the previous behavior (empty Vec).
         let s = {
-            let mut sc = ChangelogScreen::new(Arc::new(Mutex::new(loaded_state(5))));
+            let mut sc = ChangelogScreen::new(Arc::new(Mutex::new(loaded_state(20))));
             sc.scroll_offset = 99;
             sc
         };
-        let lines = s.render(region(80, 10));
-        assert!(
-            lines.is_empty(),
-            "render must clamp / return empty when scrolled past end, got {} lines",
-            lines.len()
-        );
+        let lines = s.render(region(80, 5));
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].spans[0].text, "line 15");
+        assert_eq!(lines[4].spans[0].text, "line 19");
+    }
+
+    #[tokio::test]
+    async fn upper_g_then_render_shows_last_visible_page() {
+        let mut s = screen_with(loaded_state(20));
+        s.on_key(key(KeyCodePortable::Char('G'))).await.unwrap();
+        let lines = s.render(region(80, 5));
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].spans[0].text, "line 15");
+        assert_eq!(lines[4].spans[0].text, "line 19");
     }
 
     #[test]
