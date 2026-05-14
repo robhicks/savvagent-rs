@@ -489,4 +489,40 @@ mod tests {
         );
         assert!(!p.git_present);
     }
+
+    #[test]
+    fn probe_marks_git_present_when_dot_git_is_a_regular_file() {
+        // Inside a `git worktree`, `.git` is a regular file (gitfile)
+        // pointing into the parent repo's `.git/worktrees/<name>`, not
+        // a directory. `std::fs::metadata` returns `Ok` for both files
+        // and directories, so the probe correctly reports `git_present
+        // = true`. This test pins that behaviour against a future
+        // "harden the probe" refactor that switches to `is_dir()`.
+        let d = tempdir().unwrap();
+        std::fs::File::create(d.path().join(".git")).unwrap();
+        let p = PromptEnv::probe(
+            d.path(),
+            "linux",
+            "x86_64",
+            false,
+            AppVersion::App("test-ver"),
+        );
+        assert!(
+            p.git_present,
+            "probe must treat a `.git` regular file (worktree gitfile) as present"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "bash_available=true but tools is empty")]
+    fn render_affordances_debug_asserts_bash_available_implies_nonempty_tools() {
+        // The empty-tools + bash_available=true combination breaks an
+        // invariant `ToolRegistry::connect` upholds. The debug_assert
+        // in `render_affordances` catches a future caller violating
+        // it; pin the path with a `#[should_panic]` so the assertion
+        // itself stays load-bearing across refactors.
+        let mut e = env();
+        e.bash_available = true;
+        build(&e, &[]);
+    }
 }

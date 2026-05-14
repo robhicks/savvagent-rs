@@ -1695,6 +1695,121 @@ mod policy_tests {
         assert!(i_default < i_body, "{system}");
         assert!(system.contains("BODY_TEXT"));
     }
+
+    #[tokio::test]
+    async fn host_start_with_system_prompt_attaches_host_override_section() {
+        // `HostConfig::system_prompt = Some("...")` should appear in
+        // the rendered prompt as the middle layer (between default and
+        // SAVVAGENT.md body). Pins the override-layer wiring through
+        // the real `build_layered_system_prompt` path.
+        let d = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(d.path().to_path_buf())
+        .with_policy(PermissionPolicy::transient(d.path().to_path_buf()));
+        config.system_prompt = Some("OVERRIDE_PAYLOAD".to_string());
+
+        let (provider, captured) = CapturingProvider::new();
+        let host = Host::with_components(config, Box::new(provider))
+            .await
+            .unwrap();
+        host.run_turn("hello").await.unwrap();
+
+        let captured = captured.lock().unwrap();
+        let system = captured.first().unwrap().as_ref().unwrap();
+        let i_default = system.find("# Savvagent default prompt").expect(system);
+        let i_override = system.find("# Host override").expect(system);
+        assert!(i_default < i_override, "{system}");
+        assert!(system.contains("OVERRIDE_PAYLOAD"));
+    }
+
+    #[tokio::test]
+    async fn host_start_without_app_version_uses_host_crate_label() {
+        // When `HostConfig::app_version` is unset, the prompt should
+        // render the `AppVersion::HostCrateFallback` label so a
+        // library embedder forgetting `with_app_version` is visible.
+        let d = tempfile::tempdir().unwrap();
+        let config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(d.path().to_path_buf())
+        .with_policy(PermissionPolicy::transient(d.path().to_path_buf()));
+        // Note: no `.with_app_version(...)` call.
+
+        let (provider, captured) = CapturingProvider::new();
+        let host = Host::with_components(config, Box::new(provider))
+            .await
+            .unwrap();
+        host.run_turn("hello").await.unwrap();
+
+        let captured = captured.lock().unwrap();
+        let system = captured.first().unwrap().as_ref().unwrap();
+        assert!(
+            system.contains("Savvagent host crate version:"),
+            "expected host-crate fallback label, got:\n{system}"
+        );
+        assert!(
+            !system.contains("Savvagent version:"),
+            "App-version label leaked when no embedder version was set: {system}"
+        );
+    }
+
+    /// Direct unit test of the shared `build_layered_system_prompt`
+    /// helper that both `Host::start` and `Host::with_components`
+    /// call. A regression that changes one constructor's wiring but
+    /// not the other wouldn't be caught by the constructor-level
+    /// `CapturingProvider` tests alone — this test pins the helper's
+    /// behaviour in isolation so any future refactor that bypasses
+    /// it from one constructor would surface as a coverage gap, not
+    /// a silent regression.
+    #[tokio::test]
+    async fn build_layered_system_prompt_helper_composes_all_three_layers() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("SAVVAGENT.md"), "PROJECT_BODY\n").unwrap();
+        let mut config = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://test".into(),
+            },
+            "test-model".to_string(),
+        )
+        .with_project_root(d.path().to_path_buf())
+        .with_app_version("7.7.7")
+        .with_policy(PermissionPolicy::transient(d.path().to_path_buf()));
+        config.system_prompt = Some("MIDDLE_LAYER".to_string());
+
+        let sandbox = crate::sandbox::SandboxConfig::default();
+        let resolver = bootstrap_bash_net_resolver();
+        let tools =
+            crate::tools::ToolRegistry::connect(&[], &config.project_root, &sandbox, resolver)
+                .await
+                .unwrap();
+
+        let prompt = super::build_layered_system_prompt(&config, &tools)
+            .expect("default + override + body must produce Some");
+
+        // All three layer headings present.
+        for h in &[
+            "# Savvagent default prompt",
+            "# Host override",
+            "# Project context (from SAVVAGENT.md)",
+        ] {
+            assert!(prompt.contains(h), "missing heading {h} in:\n{prompt}");
+        }
+        // Override and body content rendered.
+        assert!(prompt.contains("MIDDLE_LAYER"));
+        assert!(prompt.contains("PROJECT_BODY"));
+        // Default-section content reflects the embedder version label.
+        assert!(prompt.contains("Savvagent version: 7.7.7"));
+        // Bash isn't wired in this fixture; the no-tools branch fires.
+        assert!(prompt.contains("No tools are currently connected"));
+    }
 }
 
 #[cfg(test)]
