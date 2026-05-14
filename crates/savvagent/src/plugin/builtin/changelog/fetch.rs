@@ -6,6 +6,7 @@
 //! substitute a stub.
 
 use async_trait::async_trait;
+use std::time::Duration;
 
 /// URL of the canonical CHANGELOG.md. Streams from `master` so the
 /// viewer always reflects the most recent release — including entries
@@ -17,6 +18,14 @@ pub const CHANGELOG_URL: &str =
 /// version so request logs identify the caller cohort, mirroring the
 /// pattern used in [`crate::plugin::builtin::self_update::check`].
 const USER_AGENT: &str = concat!("savvagent-rs/", env!("CARGO_PKG_VERSION"), " (changelog)");
+
+/// Hard upper bound on the network call. The viewer is user-facing and
+/// opens on-demand; without a timeout, an unresponsive GitHub would
+/// leave the screen stuck at "Fetching changelog…" until the user
+/// pressed Esc. 10s is comfortably longer than the typical fetch
+/// (~100–500ms) and short enough that a stalled connection surfaces
+/// the `Failed` state quickly so the user can retry with `r`.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[async_trait]
 pub trait ChangelogFetcher: Send + Sync {
@@ -34,6 +43,7 @@ impl ChangelogFetcher for GithubChangelogFetcher {
     async fn fetch(&self) -> anyhow::Result<String> {
         let resp = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            .timeout(FETCH_TIMEOUT)
             .build()?
             .get(CHANGELOG_URL)
             .send()
