@@ -186,36 +186,22 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
     frame.render_widget(&textarea, chunks[4]);
 
-    // Footer row — flow all plugin slot contributions left-to-right on a
-    // single full-width line, joined with ` · ` separators between
-    // non-empty slot groups. Each slot still keeps its own internal
-    // separators, so the result reads like:
-    //   provider · turn-state · cwd · ~N ctx · $0.00 · vX.Y.Z
+    // Footer row — see `compose_footer_line` for the join semantics.
     let separator = savvagent_plugin::StyledSpan {
         text: " · ".into(),
         fg: Some(savvagent_plugin::ThemeColor::Muted),
         bg: None,
         modifiers: savvagent_plugin::TextMods::default(),
     };
-    let mut footer_spans: Vec<savvagent_plugin::StyledSpan> = Vec::new();
-    for group in [
-        &frame_data.footer_left,
-        &frame_data.footer_center,
-        &frame_data.footer_right,
-    ] {
-        let Some(first) = group.first() else { continue };
-        if first.spans.is_empty() {
-            continue;
-        }
-        if !footer_spans.is_empty() {
-            footer_spans.push(separator.clone());
-        }
-        footer_spans.extend(first.spans.iter().cloned());
-    }
     let footer_line = crate::plugin::convert::styled_line_to_ratatui(
-        savvagent_plugin::StyledLine {
-            spans: footer_spans,
-        },
+        compose_footer_line(
+            [
+                &frame_data.footer_left,
+                &frame_data.footer_center,
+                &frame_data.footer_right,
+            ],
+            &separator,
+        ),
         &palette,
     );
     frame.render_widget(
@@ -861,4 +847,153 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// Flatten the three home-footer slot groups into a single styled line
+/// that flows left-to-right.
+///
+/// Output reads like:
+///   `provider · turn-state · cwd · ~N ctx · $0.00 · vX.Y.Z`
+///
+/// `separator` is inserted between every non-empty `StyledLine` across
+/// all groups, in slot order — including multiple contributors to the
+/// same slot (the `SlotRouter` concatenates each plugin's output, so a
+/// future second contributor to `home.footer.left` shares the slot
+/// without its content being silently dropped). Lines with no spans are
+/// skipped and never introduce a stray separator.
+fn compose_footer_line(
+    groups: [&[savvagent_plugin::StyledLine]; 3],
+    separator: &savvagent_plugin::StyledSpan,
+) -> savvagent_plugin::StyledLine {
+    let mut spans: Vec<savvagent_plugin::StyledSpan> = Vec::new();
+    for group in groups {
+        for line in group {
+            if line.spans.is_empty() {
+                continue;
+            }
+            if !spans.is_empty() {
+                spans.push(separator.clone());
+            }
+            spans.extend(line.spans.iter().cloned());
+        }
+    }
+    savvagent_plugin::StyledLine { spans }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use savvagent_plugin::{StyledLine, StyledSpan, TextMods, ThemeColor};
+
+    fn span(text: &str) -> StyledSpan {
+        StyledSpan {
+            text: text.into(),
+            fg: None,
+            bg: None,
+            modifiers: TextMods::default(),
+        }
+    }
+
+    fn one_span_line(text: &str) -> StyledLine {
+        StyledLine {
+            spans: vec![span(text)],
+        }
+    }
+
+    fn sep() -> StyledSpan {
+        StyledSpan {
+            text: " · ".into(),
+            fg: Some(ThemeColor::Muted),
+            bg: None,
+            modifiers: TextMods::default(),
+        }
+    }
+
+    fn joined(line: &StyledLine) -> String {
+        line.spans.iter().map(|s| s.text.clone()).collect()
+    }
+
+    #[test]
+    fn compose_footer_all_three_groups_populated() {
+        let l = vec![one_span_line("Anthropic")];
+        let c = vec![one_span_line("idle")];
+        let r = vec![one_span_line("cwd")];
+        let out = compose_footer_line([&l, &c, &r], &sep());
+        assert_eq!(joined(&out), "Anthropic · idle · cwd");
+    }
+
+    #[test]
+    fn compose_footer_only_right_has_no_leading_separator() {
+        let empty: Vec<StyledLine> = vec![];
+        let r = vec![one_span_line("cwd")];
+        let out = compose_footer_line([&empty, &empty, &r], &sep());
+        assert_eq!(joined(&out), "cwd");
+    }
+
+    #[test]
+    fn compose_footer_left_and_right_only_single_separator() {
+        let l = vec![one_span_line("Anthropic")];
+        let empty: Vec<StyledLine> = vec![];
+        let r = vec![one_span_line("cwd")];
+        let out = compose_footer_line([&l, &empty, &r], &sep());
+        assert_eq!(joined(&out), "Anthropic · cwd");
+    }
+
+    #[test]
+    fn compose_footer_empty_spans_line_treated_as_no_content() {
+        let l = vec![StyledLine { spans: vec![] }];
+        let c = vec![one_span_line("idle")];
+        let r = vec![one_span_line("cwd")];
+        let out = compose_footer_line([&l, &c, &r], &sep());
+        assert_eq!(joined(&out), "idle · cwd");
+    }
+
+    #[test]
+    fn compose_footer_all_groups_empty_returns_empty_line() {
+        let empty: Vec<StyledLine> = vec![];
+        let out = compose_footer_line([&empty, &empty, &empty], &sep());
+        assert!(out.spans.is_empty());
+    }
+
+    #[test]
+    fn compose_footer_multiple_contributors_share_a_slot_with_separators() {
+        // Two plugins both contributing to `home.footer.left` flow as
+        // peers, separated like any other groups.
+        let l = vec![one_span_line("Anthropic"), one_span_line("Local")];
+        let c = vec![one_span_line("idle")];
+        let empty: Vec<StyledLine> = vec![];
+        let out = compose_footer_line([&l, &c, &empty], &sep());
+        assert_eq!(joined(&out), "Anthropic · Local · idle");
+    }
+
+    #[test]
+    fn compose_footer_skips_empty_lines_within_a_group() {
+        let l = vec![
+            StyledLine { spans: vec![] },
+            one_span_line("Anthropic"),
+        ];
+        let c = vec![one_span_line("idle")];
+        let empty: Vec<StyledLine> = vec![];
+        let out = compose_footer_line([&l, &c, &empty], &sep());
+        assert_eq!(joined(&out), "Anthropic · idle");
+    }
+
+    #[test]
+    fn compose_footer_preserves_intra_line_spans() {
+        // A single contributor emitting multiple spans (e.g. the
+        // home_footer right slot's `cwd · ~N ctx · $0.00 · vX.Y.Z`)
+        // must not gain extra separators between its own spans.
+        let r = vec![StyledLine {
+            spans: vec![
+                span("cwd"),
+                span(" · "),
+                span("~22 ctx"),
+                span(" · "),
+                span("$0.00"),
+            ],
+        }];
+        let empty: Vec<StyledLine> = vec![];
+        let out = compose_footer_line([&empty, &empty, &r], &sep());
+        assert_eq!(joined(&out), "cwd · ~22 ctx · $0.00");
+    }
 }
