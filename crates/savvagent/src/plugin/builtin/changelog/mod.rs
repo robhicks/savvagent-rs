@@ -98,9 +98,9 @@ impl Plugin for ChangelogPlugin {
                 spawn_fetch_task(Arc::clone(&self.fetcher), state);
                 Ok(Box::new(screen))
             }
-            (SCREEN_ID, other) => Err(PluginError::InvalidArgs(format!(
-                "/changelog takes no args; got {other:?}"
-            ))),
+            (SCREEN_ID, _other) => Err(PluginError::InvalidArgs(
+                "/changelog takes no args".into(),
+            )),
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
         }
     }
@@ -228,7 +228,7 @@ mod tests {
             Arc::new(StubFetcher::ok("# Heading\n\nbody")),
             Arc::clone(&state),
         );
-        for _ in 0..200 {
+        for _ in 0..100 {
             tokio::task::yield_now().await;
             if matches!(*state.lock().unwrap(), ChangelogState::Loaded { .. }) {
                 return;
@@ -244,7 +244,7 @@ mod tests {
             Arc::new(StubFetcher::err("DNS error")),
             Arc::clone(&state),
         );
-        for _ in 0..200 {
+        for _ in 0..100 {
             tokio::task::yield_now().await;
             if let ChangelogState::Failed { error } = &*state.lock().unwrap() {
                 assert!(error.contains("DNS error"), "got: {error}");
