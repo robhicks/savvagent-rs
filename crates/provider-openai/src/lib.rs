@@ -31,12 +31,8 @@ use rmcp::transport::streamable_http_server::{
 };
 use savvagent_mcp::{ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-<<<<<<< Updated upstream
     CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ModelInfo, ProviderError,
     StreamEvent,
-=======
-    CompleteRequest, CompleteResponse, ErrorKind, ProviderError, StreamEvent,
->>>>>>> Stashed changes
 };
 
 /// Default OpenAI API base URL. Override via [`OpenAiProviderBuilder::base_url`]
@@ -129,7 +125,6 @@ pub enum BuildError {
 
 #[async_trait]
 impl ProviderHandler for OpenAiProvider {
-<<<<<<< Updated upstream
     async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
         let url = format!("{}/v1/models", self.base_url);
         let resp = self
@@ -182,8 +177,6 @@ impl ProviderHandler for OpenAiProvider {
         })
     }
 
-=======
->>>>>>> Stashed changes
     async fn complete(
         &self,
         req: CompleteRequest,
@@ -241,7 +234,6 @@ fn map_reqwest_error(e: reqwest::Error) -> ProviderError {
     }
 }
 
-<<<<<<< Updated upstream
 /// Build a `Network`-kind [`ProviderError`] that surfaces the response body
 /// alongside the HTTP status. The body is truncated at 512 bytes so a wall of
 /// JSON doesn't blow up the TUI note line.
@@ -264,8 +256,6 @@ fn http_status_error(label: &str, status: reqwest::StatusCode, body: String) -> 
     }
 }
 
-=======
->>>>>>> Stashed changes
 async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
     let status = resp.status();
     let retry_after_ms = resp
@@ -287,7 +277,6 @@ async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
     };
 
     let body = resp.text().await.unwrap_or_default();
-<<<<<<< Updated upstream
     let (message, provider_code) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
         let msg = v
             .get("error")
@@ -304,25 +293,6 @@ async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
     } else {
         (body, None)
     };
-=======
-    let (message, provider_code) =
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-            let msg = v
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| body.clone());
-            let code = v
-                .get("error")
-                .and_then(|e| e.get("code"))
-                .and_then(|t| t.as_str())
-                .map(String::from);
-            (msg, code)
-        } else {
-            (body, None)
-        };
->>>>>>> Stashed changes
 
     ProviderError {
         kind,
@@ -367,15 +337,8 @@ pub async fn run() -> std::process::ExitCode {
         .with_target(false)
         .init();
 
-<<<<<<< Updated upstream
     let listen = env::var("SAVVAGENT_OPENAI_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
     let base_url = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-=======
-    let listen =
-        env::var("SAVVAGENT_OPENAI_LISTEN").unwrap_or_else(|_| DEFAULT_LISTEN.to_string());
-    let base_url =
-        env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
->>>>>>> Stashed changes
 
     let provider = match OpenAiProvider::builder().base_url(base_url).build() {
         Ok(p) => Arc::new(p),
@@ -426,7 +389,6 @@ pub fn provider_for_tests(base_url: impl Into<String>) -> OpenAiProvider {
 
 #[doc(hidden)]
 pub fn _events_phantom(_: StreamEvent) {}
-<<<<<<< Updated upstream
 
 #[cfg(test)]
 mod list_models_tests {
@@ -540,5 +502,3 @@ mod list_models_tests {
         );
     }
 }
-=======
->>>>>>> Stashed changes

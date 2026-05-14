@@ -20,12 +20,8 @@ use rmcp::{
 };
 use savvagent_mcp::{EmitError, ProviderHandler, StreamEmitter};
 use savvagent_protocol::{
-<<<<<<< Updated upstream
     self as spp, COMPLETE_TOOL_NAME, CompleteRequest, LIST_MODELS_TOOL_NAME, STREAM_EVENT_KIND,
     StreamEvent,
-=======
-    self as spp, COMPLETE_TOOL_NAME, CompleteRequest, STREAM_EVENT_KIND, StreamEvent,
->>>>>>> Stashed changes
 };
 
 use crate::OpenAiProvider;
@@ -69,11 +65,7 @@ impl OpenAiMcpServer {
     /// SPP `complete` tool. See `crates/savvagent-protocol/SPEC.md`.
     #[tool(
         name = "complete",
-<<<<<<< Updated upstream
         description = "Run a completion against OpenAI's Chat Completions API."
-=======
-        description = "Run a completion against OpenAI's Chat Completions API (SPP v0.1.0)."
->>>>>>> Stashed changes
     )]
     pub async fn complete(
         &self,
@@ -134,7 +126,6 @@ impl OpenAiMcpServer {
             }
         }
     }
-<<<<<<< Updated upstream
 
     /// SPP `list_models` tool. Queries OpenAI's `/v1/models` and filters to
     /// chat-capable id prefixes (`gpt-`, `o1-`, `o3-`, `o4-`).
@@ -164,8 +155,6 @@ impl OpenAiMcpServer {
             }
         }
     }
-=======
->>>>>>> Stashed changes
 }
 
 #[tool_handler]
@@ -185,13 +174,8 @@ impl ServerHandler for OpenAiMcpServer {
                 "SPP-conformant OpenAI provider. Call `{}` with a CompleteRequest. \
                  For streaming, attach a progress token in `_meta`; events arrive as \
                  `notifications/progress` with `message` carrying the SPP StreamEvent JSON \
-<<<<<<< Updated upstream
                  (kind `{}`). Call `{}` (no arguments) for the filtered model list.",
                 COMPLETE_TOOL_NAME, STREAM_EVENT_KIND, LIST_MODELS_TOOL_NAME
-=======
-                 (kind `{}`).",
-                COMPLETE_TOOL_NAME, STREAM_EVENT_KIND
->>>>>>> Stashed changes
             ))
     }
 }
@@ -238,7 +222,6 @@ impl StreamEmitter for PeerEmitter {
             })
     }
 }
-<<<<<<< Updated upstream
 
 #[cfg(test)]
 mod mcp_tests {
@@ -291,5 +274,3 @@ mod mcp_tests {
         assert_eq!(resp.default_model_id, Some(DEFAULT_MODEL.to_string()));
     }
 }
-=======
->>>>>>> Stashed changes

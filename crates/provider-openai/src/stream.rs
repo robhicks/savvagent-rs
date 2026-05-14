@@ -18,21 +18,13 @@
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
-<<<<<<< Updated upstream
 use savvagent_mcp::{EmitError, StreamEmitter};
 use savvagent_protocol::{self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta};
-=======
-use savvagent_mcp::StreamEmitter;
-use savvagent_protocol::{
-    self as spp, BlockDelta, ContentBlock, StreamEvent, Usage, UsageDelta,
-};
->>>>>>> Stashed changes
 
 use crate::api;
 use crate::translate::{parse_tool_arguments, stop_reason_from_str, usage_from_openai};
 
 /// Drive an OpenAI SSE streaming response to completion.
-<<<<<<< Updated upstream
 ///
 /// If the consumer disconnects (i.e. [`StreamEmitter::emit`] returns
 /// [`EmitError::Disconnected`]) we abandon the call rather than continue
@@ -40,8 +32,6 @@ use crate::translate::{parse_tool_arguments, stop_reason_from_str, usage_from_op
 /// errors are tolerated — those are typically transient hiccups in the MCP
 /// progress channel and the caller will still get the final structured
 /// response.
-=======
->>>>>>> Stashed changes
 pub async fn consume_sse(
     resp: reqwest::Response,
     emit: &dyn StreamEmitter,
@@ -51,30 +41,21 @@ pub async fn consume_sse(
 
     while let SseItem::Chunk(chunk) = sse.next().await? {
         for ev in acc.consume_chunk(chunk) {
-<<<<<<< Updated upstream
             if let Err(EmitError::Disconnected) = emit.emit(ev).await {
                 return Err(consumer_disconnected());
             }
-=======
-            let _ = emit.emit(ev).await;
->>>>>>> Stashed changes
         }
     }
 
     for ev in acc.flush() {
-<<<<<<< Updated upstream
         if let Err(EmitError::Disconnected) = emit.emit(ev).await {
             return Err(consumer_disconnected());
         }
-=======
-        let _ = emit.emit(ev).await;
->>>>>>> Stashed changes
     }
 
     acc.finish()
 }
 
-<<<<<<< Updated upstream
 fn consumer_disconnected() -> spp::ProviderError {
     spp::ProviderError {
         kind: spp::ErrorKind::Internal,
@@ -84,8 +65,6 @@ fn consumer_disconnected() -> spp::ProviderError {
     }
 }
 
-=======
->>>>>>> Stashed changes
 #[derive(Default)]
 struct Accumulator {
     started: bool,
@@ -105,7 +84,6 @@ struct Accumulator {
 
 #[derive(Debug)]
 enum BlockState {
-<<<<<<< Updated upstream
     Text {
         buf: String,
     },
@@ -114,10 +92,6 @@ enum BlockState {
         name: String,
         json_buf: String,
     },
-=======
-    Text { buf: String },
-    ToolUse { id: String, name: String, json_buf: String },
->>>>>>> Stashed changes
 }
 
 impl Accumulator {
@@ -169,13 +143,9 @@ impl Accumulator {
                 // Append to the text block (always index 0 unless tool blocks
                 // precede it, which OpenAI doesn't do in practice).
                 let idx = self.find_text_block_index();
-<<<<<<< Updated upstream
                 if let Some(BlockState::Text { buf }) =
                     idx.and_then(|i| self.blocks.get_mut(i as usize))
                 {
-=======
-                if let Some(BlockState::Text { buf }) = idx.and_then(|i| self.blocks.get_mut(i as usize)) {
->>>>>>> Stashed changes
                     buf.push_str(&text);
                 }
                 if let Some(idx) = idx {
@@ -198,15 +168,11 @@ impl Accumulator {
             if self.tool_block_map[oi].is_none() {
                 // First delta for this tool-call: allocate an SPP block.
                 let id = tc.id.unwrap_or_default();
-<<<<<<< Updated upstream
                 let name = tc
                     .function
                     .as_ref()
                     .and_then(|f| f.name.clone())
                     .unwrap_or_default();
-=======
-                let name = tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
->>>>>>> Stashed changes
                 let block_idx = self.alloc_block(BlockState::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -323,10 +289,7 @@ fn stream_decode_error(msg: &str) -> spp::ProviderError {
 
 // ---- SSE decoder ----
 
-<<<<<<< Updated upstream
 #[derive(Debug)]
-=======
->>>>>>> Stashed changes
 enum SseItem {
     Chunk(api::ChatCompletionChunk),
     Done,
@@ -345,7 +308,6 @@ impl SseDecoder {
         }
     }
 
-<<<<<<< Updated upstream
     /// Build a decoder from a raw byte-chunk stream. For tests where we don't
     /// want to spin up an HTTP server just to feed bytes into the decoder.
     #[cfg(test)]
@@ -356,8 +318,6 @@ impl SseDecoder {
         }
     }
 
-=======
->>>>>>> Stashed changes
     async fn next(&mut self) -> Result<SseItem, spp::ProviderError> {
         loop {
             if let Some(item) = self.try_pop()? {
@@ -374,7 +334,6 @@ impl SseDecoder {
                     });
                 }
                 None => {
-<<<<<<< Updated upstream
                     // Stream ended. If we still have buffered bytes that
                     // didn't form a complete `\n\n`-terminated frame, the
                     // upstream truncated mid-frame — surface that as a
@@ -387,9 +346,6 @@ impl SseDecoder {
                             provider_code: None,
                         });
                     }
-=======
-                    // Stream ended; treat as done.
->>>>>>> Stashed changes
                     return Ok(SseItem::Done);
                 }
             }
@@ -556,7 +512,6 @@ mod tests {
         let result = acc.finish();
         assert!(result.is_err(), "empty stream must return an error");
     }
-<<<<<<< Updated upstream
 
     /// SSE byte streams that end without a terminating `\n\n` for the final
     /// frame must surface as a `Network` error, not silently report `Done`
@@ -587,6 +542,4 @@ mod tests {
             err.message
         );
     }
-=======
->>>>>>> Stashed changes
 }
