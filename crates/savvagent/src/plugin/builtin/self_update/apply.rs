@@ -22,9 +22,24 @@ use super::UpdateState;
 const REPO_OWNER: &str = "robhicks";
 /// GitHub repo name.
 const REPO_NAME: &str = "savvagent-rs";
-/// Name of the binary asset to install. cargo-dist names tarball entries
-/// `savvagent[.exe]`; `self_update` strips the `.exe` itself.
+/// Name of the binary asset to install. cargo-dist appends `.exe` on
+/// Windows automatically inside `self_update::backends::github`.
 const BIN_NAME: &str = "savvagent";
+/// Path of the binary inside the release archive. cargo-dist (≥0.20)
+/// nests every binary under a top-level `savvagent-{target}/` directory
+/// in the Linux/macOS tarball, but ships the Windows zip flat with the
+/// binaries at the archive root. `self_update`'s default of `{{ bin }}`
+/// looks at the root, which works for Windows but fails on Unix with
+/// `Could not find the required path in the archive: "savvagent"`.
+///
+/// `{{ target }}` is substituted by `self_update` with the resolved
+/// target triple (e.g. `x86_64-unknown-linux-gnu`); `{{ bin }}` with the
+/// `bin_name` value. Compile-time `cfg` is safe here because the running
+/// binary always fetches the archive matching its own build target.
+#[cfg(target_os = "windows")]
+const BIN_PATH_IN_ARCHIVE: &str = "{{ bin }}";
+#[cfg(not(target_os = "windows"))]
+const BIN_PATH_IN_ARCHIVE: &str = "savvagent-{{ target }}/{{ bin }}";
 
 /// Abstraction over the actual binary swap. The production impl drives
 /// [`self_update::backends::github::Update`]; tests substitute a stub
@@ -56,6 +71,7 @@ impl BinarySwapper for SelfUpdateBinarySwapper {
                 .repo_owner(REPO_OWNER)
                 .repo_name(REPO_NAME)
                 .bin_name(BIN_NAME)
+                .bin_path_in_archive(BIN_PATH_IN_ARCHIVE)
                 .show_download_progress(false)
                 .show_output(false)
                 .no_confirm(true)

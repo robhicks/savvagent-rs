@@ -6,6 +6,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.12.1 — self-update cache hygiene (2026-05-13)
+
+### Fixed
+
+- `internal:self-update` test suite no longer poisons the developer's
+  real `~/.savvagent/update-check.json`. Two `#[tokio::test]` cases
+  (`host_starting_spawns_check_that_updates_state`,
+  `other_events_are_ignored`) previously invoked the plugin's
+  production `on_event` path with a stub fetcher returning
+  `v99.99.99`; that path resolved the cache file via the live `$HOME`
+  and wrote the stub tag to disk, which the installed binary then
+  served for the full 24h TTL — causing `/update` to advertise
+  `v99.99.99` and 404 on download. The plugin now accepts a test-only
+  `cache_path_override`, the affected tests redirect to a tempdir,
+  and a positive regression assertion verifies the override is wired
+  through to `cache::save`. Field installs were unaffected — only
+  contributors who ran `cargo test` saw the symptom. If your local
+  `/update` is wedged on `v99.99.99`, delete
+  `~/.savvagent/update-check.json` once and relaunch.
+
+## v0.12.1 — `/update` fixes (2026-05-13)
+
+### Fixed
+
+- **`/update` could not find the binary inside the release archive.**
+  v0.11.0 and v0.12.0 configured `self_update` with the default
+  `bin_path_in_archive` (`{{ bin }}`, archive root), but cargo-dist
+  nests every Unix binary under a top-level `savvagent-{target}/`
+  directory in the tarball. The apply path therefore failed on
+  Linux/macOS with
+  `Could not find the required path in the archive: "savvagent"`.
+  `bin_path_in_archive` is now set to `savvagent-{{ target }}/{{ bin }}`
+  on Unix and `{{ bin }}` on Windows (the Windows zip ships flat). The
+  fix takes effect for users running v0.12.1 or later; v0.11.0 and
+  v0.12.0 binaries already in the field cannot self-upgrade through
+  this bug — re-run the install script
+  (`curl -LsSf https://github.com/robhicks/savvagent-rs/releases/latest/download/savvagent-installer.sh | sh`)
+  to get to v0.12.1 the first time.
+- **Test suite no longer poisons the developer's real
+  `~/.savvagent/update-check.json`.** Two `#[tokio::test]` cases in
+  `internal:self-update` invoked the production `on_event` path with
+  a stub fetcher returning `v99.99.99`. That path resolved the cache
+  file via the live `$HOME` and persisted the stub tag to disk, so an
+  installed binary launched after `cargo test` would see `v99.99.99`
+  as the latest release for the full 24h TTL and fail download with
+  a 404 (the tag doesn't exist on GitHub). The plugin now accepts a
+  test-only `cache_path_override` and a positive regression assertion
+  confirms the override is wired through to `cache::save`. Field
+  installs were unaffected — only contributors who ran the suite saw
+  the symptom. If your local `/update` is wedged on `v99.99.99`,
+  delete `~/.savvagent/update-check.json` once and relaunch.
+
+### Known limitations (not fixed in 0.12.1)
+
+- `/update` only swaps the main `savvagent` binary; the six helper
+  binaries (`savvagent-anthropic`, `savvagent-gemini`,
+  `savvagent-openai`, `savvagent-tool-fs`, `savvagent-tool-bash`,
+  `savvagent-tool-grep`) shipped in the same archive stay at the
+  prior version on disk. They still work because SPP and the MCP tool
+  protocol are stable across patch boundaries, but a future
+  release will broaden the swap to cover the full archive.
+
 ## v0.12.0 — Gemini polish, model picker, TUI integrity (2026-05-13)
 
 Five threads ship together:

@@ -38,8 +38,11 @@ unpack it, and put the binaries on your `$PATH`. Each archive ships with a
 
 After installing, run `savvagent` in your project, `/connect` once to store
 an API key in the OS keyring, and you're done. From v0.11.0 onwards the
-TUI checks for updates on launch and `/update` performs the upgrade
-in-place — no need to re-run the installer.
+TUI checks for updates on launch; from v0.12.1 `/update` performs the
+upgrade in-place — no need to re-run the installer. (v0.11.0 and v0.12.0
+each shipped with a bug that broke the apply step; users on those
+releases need to re-run the install script once to reach v0.12.1 — see
+the CHANGELOG.)
 
 ## Repository layout
 

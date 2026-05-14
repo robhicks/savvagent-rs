@@ -10,6 +10,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-13-v0.11.0-tui-self-update-design.md`.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -138,6 +139,14 @@ pub struct SelfUpdatePlugin {
     /// Binary swapper used by `/update`. Defaults to
     /// [`SelfUpdateBinarySwapper`]; tests substitute a stub.
     swapper: Arc<dyn BinarySwapper>,
+    /// Optional override for the on-disk cache file path. When `None`,
+    /// the spawned check task resolves the path via [`cache::cache_path`]
+    /// (i.e. `$HOME/.savvagent/update-check.json`). Tests that exercise
+    /// `on_event` MUST pass `Some(tempdir.join("update-check.json"))` —
+    /// otherwise the production cache-write path inside `on_event` writes
+    /// the stub fetcher's tag to the developer's real `$HOME` cache,
+    /// poisoning subsequent launches of the installed binary.
+    cache_path_override: Option<PathBuf>,
 }
 
 impl SelfUpdatePlugin {
@@ -175,7 +184,18 @@ impl SelfUpdatePlugin {
             state: Arc::new(Mutex::new(initial)),
             fetcher,
             swapper,
+            cache_path_override: None,
         }
+    }
+
+    /// Test-only: replace the on-disk cache path resolved by the spawned
+    /// `HostStarting` task. Required by any test that drives `on_event`
+    /// with a stub fetcher — otherwise the production cache-write path
+    /// scribbles the stub's tag into the developer's real `$HOME`.
+    #[cfg(test)]
+    pub fn with_cache_path_override(mut self, path: PathBuf) -> Self {
+        self.cache_path_override = Some(path);
+        self
     }
 
     /// Returns the cached install-method classification.
@@ -305,6 +325,7 @@ impl Plugin for SelfUpdatePlugin {
         let fetcher = Arc::clone(&self.fetcher);
         let install_method = self.install_method;
         let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let cache_path_override = self.cache_path_override.clone();
 
         tokio::spawn(async move {
             if matches!(install_method, InstallMethod::Dev) {
@@ -314,8 +335,12 @@ impl Plugin for SelfUpdatePlugin {
                 return;
             }
 
-            // 24h cache: if a fresh entry exists, skip the network.
-            let cache_path = cache::cache_path();
+            // 24h cache: if a fresh entry exists, skip the network. Tests
+            // that exercise this code path pass an explicit override (set
+            // via `with_cache_path_override`) so the production cache file
+            // under the developer's real `$HOME` is never touched by the
+            // suite.
+            let cache_path = cache_path_override.or_else(cache::cache_path);
             let cached_fresh = cache_path
                 .as_ref()
                 .and_then(cache::load)
@@ -753,8 +778,17 @@ mod tests {
         // Inject a stub that reports a newer version so the resulting
         // state is `Available` (or `Disabled` if the runtime's
         // current_exe() detects a dev build).
+        //
+        // The cache-path override is mandatory here: `on_event` writes the
+        // fetched tag to disk, and without the override the production
+        // path would scribble `v99.99.99` into the developer's real
+        // `~/.savvagent/update-check.json`, poisoning the next 24h of
+        // launches for the installed binary.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
         let fetcher = Arc::new(FixedFetcher("v99.99.99"));
-        let mut p = SelfUpdatePlugin::with_fetcher(fetcher);
+        let mut p =
+            SelfUpdatePlugin::with_fetcher(fetcher).with_cache_path_override(cache_path.clone());
         let install_method = p.install_method();
 
         p.on_event(HostEvent::HostStarting).await.unwrap();
@@ -767,8 +801,26 @@ mod tests {
             let s = p.state();
             if !matches!(s, UpdateState::Unknown) {
                 match install_method {
-                    InstallMethod::Dev => assert_eq!(s, UpdateState::Disabled),
-                    InstallMethod::Installed => assert!(matches!(s, UpdateState::Available { .. })),
+                    InstallMethod::Dev => {
+                        assert_eq!(s, UpdateState::Disabled);
+                        // Dev builds bail before the cache layer runs, so
+                        // the override file must NOT have been written.
+                        assert!(
+                            !cache_path.exists(),
+                            "dev short-circuit must not write cache"
+                        );
+                    }
+                    InstallMethod::Installed => {
+                        assert!(matches!(s, UpdateState::Available { .. }));
+                        // Regression guard: the spawned task must have
+                        // written the stub fetcher's tag to the override
+                        // path (NOT to `$HOME/.savvagent/update-check.json`).
+                        // Confirms `cache_path_override` is wired all the
+                        // way through to `cache::save`.
+                        let entry = cache::load(&cache_path)
+                            .expect("cache file must be written at the override path");
+                        assert_eq!(entry.latest_tag, "v99.99.99");
+                    }
                 }
                 return;
             }
@@ -778,8 +830,14 @@ mod tests {
 
     #[tokio::test]
     async fn other_events_are_ignored() {
+        // Even though `on_event` currently returns early for non-HostStarting
+        // events, point the cache override at a tempdir so any future
+        // change that lifts the early-return cannot silently start writing
+        // to the developer's real `$HOME` cache.
+        let tmp = tempfile::tempdir().unwrap();
         let fetcher = Arc::new(FixedFetcher("v99.99.99"));
-        let mut p = SelfUpdatePlugin::with_fetcher(fetcher);
+        let mut p = SelfUpdatePlugin::with_fetcher(fetcher)
+            .with_cache_path_override(tmp.path().join("update-check.json"));
 
         // TurnStart should not touch the state.
         p.on_event(HostEvent::TurnStart { turn_id: 1 })
