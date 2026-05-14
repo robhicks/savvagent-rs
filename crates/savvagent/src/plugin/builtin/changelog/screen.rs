@@ -156,6 +156,107 @@ impl Screen for ChangelogScreen {
     }
 }
 
+/// Translate a markdown string into the plugin crate's
+/// [`StyledLine`] vocabulary. Uses [`tui_markdown::from_str`] to do
+/// the markdown parsing and styled-text emission, then converts each
+/// ratatui `Line` / `Span` into the equivalent `StyledLine` /
+/// `StyledSpan`. Pure function; defensive against panics inside the
+/// markdown crate (a corrupt body should fail the screen, not the
+/// process).
+///
+/// Note: `tui_markdown` links against ratatui 0.29 while this crate
+/// links against ratatui 0.30 (via ratatui_core). The Color types
+/// from the two versions are not the same Rust type, so fg/bg colors
+/// are extracted via their `Display` representation and re-mapped
+/// without naming either crate's Color enum directly. Modifiers are
+/// mapped via their underlying `u16` bit pattern (BOLD=0x0001,
+/// DIM=0x0002, ITALIC=0x0004, UNDERLINED=0x0008, REVERSED=0x0040),
+/// which is identical across both versions.
+pub(crate) fn markdown_to_styled_lines(input: &str) -> Vec<StyledLine> {
+    let text = std::panic::catch_unwind(|| tui_markdown::from_str(input))
+        .map_err(|_| "rendering error")
+        .unwrap_or_default();
+
+    text.lines
+        .into_iter()
+        .map(|line| {
+            let spans = line
+                .spans
+                .into_iter()
+                .map(|span| {
+                    // Modifier is a u16 bitflags type with identical bit
+                    // layout in ratatui 0.29 and ratatui_core (0.30).
+                    let modifier_bits = span.style.add_modifier.bits();
+                    StyledSpan {
+                        text: span.content.into_owned(),
+                        // Colors are extracted via Display to avoid a
+                        // cross-version type mismatch (ratatui 0.29 vs
+                        // ratatui_core). map_color_str is pure and safe.
+                        fg: span.style.fg.and_then(|c| map_color_str(&c.to_string())),
+                        bg: span.style.bg.and_then(|c| map_color_str(&c.to_string())),
+                        modifiers: TextMods {
+                            bold: modifier_bits & 0x0001 != 0,
+                            dim: modifier_bits & 0x0002 != 0,
+                            italic: modifier_bits & 0x0004 != 0,
+                            underline: modifier_bits & 0x0008 != 0,
+                            reverse: modifier_bits & 0x0040 != 0,
+                        },
+                    }
+                })
+                .collect();
+            StyledLine { spans }
+        })
+        .collect()
+}
+
+/// Map a ratatui `Color` Display string to the plugin crate's
+/// [`savvagent_plugin::ThemeColor`]. `Reset` maps to `None` so the
+/// runtime inherits from the active theme. This avoids naming the
+/// ratatui Color enum type (which differs between the ratatui 0.29
+/// used by tui-markdown and the ratatui_core used by this crate).
+fn map_color_str(s: &str) -> Option<savvagent_plugin::ThemeColor> {
+    use savvagent_plugin::ThemeColor;
+    match s {
+        "Reset" => None,
+        "Black" => Some(ThemeColor::Black),
+        "Red" => Some(ThemeColor::Red),
+        "Green" => Some(ThemeColor::Green),
+        "Yellow" => Some(ThemeColor::Yellow),
+        "Blue" => Some(ThemeColor::Blue),
+        "Magenta" => Some(ThemeColor::Magenta),
+        "Cyan" => Some(ThemeColor::Cyan),
+        "Gray" => Some(ThemeColor::Gray),
+        "DarkGray" => Some(ThemeColor::DarkGray),
+        "LightRed" => Some(ThemeColor::LightRed),
+        "LightGreen" => Some(ThemeColor::LightGreen),
+        "LightYellow" => Some(ThemeColor::LightYellow),
+        "LightBlue" => Some(ThemeColor::LightBlue),
+        "LightMagenta" => Some(ThemeColor::LightMagenta),
+        "LightCyan" => Some(ThemeColor::LightCyan),
+        "White" => Some(ThemeColor::White),
+        s => {
+            // Try Indexed: ratatui 0.29 Display for Indexed(n) is just "n".
+            if let Ok(idx) = s.parse::<u8>() {
+                return Some(ThemeColor::Indexed(idx));
+            }
+            // Try RGB: ratatui 0.29 Display for Rgb(r,g,b) is "#RRGGBB".
+            if let Some(hex) = s.strip_prefix('#') {
+                if hex.len() == 6 {
+                    if let (Ok(r), Ok(g), Ok(b)) = (
+                        u8::from_str_radix(&hex[0..2], 16),
+                        u8::from_str_radix(&hex[2..4], 16),
+                        u8::from_str_radix(&hex[4..6], 16),
+                    ) {
+                        return Some(ThemeColor::Rgb { r, g, b });
+                    }
+                }
+            }
+            // Unknown variant — inherit from theme.
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +495,49 @@ mod tests {
             "render must clamp / return empty when scrolled past end, got {} lines",
             lines.len()
         );
+    }
+
+    #[test]
+    fn markdown_to_styled_lines_renders_bold_heading_with_modifier() {
+        let lines = super::markdown_to_styled_lines("# Hello\n\nbody");
+        let combined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(combined.contains("Hello"), "got: {combined}");
+        assert!(combined.contains("body"), "got: {combined}");
+
+        // The heading line must carry a bold span somewhere.
+        let heading_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.text.contains("Hello")))
+            .expect("must find a line containing the heading text");
+        assert!(
+            heading_line.spans.iter().any(|s| s.modifiers.bold),
+            "heading line must contain at least one bold span: {heading_line:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_to_styled_lines_handles_empty_input() {
+        let lines = super::markdown_to_styled_lines("");
+        // Empty input is allowed; the adapter must not panic. A zero-or-
+        // one-line result is acceptable depending on tui-markdown's
+        // emit-an-empty-line behavior.
+        assert!(lines.len() <= 1, "got {} lines", lines.len());
+    }
+
+    #[test]
+    fn markdown_to_styled_lines_translates_unicode_text_intact() {
+        let lines = super::markdown_to_styled_lines("café 漢字 🚀");
+        let combined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(combined.contains("café"), "got: {combined}");
+        assert!(combined.contains("漢字"), "got: {combined}");
+        assert!(combined.contains("🚀"), "got: {combined}");
     }
 }
