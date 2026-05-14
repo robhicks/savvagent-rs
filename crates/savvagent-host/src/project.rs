@@ -92,72 +92,54 @@ fn split_front_matter(text: &str) -> Option<(&str, &str)> {
     Some((yaml, body))
 }
 
-/// Build a system prompt by combining an optional override with the
-/// project context body parsed from `SAVVAGENT.md`. Front-matter (if any)
-/// is consumed by [`crate::permissions::PermissionPolicy`] and *not*
-/// included in the prompt.
-pub fn system_prompt(project_root: &Path, override_prompt: Option<&str>) -> Option<String> {
-    let parsed = parse_savvagent_md(project_root);
-    match (override_prompt, parsed.body) {
-        (Some(p), Some(c)) => Some(format!(
-            "{p}\n\n# Project context (from {PROJECT_CONTEXT_FILE})\n\n{c}"
-        )),
-        (Some(p), None) => Some(p.to_string()),
-        (None, Some(c)) => Some(format!(
-            "# Project context (from {PROJECT_CONTEXT_FILE})\n\n{c}"
-        )),
-        (None, None) => None,
+/// Stitch up to three named layers (default prompt, embedder override,
+/// `SAVVAGENT.md` body) into one system-prompt string. Each present
+/// layer is wrapped with a Markdown H1 heading and separated by blank
+/// lines. Layers that are `None`, empty after trim, or whitespace-only
+/// after trim are skipped — no heading, no separator emitted for them.
+/// Returns `None` only when every layer collapses to absent.
+///
+/// Non-empty layers are rendered as-is — `trim()` is consulted only
+/// for the emptiness gate. This preserves intentional whitespace in
+/// project guidance (e.g. a `SAVVAGENT.md` opening with a code fence
+/// or indentation).
+///
+/// Ordering is fixed: default → override → body. LLMs weight later
+/// instructions more heavily, so the project body wins on ambiguous
+/// guidance.
+pub fn layered_prompt(
+    default: Option<&str>,
+    override_prompt: Option<&str>,
+    project_body: Option<&str>,
+) -> Option<String> {
+    let body_heading = format!("Project context (from {PROJECT_CONTEXT_FILE})");
+    let layers: [(&str, Option<&str>); 3] = [
+        ("Savvagent default prompt", default),
+        ("Host override", override_prompt),
+        (body_heading.as_str(), project_body),
+    ];
+
+    let mut sections: Vec<String> = Vec::new();
+    for (heading, layer) in layers.iter() {
+        if let Some(text) = layer {
+            if !text.trim().is_empty() {
+                // Render the original `text`, not the trimmed view —
+                // leading/trailing whitespace may carry markdown
+                // structure (fences, indentation) we must preserve.
+                sections.push(format!("# {heading}\n\n{text}"));
+            }
+        }
+    }
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn no_file_no_override_yields_none() {
-        let d = tempdir().unwrap();
-        assert!(system_prompt(d.path(), None).is_none());
-    }
-
-    #[test]
-    fn override_only() {
-        let d = tempdir().unwrap();
-        let s = system_prompt(d.path(), Some("base prompt")).unwrap();
-        assert_eq!(s, "base prompt");
-    }
-
-    #[test]
-    fn merges_context_and_override() {
-        let d = tempdir().unwrap();
-        std::fs::write(d.path().join(PROJECT_CONTEXT_FILE), "use snake_case.").unwrap();
-        let s = system_prompt(d.path(), Some("base")).unwrap();
-        assert!(s.starts_with("base"));
-        assert!(s.contains("use snake_case."));
-    }
-
-    #[test]
-    fn context_only() {
-        let d = tempdir().unwrap();
-        std::fs::write(d.path().join(PROJECT_CONTEXT_FILE), "ctx").unwrap();
-        let s = system_prompt(d.path(), None).unwrap();
-        assert!(s.contains("ctx"));
-    }
-
-    #[test]
-    fn front_matter_is_stripped_from_system_prompt() {
-        let d = tempdir().unwrap();
-        std::fs::write(
-            d.path().join(PROJECT_CONTEXT_FILE),
-            "---\npermissions:\n  allow: []\n---\nuse snake_case.",
-        )
-        .unwrap();
-        let s = system_prompt(d.path(), None).unwrap();
-        assert!(s.contains("use snake_case."));
-        assert!(!s.contains("permissions"), "{}", s);
-        assert!(!s.contains("---"), "{}", s);
-    }
 
     #[test]
     fn front_matter_permissions_round_trip() {
@@ -208,5 +190,123 @@ mod tests {
     fn front_matter_only_no_body() {
         let parsed = parse_text("---\npermissions:\n  allow: []\n---\n");
         assert!(parsed.body.is_none());
+    }
+
+    #[test]
+    fn layered_all_three_renders_three_sections() {
+        let s = layered_prompt(Some("DEFAULT"), Some("OVERRIDE"), Some("BODY")).unwrap();
+        assert!(s.contains("# Savvagent default prompt\n\nDEFAULT"));
+        assert!(s.contains("# Host override\n\nOVERRIDE"));
+        assert!(s.contains("# Project context (from SAVVAGENT.md)\n\nBODY"));
+        let i_default = s.find("DEFAULT").unwrap();
+        let i_override = s.find("OVERRIDE").unwrap();
+        let i_body = s.find("BODY").unwrap();
+        assert!(i_default < i_override && i_override < i_body, "{}", s);
+    }
+
+    #[test]
+    fn layered_default_only() {
+        let s = layered_prompt(Some("D"), None, None).unwrap();
+        assert!(s.starts_with("# Savvagent default prompt"));
+        assert!(s.contains("D"));
+        assert!(!s.contains("# Host override"));
+        assert!(!s.contains("# Project context"));
+    }
+
+    #[test]
+    fn layered_override_only() {
+        let s = layered_prompt(None, Some("O"), None).unwrap();
+        assert!(s.starts_with("# Host override"));
+        assert!(s.contains("O"));
+    }
+
+    #[test]
+    fn layered_body_only() {
+        let s = layered_prompt(None, None, Some("B")).unwrap();
+        assert!(s.starts_with("# Project context (from SAVVAGENT.md)"));
+        assert!(s.contains("B"));
+    }
+
+    #[test]
+    fn layered_none_returns_none() {
+        assert!(layered_prompt(None, None, None).is_none());
+    }
+
+    #[test]
+    fn layered_sections_use_h1_headings() {
+        let s = layered_prompt(Some("a"), Some("b"), Some("c")).unwrap();
+        for h in &[
+            "# Savvagent default prompt",
+            "# Host override",
+            "# Project context (from SAVVAGENT.md)",
+        ] {
+            assert!(s.contains(h), "missing heading {h} in:\n{s}");
+        }
+    }
+
+    #[test]
+    fn layered_empty_string_layer_is_skipped() {
+        // Empty strings collapse to absent — same as None.
+        assert_eq!(
+            layered_prompt(Some(""), Some(""), Some("")),
+            layered_prompt(None, None, None),
+        );
+        let s = layered_prompt(Some(""), Some("O"), Some("")).unwrap();
+        assert!(s.starts_with("# Host override"));
+        assert!(!s.contains("# Savvagent default prompt"));
+        assert!(!s.contains("# Project context"));
+    }
+
+    #[test]
+    fn layered_whitespace_only_layer_is_skipped() {
+        let s = layered_prompt(Some("   \n\t  "), Some("O"), Some("\n\n")).unwrap();
+        assert!(s.starts_with("# Host override"));
+        assert!(!s.contains("# Savvagent default prompt"));
+        assert!(!s.contains("# Project context"));
+    }
+
+    #[test]
+    fn layered_all_layers_whitespace_returns_none() {
+        assert!(layered_prompt(Some("   "), Some("\n\n"), Some("\t")).is_none());
+    }
+
+    #[test]
+    fn layered_preserves_code_fences_in_project_body() {
+        // A SAVVAGENT.md that opens with a blank line then a code fence:
+        // `trim()` would strip the leading newline; verbatim render
+        // preserves it. This is the load-bearing test for the
+        // verbatim-render rule when the surrounding whitespace itself
+        // carries meaning.
+        let body = "\n```rust\nfn main() {}\n```\n";
+        let s = layered_prompt(None, None, Some(body)).unwrap();
+        assert!(s.contains(body), "code fence altered:\n{s}");
+    }
+
+    #[test]
+    fn layered_does_not_strip_leading_or_trailing_whitespace_of_non_empty_content() {
+        // Inner whitespace must survive — trim() is only the emptiness gate.
+        let s = layered_prompt(Some("  hello  "), None, None).unwrap();
+        assert!(
+            s.contains("  hello  "),
+            "leading/trailing whitespace lost: {s}"
+        );
+    }
+
+    #[test]
+    fn parse_savvagent_md_pre_trims_body_before_layering() {
+        // Pins the real parse → layer flow's whitespace behavior: even
+        // though `layered_prompt` itself renders non-empty layers
+        // verbatim, the body comes from `parse_text` which trims
+        // leading/trailing whitespace at parse time. A `SAVVAGENT.md`
+        // that opens with a blank line before a code fence loses that
+        // newline before reaching the layered prompt. Document the
+        // actual boundary here so callers know what to expect.
+        let parsed = parse_text("\n```rust\nfn main() {}\n```\n");
+        assert_eq!(parsed.body.as_deref(), Some("```rust\nfn main() {}\n```"));
+        let s = layered_prompt(None, None, parsed.body.as_deref()).unwrap();
+        assert!(
+            s.contains("```rust\nfn main() {}\n```"),
+            "code fence body should round-trip after parse + layer: {s}"
+        );
     }
 }

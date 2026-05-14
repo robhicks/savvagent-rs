@@ -338,7 +338,8 @@ async fn build_in_process_host_with_model(
             },
             model,
         )
-        .with_project_root(project_root.to_path_buf()),
+        .with_project_root(project_root.to_path_buf())
+        .with_app_version(env!("CARGO_PKG_VERSION")),
     );
     let host = Host::with_components(config, client)
         .await
@@ -354,7 +355,8 @@ async fn start_host_remote(
 ) -> Result<Arc<Host>> {
     let config = tool_bins.apply(
         HostConfig::new(ProviderEndpoint::StreamableHttp { url }, model)
-            .with_project_root(project_root),
+            .with_project_root(project_root)
+            .with_app_version(env!("CARGO_PKG_VERSION")),
     );
     let host = Host::start(config).await.context("failed to start host")?;
     Ok(Arc::new(host))

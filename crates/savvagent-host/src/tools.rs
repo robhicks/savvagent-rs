@@ -402,6 +402,14 @@ impl ToolRegistry {
         })
     }
 
+    /// Trusted shell-availability flag for the default-prompt builder.
+    /// True iff the embedder wired a `tool-bash`-marker endpoint in
+    /// `HostConfig::tools`. Cannot be flipped by tool-server-supplied
+    /// data (e.g. a third-party tool advertising `name == "run"`).
+    pub(crate) fn bash_available(&self) -> bool {
+        self.lazy_bash.is_some()
+    }
+
     /// Call `name` with a per-call bash network override.
     ///
     /// For non-bash tools, `net_override` is ignored. For bash tools, the
@@ -950,6 +958,20 @@ mod lazy_bash_tests {
             BashSpawnKey { allow_net: true },
             BashSpawnKey { allow_net: false }
         );
+    }
+
+    #[test]
+    fn bash_available_false_when_no_lazy_bash_slot() {
+        // Constructed directly from public-in-crate fields. `lazy_bash: None`
+        // is the trusted-source signal that no `tool-bash` endpoint was wired
+        // by the embedder; `bash_available()` must reflect that.
+        let registry = ToolRegistry {
+            eager_servers: Vec::new(),
+            routes: HashMap::new(),
+            defs: Vec::new(),
+            lazy_bash: None,
+        };
+        assert!(!registry.bash_available());
     }
 }
 
