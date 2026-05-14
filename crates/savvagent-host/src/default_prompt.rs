@@ -75,7 +75,23 @@ impl<'a> PromptEnv<'a> {
         bash_available: bool,
         app_version: AppVersion<'a>,
     ) -> Self {
-        let git_present = std::fs::metadata(project_root.join(".git")).is_ok();
+        let git_path = project_root.join(".git");
+        let git_present = match std::fs::metadata(&git_path) {
+            Ok(_) => true,
+            Err(e) => {
+                // Spec §8: every error mode collapses to `git_present
+                // = false`. We log at debug so an unreadable `.git`
+                // (permissions, broken symlink) leaves an operator
+                // trail rather than silently rendering "Git
+                // repository: no" in the prompt.
+                tracing::debug!(
+                    path = %git_path.display(),
+                    error = %e,
+                    "default_prompt: .git probe failed; rendering 'Git repository: no'"
+                );
+                false
+            }
+        };
         Self {
             project_root,
             os,
@@ -161,14 +177,23 @@ fn sanitize_tool_name(name: &str) -> String {
 
 fn render_affordances(out: &mut String, tools: &[ToolDef], bash_available: bool) {
     if tools.is_empty() {
-        // Invariant: bash_available implies a wired `tool-bash` endpoint,
-        // which would appear in `tools.defs`. So an empty `tools` slice
-        // must also mean `!bash_available`. Catch a future caller
-        // breaking this in dev/test builds at zero release cost.
+        // Invariant maintained by `ToolRegistry::connect`: a wired
+        // `tool-bash` endpoint pushes its tool defs into `defs`, so
+        // `bash_available()` is true iff `tools` is non-empty. The
+        // `debug_assert!` catches a future caller breaking that in
+        // dev/test builds; in release we log at error level so an
+        // accidental decoupling leaves a trail rather than silently
+        // dropping the shell-capability paragraph from the prompt.
         debug_assert!(
             !bash_available,
             "render_affordances: bash_available=true but tools is empty",
         );
+        if bash_available {
+            tracing::error!(
+                "default_prompt: bash_available=true but tools slice is empty; \
+                 shell-capability paragraph will be omitted from the system prompt"
+            );
+        }
         out.push_str(AFFORDANCES_EMPTY);
         return;
     }
