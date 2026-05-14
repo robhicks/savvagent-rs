@@ -193,6 +193,17 @@ impl SelfUpdatePlugin {
         self
     }
 
+    /// Test-only: override the install-method classification captured at
+    /// construction. `cargo test` always runs from `target/debug/deps`, so
+    /// `detect()` returns [`InstallMethod::Dev`] and short-circuits the
+    /// version check; tests that need to exercise the `Installed` cache /
+    /// fetch / install path must force the override.
+    #[cfg(test)]
+    pub fn with_install_method(mut self, method: InstallMethod) -> Self {
+        self.install_method = method;
+        self
+    }
+
     /// Returns the cached install-method classification.
     #[allow(dead_code)]
     pub fn install_method(&self) -> InstallMethod {
@@ -329,11 +340,24 @@ impl Plugin for SelfUpdatePlugin {
             // via `with_cache_path_override`) so the production cache file
             // under the developer's real `$HOME` is never touched by the
             // suite.
+            //
+            // A cached `latest_tag` strictly older than the running binary
+            // is treated as a cache miss: it implies the user upgraded
+            // out-of-band (cargo install, downloaded tarball, package
+            // manager) since the cache was written, so we have no
+            // authoritative info about what's newer than the current
+            // version and must re-fetch.
             let cache_path = cache_path_override.or_else(cache::cache_path);
             let cached_fresh = cache_path
                 .as_ref()
                 .and_then(cache::load)
-                .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS));
+                .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS))
+                .filter(|e| {
+                    !matches!(
+                        check::compare_versions(&current_version, &e.latest_tag),
+                        check::Comparison::Ahead | check::Comparison::Unparseable
+                    )
+                });
 
             let result = if let Some(entry) = cached_fresh {
                 tracing::debug!(tag = %entry.latest_tag, "self-update: using cached tag");
@@ -1028,5 +1052,60 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(p.state(), UpdateState::Unknown);
         assert_eq!(installer.invocation_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn host_starting_bypasses_cache_when_current_version_is_ahead_of_cached_tag() {
+        // Regression: a cache entry written while the binary was on an older
+        // version stays "fresh" for 24h. If the user upgrades out-of-band
+        // (cargo install, downloaded tarball, package manager) within that
+        // window, the cached `latest_tag` is now older than the running
+        // binary. The old code accepted the stale cache, classified the
+        // running version as `Ahead` -> `UpToDate`, and silently hid any
+        // genuinely newer release that GitHub now publishes. The plugin
+        // must instead treat that cache as uninformative and re-fetch.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+
+        // Pre-populate a fresh cache (written "now") whose tag is older
+        // than `CARGO_PKG_VERSION`. v0.1.0 is unambiguously below any
+        // release the workspace will ship for the lifetime of this fix.
+        cache::save(
+            &cache_path,
+            &cache::CacheEntry {
+                schema_version: 1,
+                checked_at_unix: cache::now_unix(),
+                latest_tag: "v0.1.0".into(),
+            },
+        );
+
+        let installer = Arc::new(StubInstaller::ok());
+        let mut p = make_on_event_plugin(
+            Arc::new(FixedFetcher("v99.99.99")),
+            installer.clone(),
+            cache_path.clone(),
+        )
+        // `cargo test` runs under `target/debug/deps/...`, so without the
+        // override the plugin short-circuits to Disabled before it touches
+        // the cache and never exercises the bug.
+        .with_install_method(InstallMethod::Installed);
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+
+        let final_state = wait_for_state(&p, |s| matches!(s, UpdateState::Updated { .. })).await;
+
+        match final_state {
+            UpdateState::Updated { to, .. } => assert_eq!(to.to_string(), "99.99.99"),
+            other => unreachable!("predicate guarantees Updated: {other:?}"),
+        }
+        assert_eq!(
+            installer.invocation_count(),
+            1,
+            "stale cache must not prevent auto-install"
+        );
+
+        // Cache must be rewritten with the freshly fetched tag.
+        let entry = cache::load(&cache_path).expect("cache must be rewritten on re-fetch");
+        assert_eq!(entry.latest_tag, "v99.99.99");
     }
 }
