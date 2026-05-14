@@ -1,16 +1,23 @@
 //! Build the default system prompt from real session data.
 //!
-//! The prompt has five sections rendered in this order:
+//! The prompt has five required sections rendered in this order:
 //! identity → behavior expectations → tool affordances → environment →
-//! conventions. Static sections live in `const` strings; dynamic
+//! conventions. When [`PromptEnv::bash_available`] is true, a
+//! shell-capability paragraph is appended to the affordances section
+//! (sixth, conditional). The identity, behavior, and conventions
+//! sections are `const` strings; the affordances and environment
 //! sections are rendered from [`PromptEnv`] and a `&[ToolDef]` slice.
 //!
 //! Security: tool-server-supplied text never enters the rendered
 //! prompt. The affordances section lists tool NAMES only — descriptions
 //! are delivered to the model via the request's typed `tools` field,
-//! not promoted into the system message. See the spec at
-//! `docs/superpowers/specs/2026-05-14-default-system-prompt-design.md`
-//! §5.3.
+//! not promoted into the system message. Names are sanitized to defang
+//! control characters and backticks (see [`sanitize_tool_name`]) and
+//! wrapped in code spans so a malicious name cannot inject markdown
+//! structure. The shell-capability paragraph is gated on a trusted
+//! flag from [`crate::tools::ToolRegistry::bash_available`], not on
+//! tool-name matching, so a third-party server cannot spoof shell
+//! availability by advertising `name == "run"`.
 
 use std::path::Path;
 

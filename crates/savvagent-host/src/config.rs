@@ -43,8 +43,12 @@ pub struct HostConfig {
     pub max_tokens: u32,
     /// Project root, used to locate `SAVVAGENT.md` and as default cwd context.
     pub project_root: PathBuf,
-    /// Optional override for the system prompt. When `None`, the host
-    /// auto-generates one from `SAVVAGENT.md` if it exists.
+    /// Optional embedder-supplied system-prompt layer. Composed (in
+    /// order) after the built-in default prompt and before the
+    /// `SAVVAGENT.md` body via [`crate::project::layered_prompt`].
+    /// When `None`, only the default and `SAVVAGENT.md` layers
+    /// contribute. The default layer can itself be suppressed via
+    /// [`Self::with_default_prompt_disabled`].
     pub system_prompt: Option<String>,
     /// Hard cap on tool-use iterations within a single turn. Guards against
     /// pathological loops.
@@ -68,11 +72,6 @@ pub struct HostConfig {
     /// **only the built-in default layer** — the [`Self::system_prompt`]
     /// override and the parsed `SAVVAGENT.md` body still compose. See
     /// [`Self::with_default_prompt_disabled`].
-    ///
-    /// **Note for embedders:** existing callers of `HostConfig::new`
-    /// will receive a non-empty system prompt starting in v0.14.0.
-    /// Call [`Self::with_default_prompt_disabled`] to restore the
-    /// prior behavior.
     pub default_prompt_enabled: bool,
 
     /// Embedder-supplied app version, surfaced in the default prompt's
