@@ -319,6 +319,13 @@ pub enum ScreenArgs {
         /// entries; the picker renders an explanatory note in that case.
         models: Vec<ModelEntry>,
     },
+    /// Open the changelog viewer; takes no parameters today.
+    ///
+    /// The variant exists rather than reusing [`ScreenArgs::None`] so the
+    /// `screen_id()` table stays exhaustive — a future "scroll to a
+    /// specific version" feature can land an arg here without breaking
+    /// the public surface.
+    Changelog,
 }
 
 impl ScreenArgs {
@@ -345,6 +352,7 @@ impl ScreenArgs {
             ScreenArgs::PluginsManager => Some("plugins.manager"),
             ScreenArgs::LanguagePicker { .. } => Some("language.picker"),
             ScreenArgs::ModelPicker { .. } => Some("model.picker"),
+            ScreenArgs::Changelog => Some("changelog"),
         }
     }
 }
@@ -573,5 +581,6 @@ mod tests {
             ScreenArgs::PluginsManager.screen_id(),
             Some("plugins.manager")
         );
+        assert_eq!(ScreenArgs::Changelog.screen_id(), Some("changelog"));
     }
 }

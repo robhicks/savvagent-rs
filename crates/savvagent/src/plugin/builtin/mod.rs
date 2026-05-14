@@ -1,5 +1,9 @@
 //! Built-in plugin implementations. Each subdirectory hosts one plugin.
 
+/// `internal:changelog` plugin: streams CHANGELOG.md and renders it
+/// via tui-markdown in a dedicated `/changelog` screen. Closes #68.
+pub mod changelog;
+
 /// Clears the conversation log; registered as `/clear`.
 pub mod clear;
 

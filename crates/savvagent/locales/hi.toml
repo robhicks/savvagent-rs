@@ -127,6 +127,14 @@ note-install-in-progress = "v%{latest} का इंस्टॉल पहले
 note-update-ok           = "v%{latest} इंस्टॉल किया गया। उपयोग करने के लिए savvagent पुनः प्रारंभ करें।"
 note-update-fail         = "अपडेट विफल: %{err}"
 
+[changelog]
+modal-title    = "रिलीज़ नोट्स"
+slash-summary  = "CHANGELOG.md से रिलीज़ नोट्स दिखाएँ"
+loading        = "changelog ला रहा है…"
+fetch-failed   = "changelog नहीं ला सका: %{err}"
+retry-hint     = "पुनः प्रयास के लिए r दबाएँ, Esc से बंद करें।"
+tips           = "j/k स्क्रॉल · g/G ऊपर/नीचे · r पुनः प्रयास · Esc बंद"
+
 [picker.themes]
 filter-label    = "फ़िल्टर: %{filter}"
 listing         = "थीम (%{count}): %{names}"
@@ -277,6 +285,7 @@ theme-summary              = "रंग थीम बदलें"
 view-summary               = "व्यूअर में फ़ाइल खोलें"
 
 [plugin]
+changelog-description     = "प्रोजेक्ट के CHANGELOG.md रिलीज़ नोट्स देखें"
 clear-description         = "वार्तालाप लॉग साफ़ करें"
 connect-description       = "प्रदाता पिकर"
 edit-file-description     = "TUI के भीतर मूल फ़ाइल एडिटर"

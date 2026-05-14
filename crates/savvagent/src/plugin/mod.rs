@@ -77,6 +77,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
     ];
 
     let plugins: Vec<Box<dyn savvagent_plugin::Plugin>> = vec![
+        Box::new(builtin::changelog::ChangelogPlugin::new()),
         Box::new(builtin::clear::ClearPlugin::new()),
         Box::new(builtin::command_palette::CommandPalettePlugin::new()),
         Box::new(builtin::connect::ConnectPlugin::new()),
@@ -116,6 +117,7 @@ mod tests {
             .map(|p| p.manifest().id.as_str().to_string())
             .collect();
         for expected in [
+            "internal:changelog",
             "internal:clear",
             "internal:command-palette",
             "internal:connect",
@@ -140,7 +142,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 18);
+        assert_eq!(set.plugins.len(), 19);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -169,18 +171,19 @@ mod tests {
         // entry per provider plugin (same underlying Arc as the providers
         // map). v0.11.0 PR 1 adds `internal:self-update`; the
         // prompt/editor keybindings split brings the non-provider count
-        // to 18; total registry size is 18 + 4 = 22.
+        // to 18; changelog adds one more to 19; total registry size is 19 + 4 = 23.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            22,
-            "registry should have 18 non-provider + 4 provider plugins"
+            23,
+            "registry should have 19 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),
             4,
             "registry should have 4 provider plugins"
         );
+
         // And every provider id resolves through `get` (proves the
         // Plugin-view side of the ProviderEntry is wired in).
         for pid_str in [
