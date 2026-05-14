@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn build_contains_no_cannot_access_disclaimer_warning() {
+    fn build_warns_agent_not_to_claim_cannot_access() {
         let s = build(&env(), &[]);
         assert!(s.contains("Never claim you \"cannot access\""));
     }
