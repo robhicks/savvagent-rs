@@ -55,6 +55,10 @@ pub mod resume;
 /// Saves the active transcript to disk; registered as `/save [path]`.
 pub mod save;
 
+/// `internal:changelog` plugin: streams CHANGELOG.md and renders it
+/// via tui-markdown in a dedicated `/changelog` screen. Closes #68.
+pub mod changelog;
+
 /// Self-update plugin: version check, update banner, and `/update` slash.
 /// v0.11.0 PR 1 ships only the plugin shell + install-method detection;
 /// later PRs add the network check, banner slot, and apply path.
