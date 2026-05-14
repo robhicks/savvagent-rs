@@ -123,6 +123,14 @@ fn sanitize_tool_name(name: &str) -> String {
 
 fn render_affordances(out: &mut String, tools: &[ToolDef], bash_available: bool) {
     if tools.is_empty() {
+        // Invariant: bash_available implies a wired `tool-bash` endpoint,
+        // which would appear in `tools.defs`. So an empty `tools` slice
+        // must also mean `!bash_available`. Catch a future caller
+        // breaking this in dev/test builds at zero release cost.
+        debug_assert!(
+            !bash_available,
+            "render_affordances: bash_available=true but tools is empty",
+        );
         out.push_str(AFFORDANCES_EMPTY);
         return;
     }
