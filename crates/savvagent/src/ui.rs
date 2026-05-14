@@ -62,38 +62,12 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
     let idx_guard = idx.read().await;
     let router = SlotRouter::new(&idx_guard, &reg_guard);
 
-    // Footer budgets: left + center share half the row, right gets the
-    // other half so the working_dir/version segment never clips its tail.
-    let footer_cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(50),
-        ])
-        .split(Rect::new(area.x, area.y, area.width, 1));
-
-    let banner = router
-        .render(
-            "home.banner",
-            rect_to_region(Rect::new(area.x, area.y, area.width, 1)),
-        )
-        .await;
-    let tips = router
-        .render(
-            "home.tips",
-            rect_to_region(Rect::new(area.x, area.y, area.width, 1)),
-        )
-        .await;
-    let footer_left = router
-        .render("home.footer.left", rect_to_region(footer_cols[0]))
-        .await;
-    let footer_center = router
-        .render("home.footer.center", rect_to_region(footer_cols[1]))
-        .await;
-    let footer_right = router
-        .render("home.footer.right", rect_to_region(footer_cols[2]))
-        .await;
+    let full_row = rect_to_region(Rect::new(area.x, area.y, area.width, 1));
+    let banner = router.render("home.banner", full_row).await;
+    let tips = router.render("home.tips", full_row).await;
+    let footer_left = router.render("home.footer.left", full_row).await;
+    let footer_center = router.render("home.footer.center", full_row).await;
+    let footer_right = router.render("home.footer.right", full_row).await;
 
     HomeFrameData {
         banner,
@@ -212,51 +186,41 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
 
     frame.render_widget(&textarea, chunks[4]);
 
-    // Footer row — three horizontal segments from plugin slots.
-    let footer_cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(50),
-        ])
-        .split(chunks[5]);
-
-    let footer_left_lines: Vec<Line<'static>> = frame_data
-        .footer_left
-        .iter()
-        .cloned()
-        .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
-        .collect();
-    frame.render_widget(
-        Paragraph::new(footer_left_lines).style(palette.base_style()),
-        footer_cols[0],
+    // Footer row — flow all plugin slot contributions left-to-right on a
+    // single full-width line, joined with ` · ` separators between
+    // non-empty slot groups. Each slot still keeps its own internal
+    // separators, so the result reads like:
+    //   provider · turn-state · cwd · ~N ctx · $0.00 · vX.Y.Z
+    let separator = savvagent_plugin::StyledSpan {
+        text: " · ".into(),
+        fg: Some(savvagent_plugin::ThemeColor::Muted),
+        bg: None,
+        modifiers: savvagent_plugin::TextMods::default(),
+    };
+    let mut footer_spans: Vec<savvagent_plugin::StyledSpan> = Vec::new();
+    for group in [
+        &frame_data.footer_left,
+        &frame_data.footer_center,
+        &frame_data.footer_right,
+    ] {
+        let Some(first) = group.first() else { continue };
+        if first.spans.is_empty() {
+            continue;
+        }
+        if !footer_spans.is_empty() {
+            footer_spans.push(separator.clone());
+        }
+        footer_spans.extend(first.spans.iter().cloned());
+    }
+    let footer_line = crate::plugin::convert::styled_line_to_ratatui(
+        savvagent_plugin::StyledLine {
+            spans: footer_spans,
+        },
+        &palette,
     );
-
-    let footer_center_lines: Vec<Line<'static>> = frame_data
-        .footer_center
-        .iter()
-        .cloned()
-        .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
-        .collect();
     frame.render_widget(
-        Paragraph::new(footer_center_lines)
-            .style(palette.base_style())
-            .centered(),
-        footer_cols[1],
-    );
-
-    let footer_right_lines: Vec<Line<'static>> = frame_data
-        .footer_right
-        .iter()
-        .cloned()
-        .map(|l| crate::plugin::convert::styled_line_to_ratatui(l, &palette))
-        .collect();
-    frame.render_widget(
-        Paragraph::new(footer_right_lines)
-            .style(palette.base_style())
-            .right_aligned(),
-        footer_cols[2],
+        Paragraph::new(footer_line).style(palette.base_style()),
+        chunks[5],
     );
 
     if app.is_file_picker_active {
