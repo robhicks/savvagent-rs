@@ -90,6 +90,12 @@ const AFFORDANCES_EMPTY: &str = "\
 No tools are currently connected — answer from conversation context \
 only.";
 
+const SHELL_CAPABILITY: &str = "\
+A shell tool is wired for this session. It runs commands with the \
+user's privileges (subject to sandbox policy). That means `gh`, \
+`curl`, `git`, `rg`, package managers, and any other CLI the user \
+has installed are available to you. Use them.";
+
 /// Sanitize a tool name for inclusion in the system prompt. MCP does
 /// not enforce a charset on tool names, so a third-party tool server
 /// could publish a name with newlines or markdown control characters
@@ -115,7 +121,7 @@ fn sanitize_tool_name(name: &str) -> String {
         .collect()
 }
 
-fn render_affordances(out: &mut String, tools: &[ToolDef]) {
+fn render_affordances(out: &mut String, tools: &[ToolDef], bash_available: bool) {
     if tools.is_empty() {
         out.push_str(AFFORDANCES_EMPTY);
         return;
@@ -133,19 +139,22 @@ fn render_affordances(out: &mut String, tools: &[ToolDef]) {
     if out.ends_with('\n') {
         out.pop();
     }
+    if bash_available {
+        out.push_str("\n\n");
+        out.push_str(SHELL_CAPABILITY);
+    }
 }
 
 /// Render the default prompt. Pure over `(env, tools)`. The builder
 /// reads `tool.name` only — descriptions are NOT included verbatim.
 #[allow(dead_code)] // Consumed by Task 8 (Host::start wiring); allow removed then.
 pub fn build(env: &PromptEnv<'_>, tools: &[ToolDef]) -> String {
-    let _ = env; // env-driven sections come in later tasks
     let mut out = String::new();
     out.push_str(IDENTITY);
     out.push_str("\n\n");
     out.push_str(BEHAVIOR);
     out.push_str("\n\n");
-    render_affordances(&mut out, tools);
+    render_affordances(&mut out, tools, env.bash_available);
     out.push_str("\n\n");
     out.push_str(CONVENTIONS);
     out
@@ -302,6 +311,31 @@ mod tests {
         assert!(
             s.contains("evil?"),
             "sanitized tool name not found: {s}"
+        );
+    }
+
+    #[test]
+    fn build_with_bash_available_adds_shell_capability_paragraph() {
+        let mut e = env();
+        e.bash_available = true;
+        let s = build(&e, &[tooldef("run", "")]);
+        assert!(
+            s.contains("A shell tool is wired for this session"),
+            "{s}"
+        );
+        assert!(s.contains("`gh`"));
+        assert!(s.contains("`curl`"));
+        assert!(s.contains("`git`"));
+    }
+
+    #[test]
+    fn build_without_bash_available_omits_shell_capability_paragraph() {
+        // Guards against name-match regression: even with a tool named
+        // "run" in the list, no shell paragraph if bash_available=false.
+        let s = build(&env(), &[tooldef("run", "")]);
+        assert!(
+            !s.contains("A shell tool is wired"),
+            "shell paragraph leaked when bash_available=false: {s}"
         );
     }
 }
