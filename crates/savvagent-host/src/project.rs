@@ -291,4 +291,22 @@ mod tests {
             "leading/trailing whitespace lost: {s}"
         );
     }
+
+    #[test]
+    fn parse_savvagent_md_pre_trims_body_before_layering() {
+        // Pins the real parse → layer flow's whitespace behavior: even
+        // though `layered_prompt` itself renders non-empty layers
+        // verbatim, the body comes from `parse_text` which trims
+        // leading/trailing whitespace at parse time. A `SAVVAGENT.md`
+        // that opens with a blank line before a code fence loses that
+        // newline before reaching the layered prompt. Document the
+        // actual boundary here so callers know what to expect.
+        let parsed = parse_text("\n```rust\nfn main() {}\n```\n");
+        assert_eq!(parsed.body.as_deref(), Some("```rust\nfn main() {}\n```"));
+        let s = layered_prompt(None, None, parsed.body.as_deref()).unwrap();
+        assert!(
+            s.contains("```rust\nfn main() {}\n```"),
+            "code fence body should round-trip after parse + layer: {s}"
+        );
+    }
 }

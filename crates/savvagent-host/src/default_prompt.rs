@@ -410,9 +410,12 @@ mod tests {
     #[test]
     fn build_version_line_uses_host_crate_label_for_fallback() {
         let mut e = env();
-        e.app_version = AppVersion::HostCrateFallback("0.14.0");
+        e.app_version = AppVersion::HostCrateFallback("test-host-ver");
         let s = build(&e, &[]);
-        assert!(s.contains("Savvagent host crate version: 0.14.0"), "{s}");
+        assert!(
+            s.contains("Savvagent host crate version: test-host-ver"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -424,7 +427,7 @@ mod tests {
             "linux",
             "x86_64",
             false,
-            AppVersion::App("0.14.0"),
+            AppVersion::App("test-ver"),
         );
         assert!(p.git_present);
     }
@@ -437,7 +440,7 @@ mod tests {
             "linux",
             "x86_64",
             false,
-            AppVersion::App("0.14.0"),
+            AppVersion::App("test-ver"),
         );
         assert!(!p.git_present);
     }
