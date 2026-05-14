@@ -124,6 +124,13 @@ note-updating    = "Baixando v%{latest}…"
 note-update-ok   = "Instalado v%{latest}. Reinicie o savvagent para usá-lo."
 note-update-fail = "A atualização falhou: %{err}"
 
+[changelog]
+slash-summary  = "Mostrar as notas de versão do CHANGELOG.md"
+loading        = "Obtendo o changelog…"
+fetch-failed   = "Não foi possível obter o changelog: %{err}"
+retry-hint     = "Pressione r para tentar novamente, Esc para fechar."
+tips           = "j/k rolar · g/G topo/fim · r tentar novamente · Esc fechar"
+
 [picker.themes]
 filter-label    = "Filtro: %{filter}"
 listing         = "Temas (%{count}): %{names}"
@@ -274,6 +281,7 @@ theme-summary              = "Alterar o tema de cor"
 view-summary               = "Abrir um arquivo no visualizador"
 
 [plugin]
+changelog-description     = "Ver as notas de versão do CHANGELOG.md do projeto"
 clear-description         = "Limpar o registro da conversa"
 connect-description       = "Seletor de provedor"
 edit-file-description     = "Editor de arquivos básico dentro do TUI"

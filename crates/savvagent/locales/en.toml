@@ -128,6 +128,13 @@ note-updating    = "Downloading v%{latest}…"
 note-update-ok   = "Installed v%{latest}. Restart savvagent to use it."
 note-update-fail = "Update failed: %{err}"
 
+[changelog]
+slash-summary  = "Show release notes from CHANGELOG.md"
+loading        = "Fetching changelog…"
+fetch-failed   = "Couldn't fetch changelog: %{err}"
+retry-hint     = "Press r to retry, Esc to close."
+tips           = "j/k scroll · g/G top/bottom · r retry · Esc close"
+
 [picker.themes]
 filter-label    = "Filter: %{filter}"
 listing         = "Themes (%{count}): %{names}"
@@ -278,6 +285,7 @@ theme-summary              = "Switch the color theme"
 view-summary               = "Open a file in the viewer"
 
 [plugin]
+changelog-description     = "View the project's CHANGELOG.md release notes"
 clear-description         = "Clear the conversation log"
 connect-description       = "Provider picker"
 edit-file-description     = "Basic in-TUI file editor"
