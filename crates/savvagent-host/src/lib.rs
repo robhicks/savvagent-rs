@@ -19,6 +19,7 @@
 #![warn(missing_docs)]
 
 mod config;
+mod default_prompt;
 mod logging;
 mod permissions;
 mod project;
@@ -29,6 +30,7 @@ mod session;
 mod tools;
 
 pub use config::{HostConfig, ProviderEndpoint, ToolEndpoint};
+pub use default_prompt::AppVersion;
 pub use permissions::{
     ArgPattern, BashNetworkChoice, BashNetworkPolicy, FrontMatterPermissions, PermissionDecision,
     PermissionPolicy, PermissionsToml, Rule, SerializableRule, Verdict,
