@@ -33,10 +33,18 @@ pub fn request_to_openai(req: &spp::CompleteRequest, stream: bool) -> api::ChatC
     }
 
     let tools: Vec<api::Tool> = req.tools.iter().map(tool_to_openai).collect();
+<<<<<<< Updated upstream
     // Intentionally leave `tool_choice` unset. OpenAI defaults to `"auto"`
     // when `tools` is non-empty, and forcing `"auto"` here would preempt any
     // future SPP-level `tool_choice` controls.
     let tool_choice = None;
+=======
+    let tool_choice = if tools.is_empty() {
+        None
+    } else {
+        Some(serde_json::json!("auto"))
+    };
+>>>>>>> Stashed changes
 
     api::ChatCompletionRequest {
         model: req.model.clone(),
@@ -60,7 +68,14 @@ pub fn request_to_openai(req: &spp::CompleteRequest, stream: bool) -> api::ChatC
 
 /// Translate a non-streaming OpenAI response into an SPP [`spp::CompleteResponse`].
 pub fn response_from_openai(r: api::ChatCompletionResponse) -> spp::CompleteResponse {
+<<<<<<< Updated upstream
     let usage = r.usage.map(usage_from_openai).unwrap_or_default();
+=======
+    let usage = r
+        .usage
+        .map(usage_from_openai)
+        .unwrap_or_default();
+>>>>>>> Stashed changes
 
     let choice = r.choices.into_iter().next();
     let (content, stop_reason) = match choice {
@@ -294,7 +309,13 @@ mod tests {
             model: "gpt-4o".into(),
             messages: vec![spp::Message {
                 role: spp::Role::User,
+<<<<<<< Updated upstream
                 content: vec![spp::ContentBlock::Text { text: "hi".into() }],
+=======
+                content: vec![spp::ContentBlock::Text {
+                    text: "hi".into(),
+                }],
+>>>>>>> Stashed changes
             }],
             system: Some("You are helpful.".into()),
             tools: vec![],
@@ -308,10 +329,14 @@ mod tests {
         };
         let body = request_to_openai(&req, false);
         assert_eq!(body.messages.len(), 2);
+<<<<<<< Updated upstream
         assert!(matches!(
             &body.messages[0],
             api::RequestMessage::System { .. }
         ));
+=======
+        assert!(matches!(&body.messages[0], api::RequestMessage::System { .. }));
+>>>>>>> Stashed changes
     }
 
     #[test]
@@ -359,6 +384,7 @@ mod tests {
         assert_eq!(body.messages.len(), 3);
 
         let asst = &body.messages[1];
+<<<<<<< Updated upstream
         assert!(
             matches!(asst, api::RequestMessage::Assistant { tool_calls, .. } if tool_calls.len() == 1)
         );
@@ -369,6 +395,13 @@ mod tests {
                 tool_call_id,
                 content,
             } => {
+=======
+        assert!(matches!(asst, api::RequestMessage::Assistant { tool_calls, .. } if tool_calls.len() == 1));
+
+        let tool_msg = &body.messages[2];
+        match tool_msg {
+            api::RequestMessage::Tool { tool_call_id, content } => {
+>>>>>>> Stashed changes
                 assert_eq!(tool_call_id, "call_abc");
                 assert_eq!(content, "a\nb");
             }

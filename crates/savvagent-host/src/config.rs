@@ -68,6 +68,11 @@ pub struct HostConfig {
     /// **only the built-in default layer** — the [`Self::system_prompt`]
     /// override and the parsed `SAVVAGENT.md` body still compose. See
     /// [`Self::with_default_prompt_disabled`].
+    ///
+    /// **Note for embedders:** existing callers of `HostConfig::new`
+    /// will receive a non-empty system prompt starting in v0.14.0.
+    /// Call [`Self::with_default_prompt_disabled`] to restore the
+    /// prior behavior.
     pub default_prompt_enabled: bool,
 
     /// Embedder-supplied app version, surfaced in the default prompt's
@@ -82,7 +87,9 @@ pub struct HostConfig {
 impl HostConfig {
     /// New config with sensible defaults: 4096 max tokens, 20 iteration cap,
     /// project root = current dir, no static tools, no system-prompt override,
-    /// sandbox loaded from disk (`SandboxConfig::load`).
+    /// sandbox loaded from disk (`SandboxConfig::load`), default system
+    /// prompt enabled (see [`Self::default_prompt_enabled`]), no embedder
+    /// app version (see [`Self::with_app_version`]).
     pub fn new(provider: ProviderEndpoint, model: impl Into<String>) -> Self {
         Self {
             provider,
@@ -205,9 +212,9 @@ mod tests {
     #[test]
     fn with_app_version_accepts_runtime_owned_string() {
         // Embedders that read the version from a config file at runtime
-        // must be able to pass a `String`. The builder takes
-        // `impl Into<String>`, so any of `&str`, `String`, or
-        // `&'static str` work.
+        // must be able to pass a `String` — the builder takes
+        // `impl Into<String>`, which accepts owned values without
+        // requiring a `'static` lifetime.
         let runtime_value: String = format!("{}.{}.{}", 1, 2, 3);
         let c = cfg().with_app_version(runtime_value);
         assert_eq!(c.app_version.as_deref(), Some("1.2.3"));
