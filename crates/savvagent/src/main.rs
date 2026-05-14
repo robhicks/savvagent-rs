@@ -486,18 +486,16 @@ async fn dispatch_slash_command(
             show_tools(app, host_slot).await;
             return;
         }
-        "/model" => {
-            // Typed-arg invocations (`/model <id>`) and the no-host case
-            // still flow through `handle_model_command`'s legacy path:
-            // it validates against `Host::list_models`, rebuilds the
-            // host, and surfaces a useful note when nothing is
-            // connected yet. With no args AND an active host, fall
-            // through to the plugin router so the `internal:model`
-            // plugin can open the picker screen.
-            if !rest.is_empty() || current_host(host_slot).await.is_none() {
-                handle_model_command(app, rest, host_slot, project_root, tool_bins).await;
-                return;
-            }
+        // Typed-arg invocations (`/model <id>`) and the no-host case still
+        // flow through `handle_model_command`'s legacy path: it validates
+        // against `Host::list_models`, rebuilds the host, and surfaces a
+        // useful note when nothing is connected yet. With no args AND an
+        // active host, the guard is false, the arm doesn't match, and
+        // control falls through to the plugin router so the
+        // `internal:model` plugin can open the picker screen.
+        "/model" if !rest.is_empty() || current_host(host_slot).await.is_none() => {
+            handle_model_command(app, rest, host_slot, project_root, tool_bins).await;
+            return;
         }
         "/resume" => {
             handle_resume_command(app, rest, host_slot).await;
