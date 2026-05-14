@@ -968,10 +968,7 @@ mod tests {
 
     #[test]
     fn compose_footer_skips_empty_lines_within_a_group() {
-        let l = vec![
-            StyledLine { spans: vec![] },
-            one_span_line("Anthropic"),
-        ];
+        let l = vec![StyledLine { spans: vec![] }, one_span_line("Anthropic")];
         let c = vec![one_span_line("idle")];
         let empty: Vec<StyledLine> = vec![];
         let out = compose_footer_line([&l, &c, &empty], &sep());
