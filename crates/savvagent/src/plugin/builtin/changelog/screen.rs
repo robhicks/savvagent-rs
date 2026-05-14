@@ -79,9 +79,32 @@ impl Screen for ChangelogScreen {
         "changelog".to_string()
     }
 
-    fn render(&self, _region: Region) -> Vec<StyledLine> {
-        // Filled in by Task 6.
-        vec![]
+    fn render(&self, region: Region) -> Vec<StyledLine> {
+        // try_lock keeps the render hot path non-blocking — if the
+        // spawned fetch task is mid-write, draw an empty frame and the
+        // banner shows on the next.
+        let Ok(guard) = self.state.try_lock() else {
+            return vec![];
+        };
+        match &*guard {
+            ChangelogState::Loading => vec![StyledLine::plain(
+                rust_i18n::t!("changelog.loading").to_string(),
+            )],
+            ChangelogState::Failed { error } => vec![
+                StyledLine::plain(
+                    rust_i18n::t!("changelog.fetch-failed", err = error.clone()).to_string(),
+                ),
+                StyledLine::plain(rust_i18n::t!("changelog.retry-hint").to_string()),
+            ],
+            ChangelogState::Loaded { lines } => {
+                let visible = region.height as usize;
+                if visible == 0 || self.scroll_offset >= lines.len() {
+                    return vec![];
+                }
+                let end = (self.scroll_offset + visible).min(lines.len());
+                lines[self.scroll_offset..end].to_vec()
+            }
+        }
     }
 
     async fn on_key(&mut self, key: KeyEventPortable) -> Result<Vec<Effect>, PluginError> {
@@ -286,5 +309,90 @@ mod tests {
         // No state change.
         assert!(matches!(*s.state.lock().unwrap(), ChangelogState::Loaded { .. }));
         assert_eq!(s.scroll_offset, 3);
+    }
+
+    fn region(width: u16, height: u16) -> Region {
+        Region {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    fn rust_i18n_init() {
+        // Each render branch consults rust-i18n; pin the locale so
+        // string assertions are deterministic.
+        rust_i18n::set_locale("en");
+    }
+
+    #[test]
+    fn render_loading_returns_localized_placeholder() {
+        rust_i18n_init();
+        let s = ChangelogScreen::new(Arc::new(Mutex::new(ChangelogState::Loading)));
+        let lines = s.render(region(80, 24));
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].spans[0].text.to_lowercase().contains("fetch")
+                || lines[0].spans[0].text.to_lowercase().contains("load"),
+            "loading placeholder must mention fetching/loading: {:?}",
+            lines[0].spans[0].text
+        );
+    }
+
+    #[test]
+    fn render_failed_includes_error_and_retry_hint() {
+        rust_i18n_init();
+        let s = ChangelogScreen::new(Arc::new(Mutex::new(ChangelogState::Failed {
+            error: "boom".into(),
+        })));
+        let lines = s.render(region(80, 24));
+        let combined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(combined.contains("boom"), "got: {combined}");
+        assert!(
+            combined.to_lowercase().contains("retry") || combined.contains("r "),
+            "expected retry hint: {combined}"
+        );
+    }
+
+    #[test]
+    fn render_loaded_returns_visible_window_starting_at_scroll_offset() {
+        let s = ChangelogScreen::new(Arc::new(Mutex::new(loaded_state(50))));
+        // Default offset = 0, region height = 5.
+        let lines = s.render(region(80, 5));
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].spans[0].text, "line 0");
+        assert_eq!(lines[4].spans[0].text, "line 4");
+    }
+
+    #[test]
+    fn render_loaded_respects_scroll_offset() {
+        let mut s = ChangelogScreen::new(Arc::new(Mutex::new(loaded_state(50))));
+        s.scroll_offset = 10;
+        let lines = s.render(region(80, 3));
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].spans[0].text, "line 10");
+        assert_eq!(lines[2].spans[0].text, "line 12");
+    }
+
+    #[test]
+    fn render_loaded_clamps_scroll_offset_when_past_end() {
+        // scroll_offset bigger than the line count must not blow up;
+        // render returns an empty window rather than panicking.
+        let s = {
+            let mut sc = ChangelogScreen::new(Arc::new(Mutex::new(loaded_state(5))));
+            sc.scroll_offset = 99;
+            sc
+        };
+        let lines = s.render(region(80, 10));
+        assert!(
+            lines.is_empty(),
+            "render must clamp / return empty when scrolled past end, got {} lines",
+            lines.len()
+        );
     }
 }
