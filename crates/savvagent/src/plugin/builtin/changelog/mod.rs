@@ -63,7 +63,11 @@ impl Plugin for ChangelogPlugin {
         }];
         contributions.screens = vec![ScreenSpec {
             id: SCREEN_ID.into(),
-            layout: ScreenLayout::Fullscreen { hide_chrome: false },
+            layout: ScreenLayout::CenteredModal {
+                width_pct: 90,
+                height_pct: 85,
+                title: Some(rust_i18n::t!("changelog.modal-title").to_string()),
+            },
         }];
 
         Manifest {

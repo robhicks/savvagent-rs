@@ -125,6 +125,7 @@ note-update-ok   = "Instalado v%{latest}. Reinicie o savvagent para usá-lo."
 note-update-fail = "A atualização falhou: %{err}"
 
 [changelog]
+modal-title    = "Notas de versão"
 slash-summary  = "Mostrar as notas de versão do CHANGELOG.md"
 loading        = "Obtendo o changelog…"
 fetch-failed   = "Não foi possível obter o changelog: %{err}"

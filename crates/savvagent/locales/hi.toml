@@ -125,6 +125,7 @@ note-update-ok   = "v%{latest} इंस्टॉल किया गया। �
 note-update-fail = "अपडेट विफल: %{err}"
 
 [changelog]
+modal-title    = "रिलीज़ नोट्स"
 slash-summary  = "CHANGELOG.md से रिलीज़ नोट्स दिखाएँ"
 loading        = "changelog ला रहा है…"
 fetch-failed   = "changelog नहीं ला सका: %{err}"
