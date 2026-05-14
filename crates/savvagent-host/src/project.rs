@@ -110,6 +110,53 @@ pub fn system_prompt(project_root: &Path, override_prompt: Option<&str>) -> Opti
     }
 }
 
+/// Stitch up to three named layers (default prompt, embedder override,
+/// `SAVVAGENT.md` body) into one system-prompt string. Each present
+/// layer is wrapped with a Markdown H1 heading and separated by blank
+/// lines. Layers that are `None`, empty after trim, or whitespace-only
+/// after trim are skipped — no heading, no separator emitted for them.
+/// Returns `None` only when every layer collapses to absent.
+///
+/// Non-empty layers are rendered as-is — `trim()` is consulted only
+/// for the emptiness gate. This preserves intentional whitespace in
+/// project guidance (e.g. a `SAVVAGENT.md` opening with a code fence
+/// or indentation).
+///
+/// Ordering is fixed: default → override → body. LLMs weight later
+/// instructions more heavily, so the project body wins on ambiguous
+/// guidance.
+// TODO(Task 8): remove #[allow(dead_code)] once Host::start calls layered_prompt.
+#[allow(dead_code)]
+pub fn layered_prompt(
+    default: Option<&str>,
+    override_prompt: Option<&str>,
+    project_body: Option<&str>,
+) -> Option<String> {
+    let body_heading = format!("Project context (from {PROJECT_CONTEXT_FILE})");
+    let layers: [(&str, Option<&str>); 3] = [
+        ("Savvagent default prompt", default),
+        ("Host override", override_prompt),
+        (body_heading.as_str(), project_body),
+    ];
+
+    let mut sections: Vec<String> = Vec::new();
+    for (heading, layer) in layers.iter() {
+        if let Some(text) = layer {
+            if !text.trim().is_empty() {
+                // Render the original `text`, not the trimmed view —
+                // leading/trailing whitespace may carry markdown
+                // structure (fences, indentation) we must preserve.
+                sections.push(format!("# {heading}\n\n{text}"));
+            }
+        }
+    }
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +255,103 @@ mod tests {
     fn front_matter_only_no_body() {
         let parsed = parse_text("---\npermissions:\n  allow: []\n---\n");
         assert!(parsed.body.is_none());
+    }
+
+    use super::layered_prompt;
+
+    #[test]
+    fn layered_all_three_renders_three_sections() {
+        let s = layered_prompt(Some("DEFAULT"), Some("OVERRIDE"), Some("BODY")).unwrap();
+        assert!(s.contains("# Savvagent default prompt\n\nDEFAULT"));
+        assert!(s.contains("# Host override\n\nOVERRIDE"));
+        assert!(s.contains("# Project context (from SAVVAGENT.md)\n\nBODY"));
+        let i_default = s.find("DEFAULT").unwrap();
+        let i_override = s.find("OVERRIDE").unwrap();
+        let i_body = s.find("BODY").unwrap();
+        assert!(i_default < i_override && i_override < i_body, "{}", s);
+    }
+
+    #[test]
+    fn layered_default_only() {
+        let s = layered_prompt(Some("D"), None, None).unwrap();
+        assert!(s.starts_with("# Savvagent default prompt"));
+        assert!(s.contains("D"));
+        assert!(!s.contains("# Host override"));
+        assert!(!s.contains("# Project context"));
+    }
+
+    #[test]
+    fn layered_override_only() {
+        let s = layered_prompt(None, Some("O"), None).unwrap();
+        assert!(s.starts_with("# Host override"));
+        assert!(s.contains("O"));
+    }
+
+    #[test]
+    fn layered_body_only() {
+        let s = layered_prompt(None, None, Some("B")).unwrap();
+        assert!(s.starts_with("# Project context (from SAVVAGENT.md)"));
+        assert!(s.contains("B"));
+    }
+
+    #[test]
+    fn layered_none_returns_none() {
+        assert!(layered_prompt(None, None, None).is_none());
+    }
+
+    #[test]
+    fn layered_sections_use_h1_headings() {
+        let s = layered_prompt(Some("a"), Some("b"), Some("c")).unwrap();
+        for h in &[
+            "# Savvagent default prompt",
+            "# Host override",
+            "# Project context (from SAVVAGENT.md)",
+        ] {
+            assert!(s.contains(h), "missing heading {h} in:\n{s}");
+        }
+    }
+
+    #[test]
+    fn layered_empty_string_layer_is_skipped() {
+        // Empty strings collapse to absent — same as None.
+        assert_eq!(
+            layered_prompt(Some(""), Some(""), Some("")),
+            layered_prompt(None, None, None),
+        );
+        let s = layered_prompt(Some(""), Some("O"), Some("")).unwrap();
+        assert!(s.starts_with("# Host override"));
+        assert!(!s.contains("# Savvagent default prompt"));
+        assert!(!s.contains("# Project context"));
+    }
+
+    #[test]
+    fn layered_whitespace_only_layer_is_skipped() {
+        let s = layered_prompt(Some("   \n\t  "), Some("O"), Some("\n\n")).unwrap();
+        assert!(s.starts_with("# Host override"));
+        assert!(!s.contains("# Savvagent default prompt"));
+        assert!(!s.contains("# Project context"));
+    }
+
+    #[test]
+    fn layered_all_layers_whitespace_returns_none() {
+        assert!(layered_prompt(Some("   "), Some("\n\n"), Some("\t")).is_none());
+    }
+
+    #[test]
+    fn layered_preserves_code_fences_in_project_body() {
+        // Project guidance often opens with a code fence. Preserve verbatim.
+        let body = "```rust\nfn main() {}\n```";
+        let s = layered_prompt(None, None, Some(body)).unwrap();
+        assert!(s.contains(body), "code fence altered:\n{s}");
+    }
+
+    #[test]
+    fn layered_does_not_strip_leading_or_trailing_whitespace_of_non_empty_content() {
+        // Inner whitespace must survive — trim() is only the emptiness gate.
+        let s = layered_prompt(Some("  hello  "), None, None).unwrap();
+        assert!(
+            s.contains("  hello  "),
+            "leading/trailing whitespace lost: {s}"
+        );
     }
 }
