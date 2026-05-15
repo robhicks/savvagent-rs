@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use savvagent_host::{CostTier, ModelCapabilities, ProviderCapabilities, ProviderRegistration};
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
@@ -48,6 +49,74 @@ impl ProviderOpenAiPlugin {
     #[cfg(test)]
     pub(crate) fn set_active_for_render(&mut self, active: bool) {
         self.active = active;
+    }
+
+    /// Capability metadata for all OpenAI models the plugin supports.
+    pub(crate) fn capabilities() -> ProviderCapabilities {
+        ProviderCapabilities {
+            models: vec![
+                ModelCapabilities {
+                    id: "gpt-4o".into(),
+                    display_name: "GPT-4o".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 128_000,
+                    cost_tier: CostTier::Premium,
+                },
+                ModelCapabilities {
+                    id: "gpt-4o-mini".into(),
+                    display_name: "GPT-4o Mini".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 128_000,
+                    cost_tier: CostTier::Cheap,
+                },
+                ModelCapabilities {
+                    id: "o3".into(),
+                    display_name: "o3".into(),
+                    supports_vision: false,
+                    supports_audio: false,
+                    context_window: 200_000,
+                    cost_tier: CostTier::Premium,
+                },
+                ModelCapabilities {
+                    id: "o4-mini".into(),
+                    display_name: "o4-mini".into(),
+                    supports_vision: false,
+                    supports_audio: false,
+                    context_window: 200_000,
+                    cost_tier: CostTier::Standard,
+                },
+            ],
+            default_model: "gpt-4o-mini".into(),
+        }
+    }
+
+    /// Attempt to build a [`ProviderRegistration`] from the keyring and the
+    /// plugin's static capability metadata. Returns `Ok(None)` when
+    /// credentials are absent.
+    pub(crate) async fn try_build_registration(
+        &self,
+    ) -> Result<Option<ProviderRegistration>, String> {
+        let key = match crate::creds::load(PROVIDER_ID) {
+            Ok(Some(k)) => k,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(format!("keyring read: {e}")),
+        };
+        let provider = provider_openai::OpenAiProvider::builder()
+            .api_key(&key)
+            .build()
+            .map_err(|e| format!("client build: {e}"))?;
+        let client: Arc<dyn ProviderClient + Send + Sync> =
+            Arc::new(InProcessProviderClient::new(Arc::new(provider)));
+        Ok(Some(ProviderRegistration {
+            id: savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                .expect("PROVIDER_ID is a valid provider id"),
+            display_name: DISPLAY_NAME.into(),
+            client,
+            capabilities: Self::capabilities(),
+            aliases: vec![],
+        }))
     }
 
     fn try_connect_from_keyring(&mut self) -> Option<()> {

@@ -13,6 +13,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use savvagent_host::{CostTier, ModelCapabilities, ProviderCapabilities, ProviderRegistration};
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
@@ -86,6 +87,80 @@ impl ProviderAnthropicPlugin {
             Box::new(InProcessProviderClient::new(Arc::new(provider)));
         self.client = Some(client);
         Some(())
+    }
+
+    /// Capability metadata for all Anthropic (Claude) models the plugin
+    /// supports. Matches the model list in [`crate::providers::PROVIDERS`]
+    /// and what the `/model` picker exposes.
+    pub(crate) fn capabilities() -> ProviderCapabilities {
+        ProviderCapabilities {
+            models: vec![
+                ModelCapabilities {
+                    id: "claude-opus-4-7".into(),
+                    display_name: "Claude Opus 4.7".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 200_000,
+                    cost_tier: CostTier::Premium,
+                },
+                ModelCapabilities {
+                    id: "claude-sonnet-4-5".into(),
+                    display_name: "Claude Sonnet 4.5".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 200_000,
+                    cost_tier: CostTier::Standard,
+                },
+                ModelCapabilities {
+                    id: "claude-haiku-4-5".into(),
+                    display_name: "Claude Haiku 4.5".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 200_000,
+                    cost_tier: CostTier::Cheap,
+                },
+                ModelCapabilities {
+                    id: "claude-sonnet-4-6".into(),
+                    display_name: "Claude Sonnet 4.6".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 200_000,
+                    cost_tier: CostTier::Standard,
+                },
+            ],
+            default_model: "claude-haiku-4-5".into(),
+        }
+    }
+
+    /// Attempt to build a [`ProviderRegistration`] from the keyring and the
+    /// plugin's static capability metadata.
+    ///
+    /// Returns `Ok(None)` when credentials are absent — this is not an error;
+    /// the user can run `/connect anthropic` later. Returns `Ok(Some(_))` when
+    /// the client was built successfully. Returns `Err(_)` for hard failures
+    /// (keyring backend error or TLS init failure) that warrant a warning log.
+    pub(crate) async fn try_build_registration(
+        &self,
+    ) -> Result<Option<ProviderRegistration>, String> {
+        let key = match crate::creds::load(PROVIDER_ID) {
+            Ok(Some(k)) => k,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(format!("keyring read: {e}")),
+        };
+        let provider = provider_anthropic::AnthropicProvider::builder()
+            .api_key(&key)
+            .build()
+            .map_err(|e| format!("client build: {e}"))?;
+        let client: Arc<dyn ProviderClient + Send + Sync> =
+            Arc::new(InProcessProviderClient::new(Arc::new(provider)));
+        Ok(Some(ProviderRegistration {
+            id: savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                .expect("PROVIDER_ID is a valid provider id"),
+            display_name: DISPLAY_NAME.into(),
+            client,
+            capabilities: Self::capabilities(),
+            aliases: vec![],
+        }))
     }
 
     /// Test-only helper that pre-installs a stub client without going

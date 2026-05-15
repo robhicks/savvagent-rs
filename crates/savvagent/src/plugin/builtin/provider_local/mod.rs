@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use savvagent_host::{CostTier, ModelCapabilities, ProviderCapabilities, ProviderRegistration};
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
@@ -66,6 +67,53 @@ impl ProviderLocalPlugin {
     #[cfg(test)]
     pub(crate) fn set_active_for_render(&mut self, active: bool) {
         self.active = active;
+    }
+
+    /// Capability metadata for the local (Ollama) provider. The actual
+    /// model list is discovered at runtime from `ollama list`; we expose
+    /// a single representative entry so the picker always has something to
+    /// display before the first turn.
+    pub(crate) fn capabilities() -> ProviderCapabilities {
+        ProviderCapabilities {
+            models: vec![ModelCapabilities {
+                id: "llama3.2".into(),
+                display_name: "Llama 3.2 (default)".into(),
+                supports_vision: false,
+                supports_audio: false,
+                context_window: 128_000,
+                cost_tier: CostTier::Free,
+            }],
+            default_model: "llama3.2".into(),
+        }
+    }
+
+    /// Attempt to build a [`ProviderRegistration`] from the local Ollama
+    /// endpoint. Unlike the cloud providers, no keyring lookup is needed;
+    /// the call always tries to build a client. Returns `Ok(None)` when the
+    /// builder fails (Ollama not running) — not an error, the user can start
+    /// `ollama serve` and run `/connect local` later.
+    pub(crate) async fn try_build_registration(
+        &self,
+    ) -> Result<Option<ProviderRegistration>, String> {
+        let provider = match provider_local::OllamaProvider::builder().build() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "ollama provider build failed at startup");
+                // Treat a failed build as "not available" rather than a hard
+                // error — Ollama might simply not be running yet.
+                return Ok(None);
+            }
+        };
+        let client: Arc<dyn ProviderClient + Send + Sync> =
+            Arc::new(InProcessProviderClient::new(Arc::new(provider)));
+        Ok(Some(ProviderRegistration {
+            id: savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                .expect("PROVIDER_ID is a valid provider id"),
+            display_name: DISPLAY_NAME.into(),
+            client,
+            capabilities: Self::capabilities(),
+            aliases: vec![],
+        }))
     }
 
     /// Try to construct an in-process Ollama client. Returns `Some(())` on

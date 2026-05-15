@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use savvagent_host::{CostTier, ModelCapabilities, ProviderCapabilities, ProviderRegistration};
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
@@ -48,6 +49,66 @@ impl ProviderGeminiPlugin {
             client: Some(client),
             active: false,
         }
+    }
+
+    /// Capability metadata for all Gemini models the plugin supports.
+    pub(crate) fn capabilities() -> ProviderCapabilities {
+        ProviderCapabilities {
+            models: vec![
+                ModelCapabilities {
+                    id: "gemini-2.5-pro".into(),
+                    display_name: "Gemini 2.5 Pro".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 1_000_000,
+                    cost_tier: CostTier::Premium,
+                },
+                ModelCapabilities {
+                    id: "gemini-2.5-flash".into(),
+                    display_name: "Gemini 2.5 Flash".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 1_000_000,
+                    cost_tier: CostTier::Cheap,
+                },
+                ModelCapabilities {
+                    id: "gemini-2.0-flash".into(),
+                    display_name: "Gemini 2.0 Flash".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 1_000_000,
+                    cost_tier: CostTier::Cheap,
+                },
+            ],
+            default_model: "gemini-2.5-flash".into(),
+        }
+    }
+
+    /// Attempt to build a [`ProviderRegistration`] from the keyring and the
+    /// plugin's static capability metadata. Returns `Ok(None)` when
+    /// credentials are absent.
+    pub(crate) async fn try_build_registration(
+        &self,
+    ) -> Result<Option<ProviderRegistration>, String> {
+        let key = match crate::creds::load(PROVIDER_ID) {
+            Ok(Some(k)) => k,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(format!("keyring read: {e}")),
+        };
+        let provider = provider_gemini::GeminiProvider::builder()
+            .api_key(&key)
+            .build()
+            .map_err(|e| format!("client build: {e}"))?;
+        let client: Arc<dyn ProviderClient + Send + Sync> =
+            Arc::new(InProcessProviderClient::new(Arc::new(provider)));
+        Ok(Some(ProviderRegistration {
+            id: savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                .expect("PROVIDER_ID is a valid provider id"),
+            display_name: DISPLAY_NAME.into(),
+            client,
+            capabilities: Self::capabilities(),
+            aliases: vec![],
+        }))
     }
 
     fn try_connect_from_keyring(&mut self) -> Option<()> {

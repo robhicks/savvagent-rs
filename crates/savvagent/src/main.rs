@@ -57,8 +57,9 @@ use app::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
 use savvagent_host::{
-    BashNetworkChoice, Host, HostConfig, PermissionDecision, ProviderEndpoint, SandboxConfig,
-    SandboxMode, ToolCallStatus, ToolEndpoint, TranscriptError, TurnEvent,
+    BashNetworkChoice, Host, HostConfig, PermissionDecision, ProviderEndpoint,
+    ProviderRegistration, SandboxConfig, SandboxMode, ToolCallStatus, ToolEndpoint,
+    TranscriptError, TurnEvent,
 };
 use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
@@ -118,14 +119,15 @@ async fn main() -> Result<()> {
         grep: locate_bundled_bin("savvagent-tool-grep", "SAVVAGENT_TOOL_GREP_BIN"),
     };
 
-    let initial = bootstrap_host(&project_root, &tool_bins).await;
-    let header_model = initial
-        .as_ref()
-        .map(|(_, model, _)| model.clone())
-        .unwrap_or_else(|| "(disconnected)".to_string());
-    let initial_provider = initial.as_ref().and_then(|(_, _, id)| *id);
+    let config_file =
+        config_file::ConfigFile::load_or_default(&config_file::ConfigFile::default_path());
+    let initial = bootstrap_pool_host(&project_root, &tool_bins, &config_file).await;
+    let (header_model, initial_provider, startup_notes) = match &initial {
+        Some((_, model, id, notes)) => (model.clone(), *id, notes.clone()),
+        None => ("(disconnected)".to_string(), None, Vec::new()),
+    };
 
-    let host_slot: HostSlot = Arc::new(RwLock::new(initial.map(|(h, _, _)| h)));
+    let host_slot: HostSlot = Arc::new(RwLock::new(initial.map(|(h, _, _, _)| h)));
 
     let transcript_dir = transcript_dir();
 
@@ -209,6 +211,10 @@ async fn main() -> Result<()> {
     if !app.connected {
         app.push_note(rust_i18n::t!("notes.not-connected-startup").to_string());
     }
+    // Surface any startup-timeout notes that were collected before App existed.
+    for note in startup_notes {
+        app.push_note(note);
+    }
     if tool_bins.fs.is_none() {
         app.push_note(rust_i18n::t!("errors.tool-fs-not-found").to_string());
     }
@@ -252,49 +258,179 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Try the legacy `SAVVAGENT_PROVIDER_URL` MCP path first, then keyring
-/// auto-connect over the in-process bridge. Returns the host plus the model
-/// and provider id used (so the App's header is right).
-async fn bootstrap_host(
+/// Build the host using the provider pool path, reading startup policy from
+/// `~/.savvagent/config.toml`.
+///
+/// Each provider plugin's `try_build_registration` is wrapped in
+/// `tokio::time::timeout(connect_timeout_ms)`. Timeout and build failures are
+/// warned rather than failing startup — missing providers mean the user runs
+/// `/connect` later.
+///
+/// Returns `(host, initial_model, initial_provider_id, deferred_notes)`.
+/// `deferred_notes` collects timeout warnings that should be shown in the TUI
+/// once `App` exists.
+///
+/// The legacy `SAVVAGENT_PROVIDER_URL` path is still supported: when that env
+/// var is set we skip the pool path entirely and fall back to the rmcp HTTP
+/// transport (the headless debug workflow).
+///
+/// TODO(task-15): add integration test in
+/// `crates/savvagent/tests/startup_policy.rs` that exercises the pool path
+/// via a TempDir + fake keyring + direct call to this function. Deferred
+/// because the headless tests in `savvagent-host` already cover policy
+/// filtering. See the multi-provider-pool Phase 1 plan, Task 15 step 5.
+async fn bootstrap_pool_host(
     project_root: &Path,
     tool_bins: &ToolBins,
-) -> Option<(Arc<Host>, String, Option<&'static str>)> {
+    config_file: &config_file::ConfigFile,
+) -> Option<(Arc<Host>, String, Option<&'static str>, Vec<String>)> {
+    // Legacy MCP-over-HTTP debug path. When this env var is set the host
+    // connects to a remote provider binary instead of using the in-process
+    // pool. No pool, no policy, no timeout wrapping.
     if let Ok(url) = std::env::var("SAVVAGENT_PROVIDER_URL") {
         let model =
             std::env::var("SAVVAGENT_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
         match start_host_remote(url, model.clone(), project_root.to_path_buf(), tool_bins).await {
-            Ok(host) => return Some((host, model, None)),
+            Ok(host) => return Some((host, model, None, Vec::new())),
             Err(e) => {
                 eprintln!("warning: SAVVAGENT_PROVIDER_URL set but connect failed: {e:#}");
             }
         }
     }
 
-    for spec in PROVIDERS {
-        let key = if spec.api_key_required {
-            let Ok(Some(k)) = creds::load(spec.id) else {
-                continue;
-            };
-            k
-        } else {
-            // Keyless provider — attempt auto-connect without a stored key.
-            String::new()
+    use crate::plugin::builtin::{
+        provider_anthropic::ProviderAnthropicPlugin, provider_gemini::ProviderGeminiPlugin,
+        provider_local::ProviderLocalPlugin, provider_openai::ProviderOpenAiPlugin,
+    };
+
+    let timeout_dur = Duration::from_millis(config_file.startup.connect_timeout_ms);
+    let mut providers: Vec<ProviderRegistration> = Vec::new();
+    let mut deferred_notes: Vec<String> = Vec::new();
+
+    // Try each provider plugin in priority order. Timeout and build errors
+    // are non-fatal: the user can `/connect` any provider later.
+    macro_rules! try_provider {
+        ($plugin:expr, $log_name:literal, $spec_id:literal) => {{
+            match tokio::time::timeout(timeout_dur, $plugin.try_build_registration()).await {
+                Ok(Ok(Some(reg))) => {
+                    providers.push(reg);
+                }
+                Ok(Ok(None)) => {
+                    // No credentials stored; user will /connect later.
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(plugin = $log_name, error = %e, "provider build failed at startup");
+                }
+                Err(_elapsed) => {
+                    let ms = config_file.startup.connect_timeout_ms;
+                    tracing::warn!(
+                        plugin = $log_name,
+                        timeout_ms = ms,
+                        "provider auto-connect timed out"
+                    );
+                    deferred_notes.push(rust_i18n::t!(
+                        "notes.startup-timeout",
+                        name = $log_name,
+                        ms = ms.to_string(),
+                        id = $spec_id
+                    ).to_string());
+                }
+            }
+        }};
+    }
+
+    try_provider!(ProviderAnthropicPlugin::new(), "Anthropic", "anthropic");
+    try_provider!(ProviderGeminiPlugin::new(), "Gemini", "gemini");
+    try_provider!(ProviderOpenAiPlugin::new(), "OpenAI", "openai");
+    try_provider!(ProviderLocalPlugin::new(), "Local (Ollama)", "local");
+
+    if providers.is_empty() {
+        // No providers connected — return None so the TUI starts disconnected.
+        return None;
+    }
+
+    // Determine the initial active provider. `Host::start` will connect the
+    // first provider that passes the startup_connect filter; mirror that logic
+    // here to derive the header model + provider-id hint.
+    let startup_policy = config_file.to_startup_policy();
+    let active_reg = {
+        use savvagent_host::StartupConnectPolicy;
+        // Build a predicate that mirrors Host::start's filtering logic so
+        // we can compute the initial model hint without waiting for the host.
+        let allow_set: Option<std::collections::HashSet<_>> = match &startup_policy {
+            StartupConnectPolicy::All => None,
+            StartupConnectPolicy::None => Some(std::collections::HashSet::new()),
+            StartupConnectPolicy::OptIn(allow) | StartupConnectPolicy::LastUsed(allow) => {
+                Some(allow.iter().cloned().collect())
+            }
         };
-        match build_in_process_host(spec, &key, project_root, tool_bins).await {
-            Ok(host) => {
-                // SAVVAGENT_MODEL > persisted models.toml > spec.default_model.
-                // `build_in_process_host` itself reads the same chain via
-                // `resolve_initial_model_for`; we recompute here so the
-                // value advertised in the header matches.
-                let model = resolve_initial_model_for(spec);
-                return Some((host, model, Some(spec.id)));
-            }
-            Err(e) => {
-                eprintln!("warning: in-process bring-up of {} failed: {e:#}", spec.id);
-            }
+        providers
+            .iter()
+            .find(|r| match &allow_set {
+                None => true, // All
+                Some(set) => set.contains(&r.id),
+            })
+            .or_else(|| providers.first())
+    };
+
+    let (initial_model, initial_provider_id) = match active_reg {
+        Some(reg) => {
+            // Use the capabilities default_model, overridden by SAVVAGENT_MODEL
+            // or the persisted models.toml entry for this provider.
+            let base = reg.capabilities.default_model.clone();
+            let model = if let Ok(env_model) = std::env::var("SAVVAGENT_MODEL") {
+                if !env_model.is_empty() {
+                    env_model
+                } else {
+                    base
+                }
+            } else {
+                let pref = models_pref::ModelsPref::load();
+                pref.get(reg.id.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or(base)
+            };
+            // Map the ProviderRegistration id back to a `&'static str` by
+            // looking it up in the legacy PROVIDERS catalog (which already
+            // exists). This is only used for the header display + active_provider_id.
+            let static_id = PROVIDERS
+                .iter()
+                .find(|s| s.id == reg.id.as_str())
+                .map(|s| s.id);
+            (model, static_id)
+        }
+        None => ("(disconnected)".to_string(), None),
+    };
+
+    let mut config = tool_bins.apply(
+        HostConfig::new(
+            // Legacy `provider` field is unused when `providers` is non-empty.
+            // Pass a recognisable placeholder so any accidental log lines say
+            // where they came from.
+            ProviderEndpoint::StreamableHttp {
+                url: "inproc://pool".into(),
+            },
+            initial_model.clone(),
+        )
+        .with_project_root(project_root.to_path_buf())
+        .with_app_version(env!("CARGO_PKG_VERSION")),
+    );
+    config.providers = providers;
+    config.startup_connect = startup_policy;
+    config.connect_timeout_ms = config_file.startup.connect_timeout_ms;
+
+    match Host::start(config).await {
+        Ok(host) => Some((
+            Arc::new(host),
+            initial_model,
+            initial_provider_id,
+            deferred_notes,
+        )),
+        Err(e) => {
+            eprintln!("warning: pool host start failed: {e:#}");
+            None
         }
     }
-    None
 }
 
 /// Build a host whose `ProviderClient` is an [`InProcessProviderClient`],
