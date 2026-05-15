@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod capabilities;
 mod config;
 mod default_prompt;
 mod logging;
@@ -29,6 +30,7 @@ pub mod sensitive_paths;
 mod session;
 mod tools;
 
+pub use capabilities::{CostTier, ModelAlias, ModelCapabilities, ProviderCapabilities};
 pub use config::{HostConfig, ProviderEndpoint, ToolEndpoint};
 pub use default_prompt::AppVersion;
 pub use permissions::{
