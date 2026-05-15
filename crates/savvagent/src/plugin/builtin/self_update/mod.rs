@@ -12,12 +12,14 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
     PluginKind, Region, SlashSpec, SlotSpec, StyledLine, StyledSpan, TextMods, ThemeColor,
 };
+use tokio::time::MissedTickBehavior;
 
 /// Install-method detection (pure helper + [`std::env::current_exe`]
 /// wrapper). Public to the crate so future PRs in this series can wire
@@ -82,6 +84,12 @@ const OPT_OUT_CLI_FLAG: &str = "--no-update-check";
 /// `render_slot` returns an empty Vec when there is no update available
 /// so the row paints as theme background only.
 const BANNER_SLOT_ID: &str = "home.banner";
+
+/// Re-check interval for the periodic loop spawned by `on_event(HostStarting)`.
+/// First tick fires immediately (preserves startup behavior); subsequent
+/// ticks fire every two hours. Tests override this via
+/// [`SelfUpdatePlugin::with_periodic_interval`].
+const PERIODIC_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Inspect the process environment + argv for the opt-out signal. Pure
 /// helper (works on any iterator + env lookup) so unit tests can verify
@@ -149,6 +157,11 @@ pub struct SelfUpdatePlugin {
     /// the stub fetcher's tag to the developer's real `$HOME` cache,
     /// poisoning subsequent launches of the installed binary.
     cache_path_override: Option<PathBuf>,
+    /// Re-check cadence. Defaults to [`PERIODIC_INTERVAL`]; tests
+    /// override via [`SelfUpdatePlugin::with_periodic_interval`] so
+    /// `tokio::time::pause()` + `advance()` can drive multiple ticks
+    /// without burning a real 2-hour wall clock.
+    periodic_interval: Duration,
 }
 
 impl SelfUpdatePlugin {
@@ -180,6 +193,7 @@ impl SelfUpdatePlugin {
             fetcher,
             installer,
             cache_path_override: None,
+            periodic_interval: PERIODIC_INTERVAL,
         }
     }
 
@@ -201,6 +215,16 @@ impl SelfUpdatePlugin {
     #[cfg(test)]
     pub fn with_install_method(mut self, method: InstallMethod) -> Self {
         self.install_method = method;
+        self
+    }
+
+    /// Test-only: override the periodic re-check cadence. Default is
+    /// [`PERIODIC_INTERVAL`] (2 hours); tests pass something tiny like
+    /// `Duration::from_millis(50)` so they can drive multiple ticks
+    /// under `tokio::time::pause()` + `advance()`.
+    #[cfg(test)]
+    pub fn with_periodic_interval(mut self, interval: Duration) -> Self {
+        self.periodic_interval = interval;
         self
     }
 
@@ -326,6 +350,7 @@ impl Plugin for SelfUpdatePlugin {
         let install_method = self.install_method;
         let current_version = env!("CARGO_PKG_VERSION").to_string();
         let cache_path_override = self.cache_path_override.clone();
+        let periodic_interval = self.periodic_interval;
 
         tokio::spawn(async move {
             if matches!(install_method, InstallMethod::Dev) {
@@ -335,75 +360,39 @@ impl Plugin for SelfUpdatePlugin {
                 return;
             }
 
-            // 24h cache: if a fresh entry exists, skip the network. Tests
-            // that exercise this code path pass an explicit override (set
-            // via `with_cache_path_override`) so the production cache file
-            // under the developer's real `$HOME` is never touched by the
-            // suite.
-            //
-            // A cached `latest_tag` strictly older than the running binary
-            // is treated as a cache miss: it implies the user upgraded
-            // out-of-band (cargo install, downloaded tarball, package
-            // manager) since the cache was written, so we have no
-            // authoritative info about what's newer than the current
-            // version and must re-fetch.
             let cache_path = cache_path_override.or_else(cache::cache_path);
-            let cached_fresh = cache_path
-                .as_ref()
-                .and_then(cache::load)
-                .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS))
-                .filter(|e| {
-                    !matches!(
-                        check::compare_versions(&current_version, &e.latest_tag),
-                        check::Comparison::Ahead | check::Comparison::Unparseable
-                    )
-                });
+            let mut interval = tokio::time::interval(periodic_interval);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            let mut is_first_tick = true;
 
-            let result = if let Some(entry) = cached_fresh {
-                tracing::debug!(tag = %entry.latest_tag, "self-update: using cached tag");
-                check::classify_tag(&current_version, &entry.latest_tag)
-            } else {
-                let fresh =
-                    check_for_update(&current_version, install_method, fetcher.as_ref()).await;
-                // Persist any tag we successfully classified so the next
-                // launch within DEFAULT_TTL_SECS skips the network.
-                if let Some(path) = cache_path {
-                    if let Some(tag) = match &fresh {
-                        UpdateState::Available { latest, .. } => Some(format!("v{latest}")),
-                        UpdateState::UpToDate => Some(format!("v{current_version}")),
-                        _ => None,
-                    } {
-                        cache::save(
-                            &path,
-                            &cache::CacheEntry {
-                                schema_version: 1,
-                                checked_at_unix: cache::now_unix(),
-                                latest_tag: tag,
-                            },
-                        );
-                    }
+            loop {
+                interval.tick().await;
+
+                // Snapshot pre-tick state. Skip rules evaluate before the
+                // network call so we can short-circuit cheap cases.
+                let pre_state = match state.lock() {
+                    Ok(g) => g.clone(),
+                    Err(_) => return,
+                };
+                match pre_state {
+                    UpdateState::Disabled => return,
+                    UpdateState::Updated { .. } => return,
+                    UpdateState::Installing { .. } => continue,
+                    _ => {}
                 }
-                fresh
-            };
 
-            // Capture the versions before publishing the check result so
-            // we can fall through into the auto-install path without
-            // re-locking immediately to read them back.
-            let pending_install = if let UpdateState::Available { current, latest } = &result {
-                Some((current.clone(), latest.clone()))
-            } else {
-                None
-            };
-
-            if let Ok(mut guard) = state.lock() {
-                *guard = result;
-            }
-
-            if let Some((current, latest)) = pending_install {
-                // Kicked off automatically — discard the returned effects
-                // because nothing in this background task can push notes;
-                // the banner is the user-visible signal.
-                let _ = run_install(state, installer, current, latest).await;
+                run_check_once(
+                    &state,
+                    &fetcher,
+                    &installer,
+                    install_method,
+                    &current_version,
+                    cache_path.as_deref(),
+                    is_first_tick,
+                    pre_state,
+                )
+                .await;
+                is_first_tick = false;
             }
         });
 
@@ -508,6 +497,119 @@ async fn run_install(
     }
 }
 
+/// One pass of the version-check + maybe-install pipeline. Shared by
+/// the `HostStarting` interval loop (each tick calls this) and the
+/// auto-install path. Stateless aside from the shared `Arc`s and the
+/// cache file — safe to call repeatedly.
+#[allow(clippy::too_many_arguments)]
+async fn run_check_once(
+    state: &Arc<Mutex<UpdateState>>,
+    fetcher: &Arc<dyn ReleasesFetcher>,
+    installer: &Arc<dyn Installer>,
+    install_method: InstallMethod,
+    current_version: &str,
+    cache_path: Option<&std::path::Path>,
+    is_first_tick: bool,
+    pre_state: UpdateState,
+) {
+    // 24h cache: if a fresh entry exists on the first tick, skip the
+    // network. Tests that exercise this code path pass an explicit
+    // override (set via `with_cache_path_override`) so the production
+    // cache file under the developer's real `$HOME` is never touched by
+    // the suite.
+    //
+    // A cached `latest_tag` strictly older than the running binary is
+    // treated as a cache miss: it implies the user upgraded out-of-band
+    // (cargo install, downloaded tarball, package manager) since the
+    // cache was written, so we have no authoritative info about what's
+    // newer than the current version and must re-fetch.
+    //
+    // Subsequent ticks always bypass the cache so the periodic loop
+    // actually contacts GitHub and can detect new releases published
+    // after startup.
+    let cached_fresh = if is_first_tick {
+        cache_path
+            .and_then(cache::load)
+            .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS))
+            .filter(|e| {
+                !matches!(
+                    check::compare_versions(current_version, &e.latest_tag),
+                    check::Comparison::Ahead | check::Comparison::Unparseable
+                )
+            })
+    } else {
+        None
+    };
+
+    let result = if let Some(entry) = cached_fresh {
+        tracing::debug!(tag = %entry.latest_tag, "self-update: using cached tag");
+        check::classify_tag(current_version, &entry.latest_tag)
+    } else {
+        let fresh = check_for_update(current_version, install_method, fetcher.as_ref()).await;
+        if let Some(path) = cache_path {
+            if let Some(tag) = match &fresh {
+                UpdateState::Available { latest, .. } => Some(format!("v{latest}")),
+                UpdateState::UpToDate => Some(format!("v{current_version}")),
+                _ => None,
+            } {
+                cache::save(
+                    path,
+                    &cache::CacheEntry {
+                        schema_version: 1,
+                        checked_at_unix: cache::now_unix(),
+                        latest_tag: tag,
+                    },
+                );
+            }
+        }
+        fresh
+    };
+
+    // Decide what to publish + whether to install based on the pre-tick state.
+    //
+    // Special case: when pre-state is InstallFailed with tag `failed`, the
+    // periodic loop re-runs the check (in case GitHub has published a newer
+    // release) but only installs when the live tag differs from `failed`.
+    // This avoids hammering a known-broken release while still recovering
+    // automatically once a new release lands.
+    let (publish, pending_install) = match (&pre_state, &result) {
+        // Same-tag install failure: keep the failure context, do nothing.
+        (
+            UpdateState::InstallFailed { latest: failed, .. },
+            UpdateState::Available { latest: new, .. },
+        ) if failed == new => (None, None),
+
+        // Live check now says we're up-to-date — clear the InstallFailed banner.
+        (UpdateState::InstallFailed { .. }, UpdateState::UpToDate) => {
+            (Some(UpdateState::UpToDate), None)
+        }
+
+        // Network failure with no new info — preserve the InstallFailed state.
+        (UpdateState::InstallFailed { .. }, UpdateState::CheckFailed) => (None, None),
+
+        // Either pre-state is not InstallFailed, or it is and the live tag
+        // differs. Publish the new classification; install if Available.
+        _ => {
+            let install = if let UpdateState::Available { current, latest } = &result {
+                Some((current.clone(), latest.clone()))
+            } else {
+                None
+            };
+            (Some(result), install)
+        }
+    };
+
+    if let Some(new_state) = publish {
+        if let Ok(mut guard) = state.lock() {
+            *guard = new_state;
+        }
+    }
+
+    if let Some((current, latest)) = pending_install {
+        let _ = run_install(Arc::clone(state), Arc::clone(installer), current, latest).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,6 +626,72 @@ mod tests {
     impl ReleasesFetcher for FixedFetcher {
         async fn latest_tag(&self) -> anyhow::Result<String> {
             Ok(self.0.to_string())
+        }
+    }
+
+    /// In-test releases fetcher that returns a fixed tag and counts
+    /// how many times `latest_tag()` is invoked. Used by tests that
+    /// need to assert the periodic loop is actually running ticks.
+    struct CountingFetcher {
+        tag: &'static str,
+        invocations: AtomicUsize,
+    }
+
+    impl CountingFetcher {
+        fn new(tag: &'static str) -> Self {
+            Self {
+                tag,
+                invocations: AtomicUsize::new(0),
+            }
+        }
+        fn invocation_count(&self) -> usize {
+            self.invocations.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ReleasesFetcher for CountingFetcher {
+        async fn latest_tag(&self) -> anyhow::Result<String> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            Ok(self.tag.to_string())
+        }
+    }
+
+    /// In-test installer that parks `install()` on `release` until the
+    /// test explicitly releases it, and signals `parked` immediately
+    /// after incrementing the invocation count so the test can
+    /// synchronize on "the install has parked" without relying on
+    /// cooperative-scheduling yield depths.
+    struct BlockingStubInstaller {
+        release: Arc<tokio::sync::Notify>,
+        parked: Arc<tokio::sync::Notify>,
+        invocations: AtomicUsize,
+    }
+
+    impl BlockingStubInstaller {
+        fn new(release: Arc<tokio::sync::Notify>, parked: Arc<tokio::sync::Notify>) -> Self {
+            Self {
+                release,
+                parked,
+                invocations: AtomicUsize::new(0),
+            }
+        }
+        fn invocation_count(&self) -> usize {
+            self.invocations.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Installer for BlockingStubInstaller {
+        async fn install(&self, _latest: &Version) -> anyhow::Result<()> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            // Signal the test that we have entered install and are about
+            // to park. Notify::notify_one stores a permit if no waiter is
+            // present, so ordering with the test's notified().await is
+            // safe regardless of which arrives first.
+            self.parked.notify_one();
+            self.release.notified().await;
+            Ok(())
         }
     }
 
@@ -926,14 +1094,15 @@ mod tests {
     }
 
     /// Spin until the plugin's state matches `predicate` or the iteration
-    /// budget is exhausted. Yields between checks so the spawned task
-    /// driven by `on_event` can run on the same runtime.
+    /// budget is exhausted. Uses `sleep(Duration::ZERO)` so each iteration
+    /// drives the tokio timer driver (required now that the spawned task
+    /// awaits `interval.tick()` before calling `run_check_once`).
     async fn wait_for_state(
         plugin: &SelfUpdatePlugin,
         predicate: impl Fn(&UpdateState) -> bool,
     ) -> UpdateState {
         for _ in 0..200 {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::ZERO).await;
             let s = plugin.state();
             if predicate(&s) {
                 return s;
@@ -1107,5 +1276,375 @@ mod tests {
         // Cache must be rewritten with the freshly fetched tag.
         let entry = cache::load(&cache_path).expect("cache must be rewritten on re-fetch");
         assert_eq!(entry.latest_tag, "v99.99.99");
+    }
+
+    /// Advance virtual time and yield enough that the spawned task can
+    /// observe the tick. Pause must already be active via
+    /// `#[tokio::test(start_paused = true)]`.
+    async fn advance_and_yield(by: Duration) {
+        tokio::time::advance(by).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Drive `n` periodic ticks by advancing virtual time `n` times at
+    /// `step` each. Necessary because `MissedTickBehavior::Delay` (set on
+    /// the production interval) collapses a single large advance into
+    /// exactly ONE tick — it skips missed ticks and resumes after now.
+    /// To produce multiple ticks we must advance step-by-step.
+    async fn advance_n_ticks(n: usize, step: Duration) {
+        for _ in 0..n {
+            advance_and_yield(step).await;
+        }
+    }
+
+    /// Spin until the plugin's state matches `predicate`, advancing virtual
+    /// time by `step` between checks. Bounded to 200 iterations.
+    async fn advance_until_state(
+        plugin: &SelfUpdatePlugin,
+        step: Duration,
+        predicate: impl Fn(&UpdateState) -> bool,
+    ) -> UpdateState {
+        for _ in 0..200 {
+            advance_and_yield(step).await;
+            let s = plugin.state();
+            if predicate(&s) {
+                return s;
+            }
+        }
+        panic!(
+            "state predicate never matched; final state: {:?}",
+            plugin.state()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_check_runs_multiple_ticks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        // Tag below CARGO_PKG_VERSION → classification lands at UpToDate
+        // (the "Ahead" branch in compare_versions), keeping the loop alive.
+        let fetcher = Arc::new(CountingFetcher::new("v0.0.1"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        // Force the timer driver to fire the immediate startup tick.
+        advance_and_yield(Duration::ZERO).await;
+        // Drive three periodic ticks (Delay-mode interval requires
+        // advancing one step at a time).
+        advance_n_ticks(3, interval).await;
+
+        assert!(
+            fetcher.invocation_count() >= 3,
+            "expected ≥3 fetch invocations (1 startup + ≥2 periodic), got {}",
+            fetcher.invocation_count()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_check_breaks_after_updated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        advance_until_state(&p, interval, |s| matches!(s, UpdateState::Updated { .. })).await;
+
+        // Loop must have broken; advance well past the next interval and
+        // confirm the fetcher and installer were not re-invoked. Under
+        // MissedTickBehavior::Delay, a single large advance fires AT MOST
+        // ONE tick (it skips missed ticks and resumes after now), so this
+        // tightly bounds any rogue post-Updated tick at exactly 1.
+        advance_and_yield(interval * 5).await;
+        assert_eq!(
+            installer.invocation_count(),
+            1,
+            "installer must run exactly once before the Updated break"
+        );
+        assert_eq!(
+            fetcher.invocation_count(),
+            1,
+            "fetcher must run exactly once before the Updated break"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_check_does_not_start_in_dev() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Dev)
+            .with_periodic_interval(interval)
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        advance_and_yield(interval * 5).await;
+
+        assert_eq!(fetcher.invocation_count(), 0);
+        assert_eq!(installer.invocation_count(), 0);
+        assert_eq!(p.state(), UpdateState::Disabled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_tick_uses_cache_subsequent_tick_bypasses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        // Pre-write a fresh cache entry with the current version as the tag,
+        // so it is a startup cache HIT (not stale-vs-current) and classifies
+        // to UpToDate.
+        let current = env!("CARGO_PKG_VERSION");
+        cache::save(
+            &cache_path,
+            &cache::CacheEntry {
+                schema_version: 1,
+                checked_at_unix: cache::now_unix(),
+                latest_tag: format!("v{current}"),
+            },
+        );
+
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        // Force the timer driver to fire the immediate startup tick.
+        advance_and_yield(Duration::ZERO).await;
+        assert_eq!(
+            fetcher.invocation_count(),
+            0,
+            "first tick must use the on-disk cache when fresh and not stale"
+        );
+
+        // Second tick must bypass the cache and hit the fetcher.
+        advance_and_yield(interval).await;
+        assert!(
+            fetcher.invocation_count() >= 1,
+            "subsequent tick must bypass cache and call the fetcher, got {}",
+            fetcher.invocation_count()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_check_skips_during_concurrent_slash_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        let release = Arc::new(tokio::sync::Notify::new());
+        let parked = Arc::new(tokio::sync::Notify::new());
+        let installer = Arc::new(BlockingStubInstaller::new(
+            Arc::clone(&release),
+            Arc::clone(&parked),
+        ));
+        let fetcher = Arc::new(FixedFetcher("v99.99.99"));
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+        // Pre-seed Available so handle_slash will pick the Install branch
+        // immediately (no need to wait for the loop's first tick to set it).
+        *p.state.lock().unwrap() = UpdateState::Available {
+            current: Version::parse("0.10.0").unwrap(),
+            latest: Version::parse("99.99.99").unwrap(),
+        };
+
+        // STEP A: Start the slash task BEFORE the periodic loop. The slash
+        // helper shares the primary plugin's state + installer via Arc, so
+        // the install it triggers mutates `p.state` directly. helper.handle_slash
+        // calls run_install -> sets state to Installing -> awaits the notify.
+        let shared_state = Arc::clone(&p.state);
+        let shared_installer = Arc::clone(&installer) as Arc<dyn Installer>;
+        let slash_task = tokio::spawn(async move {
+            let mut helper = SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::new(FixedFetcher("v99.99.99")),
+                shared_installer,
+            )
+            .with_install_method(InstallMethod::Installed);
+            helper.state = shared_state;
+            let _ = helper.handle_slash("update", vec![]).await;
+        });
+
+        // Wait for the slash task to enter the installer and signal it
+        // has parked. Explicit synchronization replaces a yield-count
+        // bet on the run_install / handle_slash yield depth.
+        parked.notified().await;
+        assert!(
+            matches!(p.state(), UpdateState::Installing { .. }),
+            "slash task must park at installer with state Installing, got {:?}",
+            p.state()
+        );
+        assert_eq!(installer.invocation_count(), 1);
+
+        // STEP B: Now start the periodic loop. Its first tick must observe
+        // Installing (set by the slash task) and skip.
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+
+        // Drive three periodic ticks. The loop must observe Installing on
+        // every iteration and skip — no second installer invocation.
+        advance_n_ticks(3, interval).await;
+        assert_eq!(
+            installer.invocation_count(),
+            1,
+            "loop must skip while state is Installing; got {} invocations",
+            installer.invocation_count()
+        );
+
+        // Release the notify; the slash task's install completes and the
+        // shared state transitions to Updated.
+        release.notify_one();
+        let _ = slash_task.await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            matches!(p.state(), UpdateState::Updated { .. }),
+            "expected Updated after install completes, got {:?}",
+            p.state()
+        );
+        assert_eq!(installer.invocation_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn install_failed_periodic_skips_install_when_tag_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+        // Pre-seed with the SAME tag the fetcher will return.
+        *p.state.lock().unwrap() = UpdateState::InstallFailed {
+            current: Version::parse("0.10.0").unwrap(),
+            latest: Version::parse("99.99.99").unwrap(),
+            error: "previous failure".into(),
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        advance_n_ticks(3, interval).await;
+
+        assert_eq!(
+            installer.invocation_count(),
+            0,
+            "must not re-attempt install when live tag matches previously failed tag"
+        );
+        assert!(
+            matches!(p.state(), UpdateState::InstallFailed { .. }),
+            "state must remain InstallFailed; got {:?}",
+            p.state()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn install_failed_periodic_installs_when_new_tag_appears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        // Fetcher returns 99.99.99; pre-seed InstallFailed with 99.99.98
+        // so the live tag is genuinely newer than the failed one.
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+        *p.state.lock().unwrap() = UpdateState::InstallFailed {
+            current: Version::parse("0.10.0").unwrap(),
+            latest: Version::parse("99.99.98").unwrap(),
+            error: "previous failure".into(),
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        let final_state =
+            advance_until_state(&p, interval, |s| matches!(s, UpdateState::Updated { .. })).await;
+
+        assert_eq!(installer.invocation_count(), 1);
+        match final_state {
+            UpdateState::Updated { to, .. } => assert_eq!(to.to_string(), "99.99.99"),
+            other => unreachable!("predicate guarantees Updated: {other:?}"),
+        }
     }
 }

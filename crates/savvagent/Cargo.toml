@@ -76,3 +76,4 @@ semver.workspace = true
 [dev-dependencies]
 rmcp.workspace = true
 tempfile = "3"
+tokio = { version = "1.52", features = ["test-util"] }
