@@ -513,6 +513,10 @@ async fn dispatch_slash_command(
             handle_bash_slash_command(app, rest_raw, host_slot, worker_tx).await;
             return;
         }
+        "/disconnect" => {
+            handle_disconnect_command(app, rest, host_slot).await;
+            return;
+        }
         _ => {}
     }
 
@@ -1177,6 +1181,60 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
             );
         }
     }
+}
+
+/// `/disconnect <provider> [--force]` — remove a provider from the pool.
+///
+/// Without `--force`, uses [`DisconnectMode::Drain`]: new turns cannot
+/// acquire this provider, but any in-flight turn is allowed to finish
+/// naturally. With `--force`, uses [`DisconnectMode::Force`]: sends a
+/// cooperative cancel and, if the grace period expires, hard-aborts every
+/// registered in-flight task on that provider.
+///
+/// The actual `remove_provider` call is fire-and-forget via
+/// `tokio::spawn` so the TUI input stays responsive during a long drain.
+async fn handle_disconnect_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
+    let mut tokens = rest.split_whitespace();
+    let Some(provider) = tokens.next() else {
+        app.push_note(rust_i18n::t!("notes.disconnect-needs-provider").to_string());
+        return;
+    };
+    let force = tokens.any(|t| t == "--force");
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note(rust_i18n::t!("notes.disconnect-no-host").to_string());
+        return;
+    };
+    let pid = match savvagent_protocol::ProviderId::new(provider) {
+        Ok(p) => p,
+        Err(_) => {
+            app.push_note(rust_i18n::t!("notes.disconnect-invalid-id", id = provider).to_string());
+            return;
+        }
+    };
+    if !host.is_connected(pid.as_str()).await {
+        app.push_note(rust_i18n::t!("notes.disconnect-not-connected", name = provider).to_string());
+        return;
+    }
+    let mode = if force {
+        savvagent_host::DisconnectMode::Force
+    } else {
+        savvagent_host::DisconnectMode::Drain
+    };
+    let mode_label = if force { "force" } else { "drain" };
+    app.push_note(
+        rust_i18n::t!(
+            "notes.disconnect-starting",
+            name = provider,
+            mode = mode_label
+        )
+        .to_string(),
+    );
+    let host_clone = std::sync::Arc::clone(&host);
+    tokio::spawn(async move {
+        if let Err(e) = host_clone.remove_provider(&pid, mode).await {
+            tracing::warn!(error = %e, "remove_provider failed in /disconnect handler");
+        }
+    });
 }
 
 /// `/bash <cmd>` — run `cmd` through `tool-bash` without round-tripping
