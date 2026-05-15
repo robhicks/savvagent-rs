@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-05-15-issue-78-self-update-periodic-recheck-design.md`
 
-**Branch:** `issue-78-self-update-periodic-recheck` (already created, includes spec + revision commits).
+**Branch:** `issue-78-self-update-periodic-recheck` (already created, includes spec + revision + plan commits).
 
 **Toolchain note:** This crate enables `-D warnings` and `-D clippy::await_holding_lock`. The `dead_code` lint is also a hard error in the binary crate (`feedback_dead_code_in_binary_crate`). All `pub` items added below are consumed by non-test paths or test-only.
 
@@ -18,20 +18,119 @@
 
 ## File Structure
 
-Single file modified plus three doc/config touches:
-
 | Path | Role | Tasks |
 |------|------|-------|
+| `crates/savvagent/src/plugin/builtin/self_update/cache.rs` | Broaden `load` / `save` signatures from `&PathBuf` to `&Path` | 1 |
 | `crates/savvagent/src/plugin/builtin/self_update/mod.rs` | Plugin implementation + tests | 1–6 |
 | `Cargo.toml` (root) | Workspace version bump | 7 |
 | `CHANGELOG.md` | Release notes entry | 8 |
 | `README.md` | Self-update paragraph update | 9 |
 
-All implementation work happens in one source file. The plan progressively grows the loop, adds test doubles, and finally adds the InstallFailed decision logic.
+Implementation work concentrates in `self_update/mod.rs`. The plan progressively grows the loop, adds test doubles, and finally adds the InstallFailed decision logic.
 
 ---
 
-## Task 1: Extract `run_check_once` helper (pure refactor)
+## Task 1: Broaden cache signatures to `&Path`
+
+**Goal:** Make `cache::load` and `cache::save` accept `&Path` so the rest of the plan's helper signatures can use the idiomatic borrow form. No behavior change — `&PathBuf` deref-coerces to `&Path`, so existing callers (including the cache module's own tests) continue to work without edits.
+
+**Files:**
+- Modify: `crates/savvagent/src/plugin/builtin/self_update/cache.rs:11` (add `Path` import)
+- Modify: `crates/savvagent/src/plugin/builtin/self_update/cache.rs:77` (`load` signature)
+- Modify: `crates/savvagent/src/plugin/builtin/self_update/cache.rs:104` (`save` signature)
+- Modify: `crates/savvagent/src/plugin/builtin/self_update/mod.rs:351` (call site uses `.as_ref()` → `.as_deref()`)
+
+- [ ] **Step 1: Confirm baseline tests pass**
+
+Run: `cargo test -p savvagent self_update`
+Expected: all current tests pass.
+
+- [ ] **Step 2: Update `cache.rs` imports**
+
+At `cache.rs:11`, change:
+```rust
+use std::path::PathBuf;
+```
+to:
+```rust
+use std::path::{Path, PathBuf};
+```
+
+`PathBuf` is still needed for the return type of `cache_path()`.
+
+- [ ] **Step 3: Broaden `cache::load`**
+
+At `cache.rs:77`, change:
+```rust
+pub fn load(path: &PathBuf) -> Option<CacheEntry> {
+```
+to:
+```rust
+pub fn load(path: &Path) -> Option<CacheEntry> {
+```
+
+The function body is unchanged.
+
+- [ ] **Step 4: Broaden `cache::save`**
+
+At `cache.rs:104`, change:
+```rust
+pub fn save(path: &PathBuf, entry: &CacheEntry) {
+```
+to:
+```rust
+pub fn save(path: &Path, entry: &CacheEntry) {
+```
+
+The function body is unchanged.
+
+- [ ] **Step 5: Update the call site in `mod.rs`**
+
+At `mod.rs:351`, change `.as_ref()` to `.as_deref()`:
+
+Before:
+```rust
+            let cached_fresh = cache_path
+                .as_ref()
+                .and_then(cache::load)
+```
+
+After:
+```rust
+            let cached_fresh = cache_path
+                .as_deref()
+                .and_then(cache::load)
+```
+
+(`Option<PathBuf>::as_deref()` returns `Option<&Path>`, matching the new `cache::load` signature.)
+
+- [ ] **Step 6: Run tests**
+
+Run: `cargo test -p savvagent self_update`
+Expected: all tests pass — `&PathBuf` arguments in the cache module's tests deref-coerce to `&Path`.
+
+- [ ] **Step 7: Clippy + fmt**
+
+Run: `rustup run stable cargo clippy -p savvagent --all-targets -- -D warnings`
+Run: `rustup run stable cargo fmt --all -- --check`
+Expected: clean.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add crates/savvagent/src/plugin/builtin/self_update/cache.rs \
+        crates/savvagent/src/plugin/builtin/self_update/mod.rs
+git commit -m "refactor(self-update/cache): take &Path instead of &PathBuf
+
+Idiomatic borrow form for the load/save signatures. Existing
+callers' &PathBuf arguments deref-coerce, so no caller changes
+except the single mod.rs call site that switches as_ref() to
+as_deref(). Prepares for the periodic-recheck helper signature."
+```
+
+---
+
+## Task 2: Extract `run_check_once` helper (pure refactor)
 
 **Goal:** Lift the body of the `tokio::spawn` block in `on_event` into a private free function `run_check_once`. No behavior change. All existing tests must pass unchanged.
 
@@ -41,7 +140,7 @@ All implementation work happens in one source file. The plan progressively grows
 - [ ] **Step 1: Confirm baseline tests pass**
 
 Run: `cargo test -p savvagent self_update::tests`
-Expected: all 28 tests in the existing `self_update::tests` module pass.
+Expected: all tests in the existing `self_update::tests` module pass.
 
 - [ ] **Step 2: Add the helper function**
 
@@ -88,8 +187,6 @@ async fn run_check_once(
     } else {
         let fresh =
             check_for_update(current_version, install_method, fetcher.as_ref()).await;
-        // Persist any tag we successfully classified so the next
-        // launch within DEFAULT_TTL_SECS skips the network.
         if let Some(path) = cache_path {
             if let Some(tag) = match &fresh {
                 UpdateState::Available { latest, .. } => Some(format!("v{latest}")),
@@ -125,11 +222,9 @@ async fn run_check_once(
 }
 ```
 
-Note that `cache_path` is now `Option<&Path>` (a borrow), and the helper takes `&Arc<...>` so each tick avoids extra clones unless it actually calls `run_install`.
-
 - [ ] **Step 3: Replace the spawn body to call the helper**
 
-In `on_event`, replace `mod.rs:330-408` (the entire `tokio::spawn(async move { ... });` block) with:
+In `on_event`, replace the `tokio::spawn(async move { ... });` block (currently `mod.rs:330-408`) with:
 
 ```rust
         tokio::spawn(async move {
@@ -156,15 +251,13 @@ In `on_event`, replace `mod.rs:330-408` (the entire `tokio::spawn(async move { .
 - [ ] **Step 4: Run existing tests**
 
 Run: `cargo test -p savvagent self_update::tests`
-Expected: all 28 tests pass. The behavior is identical — `run_check_once` is just the extracted body.
+Expected: all tests pass. The behavior is identical — `run_check_once` is just the extracted body.
 
-- [ ] **Step 5: Run clippy + fmt**
+- [ ] **Step 5: Clippy + fmt**
 
 Run: `rustup run stable cargo clippy -p savvagent --all-targets -- -D warnings`
-Expected: no warnings.
-
 Run: `rustup run stable cargo fmt --all -- --check`
-Expected: no diff.
+Expected: clean.
 
 - [ ] **Step 6: Commit**
 
@@ -173,13 +266,13 @@ git add crates/savvagent/src/plugin/builtin/self_update/mod.rs
 git commit -m "refactor(self-update): extract run_check_once helper
 
 Pure refactor: the body of on_event's spawn becomes a reusable
-free function. No behavior change; existing tests unchanged.
-Prepares for the periodic-recheck loop in #78."
+free function taking Option<&Path> for the cache path (now that
+the cache module accepts &Path). No behavior change."
 ```
 
 ---
 
-## Task 2: Add `periodic_interval` field + single-tick interval scaffolding
+## Task 3: Add `periodic_interval` field + single-tick interval scaffolding
 
 **Goal:** Introduce `periodic_interval: Duration` on `SelfUpdatePlugin`, a test-only setter, and the `tokio::time::interval` construct with `MissedTickBehavior::Delay`. Still only one tick is awaited (no loop yet), so behavior is unchanged.
 
@@ -188,10 +281,12 @@ Prepares for the periodic-recheck loop in #78."
 
 - [ ] **Step 1: Add `Duration` and `MissedTickBehavior` imports**
 
-At `mod.rs:13-14`, the current imports are:
+At `mod.rs:13-16` (the import block), the current imports are:
 ```rust
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
 ```
 
 Add `std::time::Duration` and `tokio::time::MissedTickBehavior`:
@@ -203,8 +298,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::time::MissedTickBehavior;
 ```
-
-(The `async_trait` line already exists at `mod.rs:16`; just add the `tokio::time::MissedTickBehavior` line below it.)
 
 - [ ] **Step 2: Add `PERIODIC_INTERVAL` const**
 
@@ -261,7 +354,7 @@ Immediately after the existing `with_install_method` setter (currently `mod.rs:2
 
 - [ ] **Step 5: Wire the interval into the spawned task (still single-tick)**
 
-Modify the spawned-task body added in Task 1. Replace the body of `tokio::spawn(async move { ... })` (everything inside the spawn closure) with:
+Modify the spawned-task body added in Task 2. Replace the body of `tokio::spawn(async move { ... })` with:
 
 ```rust
         let periodic_interval = self.periodic_interval;
@@ -278,7 +371,7 @@ Modify the spawned-task body added in Task 1. Replace the body of `tokio::spawn(
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
             // First tick resolves immediately, matching today's startup
-            // timing. Subsequent ticks are added in the next task.
+            // timing. The full loop with skip rules is added in Task 4.
             interval.tick().await;
             run_check_once(
                 &state,
@@ -297,7 +390,7 @@ The `let periodic_interval = self.periodic_interval;` line must appear with the 
 - [ ] **Step 6: Run existing tests**
 
 Run: `cargo test -p savvagent self_update::tests`
-Expected: all 28 tests pass. `interval.tick().await` resolves immediately for the first call, so behavior is identical to Task 1.
+Expected: all tests pass. `interval.tick().await` resolves immediately for the first call, so behavior is identical to Task 2.
 
 - [ ] **Step 7: Clippy + fmt**
 
@@ -319,9 +412,9 @@ loop follows. No behavior change for users."
 
 ---
 
-## Task 3: Multi-tick loop + `CountingFetcher` + first three periodic tests
+## Task 4: Multi-tick loop + first-tick cache gating + four tests
 
-**Goal:** Convert the single-tick await into a real loop with the simpler skip rules (`Disabled` break, `Updated` break). Add the `CountingFetcher` test double and three tests that exercise the new loop.
+**Goal:** Convert the single-tick await into a real loop with `Disabled` and `Updated` skip rules AND add the first-tick-only cache read. These two changes ship together because the multi-tick proof (`periodic_check_runs_multiple_ticks`) only works once subsequent ticks bypass the cache — otherwise the first tick poisons every subsequent tick into a cache hit and the fetcher count stalls at 1.
 
 **Files:**
 - Modify: `crates/savvagent/src/plugin/builtin/self_update/mod.rs`
@@ -362,9 +455,9 @@ In the `#[cfg(test)] mod tests` block, immediately after `FixedFetcher` (current
 
 `AtomicUsize` and `Ordering` are already imported in the test module (currently `mod.rs:518`).
 
-- [ ] **Step 2: Write three failing tests**
+- [ ] **Step 2: Write four failing tests**
 
-Add the following tests inside the `#[cfg(test)] mod tests` block, after the existing `host_starting_bypasses_cache_when_current_version_is_ahead_of_cached_tag` test (at the bottom of the module, just before the closing `}` at `mod.rs:1111`):
+Add the following helpers and tests inside the `#[cfg(test)] mod tests` block, after the existing `host_starting_bypasses_cache_when_current_version_is_ahead_of_cached_tag` test (at the bottom of the module, just before the closing `}` at `mod.rs:1111`):
 
 ```rust
     /// Advance virtual time and yield enough that the spawned task can
@@ -374,6 +467,17 @@ Add the following tests inside the `#[cfg(test)] mod tests` block, after the exi
         tokio::time::advance(by).await;
         for _ in 0..16 {
             tokio::task::yield_now().await;
+        }
+    }
+
+    /// Drive `n` periodic ticks by advancing virtual time `n` times at
+    /// `step` each. Necessary because `MissedTickBehavior::Delay` (set on
+    /// the production interval) collapses a single large advance into
+    /// exactly ONE tick — it skips missed ticks and resumes after now.
+    /// To produce multiple ticks we must advance step-by-step.
+    async fn advance_n_ticks(n: usize, step: Duration) {
+        for _ in 0..n {
+            advance_and_yield(step).await;
         }
     }
 
@@ -425,8 +529,9 @@ Add the following tests inside the `#[cfg(test)] mod tests` block, after the exi
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        // Advance past two more intervals.
-        advance_and_yield(interval * 3).await;
+        // Drive three periodic ticks (Delay-mode interval requires
+        // advancing one step at a time).
+        advance_n_ticks(3, interval).await;
 
         assert!(
             fetcher.invocation_count() >= 3,
@@ -502,105 +607,16 @@ Add the following tests inside the `#[cfg(test)] mod tests` block, after the exi
         assert_eq!(installer.invocation_count(), 0);
         assert_eq!(p.state(), UpdateState::Disabled);
     }
-```
 
-- [ ] **Step 3: Run the new tests — expect failure**
-
-Run: `cargo test -p savvagent self_update::tests::periodic_check`
-Expected: `periodic_check_runs_multiple_ticks` FAILS (assertion: fetcher invocations are 1, not ≥3 — only the startup tick ran). The other two pass coincidentally (Updated case ends after 1 tick anyway; Dev short-circuits before the interval is built).
-
-- [ ] **Step 4: Convert single-tick await to multi-tick loop**
-
-In `on_event`'s spawn body (added in Task 2), replace the `interval.tick().await; run_check_once(...).await;` lines with a real loop:
-
-```rust
-            let mut interval = tokio::time::interval(periodic_interval);
-            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-            loop {
-                interval.tick().await;
-
-                // Snapshot pre-tick state. Skip rules evaluate before the
-                // network call so we can short-circuit cheap cases.
-                let pre_state = match state.lock() {
-                    Ok(g) => g.clone(),
-                    Err(_) => return,
-                };
-                match pre_state {
-                    UpdateState::Disabled => return,
-                    UpdateState::Updated { .. } => return,
-                    _ => {}
-                }
-
-                run_check_once(
-                    &state,
-                    &fetcher,
-                    &installer,
-                    install_method,
-                    &current_version,
-                    cache_path.as_deref(),
-                )
-                .await;
-            }
-```
-
-The `let cache_path = cache_path_override.or_else(cache::cache_path);` line stays above the `let mut interval = ...` line.
-
-- [ ] **Step 5: Run the new tests — expect pass**
-
-Run: `cargo test -p savvagent self_update::tests::periodic_check`
-Expected: all three new tests pass.
-
-- [ ] **Step 6: Run the full test suite for this module**
-
-Run: `cargo test -p savvagent self_update::tests`
-Expected: all tests pass (existing 28 + 3 new).
-
-- [ ] **Step 7: Clippy + fmt**
-
-Run: `rustup run stable cargo clippy -p savvagent --all-targets -- -D warnings`
-Run: `rustup run stable cargo fmt --all -- --check`
-Expected: clean.
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add crates/savvagent/src/plugin/builtin/self_update/mod.rs
-git commit -m "feat(self-update): periodic re-check loop with Disabled+Updated breaks
-
-Converts the single-tick await to a tokio::time::interval loop with
-MissedTickBehavior::Delay. Skip rules at the top of each iteration:
-Disabled and Updated both break the loop. Adds CountingFetcher and
-three tests covering multi-tick execution, the Updated break, and the
-Dev install-method short-circuit."
-```
-
----
-
-## Task 4: First-tick reads cache, subsequent ticks bypass
-
-**Goal:** Make `run_check_once` take an `is_first_tick: bool` and only consult the on-disk cache when true. Add the test that proves first-tick cache hits while subsequent ticks hit the network.
-
-**Files:**
-- Modify: `crates/savvagent/src/plugin/builtin/self_update/mod.rs`
-
-- [ ] **Step 1: Write the failing test**
-
-Add inside `#[cfg(test)] mod tests`, after the three tests from Task 3:
-
-```rust
     #[tokio::test(start_paused = true)]
     async fn first_tick_uses_cache_subsequent_tick_bypasses() {
         let tmp = tempfile::tempdir().unwrap();
         let cache_path = tmp.path().join("update-check.json");
         let interval = Duration::from_millis(50);
 
-        // Pre-write a fresh cache entry with a tag below CARGO_PKG_VERSION
-        // so it is a startup cache hit AND classification stays at UpToDate
-        // (compare_versions returns Ahead → classify_tag returns UpToDate).
-        // Wait — Ahead is treated as a cache miss by the existing rule at
-        // mod.rs:355-359. To get a clean cache HIT we need a tag equal to
-        // or newer than CARGO_PKG_VERSION. Use the current version verbatim.
+        // Pre-write a fresh cache entry with the current version as the tag,
+        // so it is a startup cache HIT (not stale-vs-current) and classifies
+        // to UpToDate.
         let current = env!("CARGO_PKG_VERSION");
         cache::save(
             &cache_path,
@@ -627,7 +643,6 @@ Add inside `#[cfg(test)] mod tests`, after the three tests from Task 3:
         };
 
         p.on_event(HostEvent::HostStarting).await.unwrap();
-        // Let the first tick run; cache should be honored, fetcher untouched.
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
@@ -647,14 +662,20 @@ Add inside `#[cfg(test)] mod tests`, after the three tests from Task 3:
     }
 ```
 
-- [ ] **Step 2: Run the test — expect failure**
+- [ ] **Step 3: Run the new tests — expect failures**
 
-Run: `cargo test -p savvagent self_update::tests::first_tick_uses_cache_subsequent_tick_bypasses`
-Expected: FAIL on the second assertion (`fetcher.invocation_count() >= 1`). Why: `run_check_once` currently reads the cache on every call, so the second tick re-reads the still-fresh pre-seeded entry and the fetcher stays at 0. The first assertion (`== 0` after the startup tick) passes — that's the behavior we want to preserve.
+Run: `cargo test -p savvagent self_update::tests::periodic_check`
+Run: `cargo test -p savvagent self_update::tests::first_tick`
 
-- [ ] **Step 3: Add the `is_first_tick` parameter**
+Expected: All four tests fail (or hang — kill the run with Ctrl-C if a test hangs):
+- `periodic_check_runs_multiple_ticks` FAILS: fetcher is called only once at the first tick; subsequent calls to `interval.tick().await` never happen because the spawned task has already exited.
+- `periodic_check_breaks_after_updated` may PASS coincidentally (the spawned task already exits after one tick), but the loop infrastructure is what we want to verify; treat it as a "should still pass when the loop is added" check.
+- `periodic_check_does_not_start_in_dev` PASSES (Dev short-circuit already in place).
+- `first_tick_uses_cache_subsequent_tick_bypasses` FAILS: the second assertion (`>= 1`) fails because the spawned task has exited after the first cached read.
 
-Change the signature of `run_check_once` to accept `is_first_tick`:
+- [ ] **Step 4: Convert single-tick await to multi-tick loop with skip rules and first-tick cache gating**
+
+Update the `run_check_once` signature to accept `is_first_tick`:
 
 ```rust
 async fn run_check_once(
@@ -668,7 +689,7 @@ async fn run_check_once(
 ) {
 ```
 
-Gate the cache read on `is_first_tick`. Replace the `let cached_fresh = cache_path.and_then(cache::load)...` block with:
+Inside `run_check_once`, replace the existing `let cached_fresh = ...` block with one gated on `is_first_tick`:
 
 ```rust
     let cached_fresh = if is_first_tick {
@@ -686,17 +707,21 @@ Gate the cache read on `is_first_tick`. Replace the `let cached_fresh = cache_pa
     };
 ```
 
-The cache *write* path (lower in the function) stays unchanged — every successful classification writes the cache.
+The cache *write* path lower in the function stays unchanged.
 
-- [ ] **Step 4: Wire the flag through the loop**
-
-In the spawn body in `on_event`, add a `let mut is_first_tick = true;` before the `loop {` and update the `run_check_once` call site:
+In `on_event`'s spawn body (from Task 3), replace the single-tick await with a real loop:
 
 ```rust
+            let cache_path = cache_path_override.or_else(cache::cache_path);
+            let mut interval = tokio::time::interval(periodic_interval);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             let mut is_first_tick = true;
+
             loop {
                 interval.tick().await;
 
+                // Snapshot pre-tick state. Skip rules evaluate before the
+                // network call so we can short-circuit cheap cases.
                 let pre_state = match state.lock() {
                     Ok(g) => g.clone(),
                     Err(_) => return,
@@ -721,15 +746,17 @@ In the spawn body in `on_event`, add a `let mut is_first_tick = true;` before th
             }
 ```
 
-- [ ] **Step 5: Run the new test**
+- [ ] **Step 5: Run the new tests — expect pass**
 
-Run: `cargo test -p savvagent self_update::tests::first_tick_uses_cache_subsequent_tick_bypasses`
-Expected: PASS. First tick = 0 invocations (cache hit), second tick = ≥1.
+Run: `cargo test -p savvagent self_update::tests::periodic_check`
+Run: `cargo test -p savvagent self_update::tests::first_tick`
+
+Expected: all four tests pass.
 
 - [ ] **Step 6: Run the full module's tests**
 
 Run: `cargo test -p savvagent self_update::tests`
-Expected: all pass (28 existing + 4 new).
+Expected: all pass (28 existing + 4 new = 32 total).
 
 - [ ] **Step 7: Clippy + fmt**
 
@@ -741,18 +768,24 @@ Expected: clean.
 
 ```bash
 git add crates/savvagent/src/plugin/builtin/self_update/mod.rs
-git commit -m "feat(self-update): first tick reads cache, subsequent ticks bypass
+git commit -m "feat(self-update): multi-tick loop with first-tick cache gating
 
-Adds an is_first_tick flag through run_check_once so the on-disk cache
-is consulted only at startup. Periodic ticks always hit the network.
-All ticks continue to write the cache on successful classification."
+Converts the single-tick await to a tokio::time::interval loop with
+MissedTickBehavior::Delay. First tick reads the on-disk cache to
+preserve startup savings; subsequent ticks bypass the cache. Skip
+rules at the top of each iteration break the loop on Disabled and
+Updated.
+
+Adds CountingFetcher and four tests: multi-tick execution, the
+Updated break, the Dev install-method short-circuit, and the
+first-tick-cache / subsequent-tick-bypass split."
 ```
 
 ---
 
 ## Task 5: `Installing` skip rule + concurrent `/update` test
 
-**Goal:** Add the `Installing` skip rule and prove it works via a test that models a concurrent `/update` invocation parked on a blocking installer.
+**Goal:** Add the `Installing` skip rule and prove it works via a test that models a concurrent `/update` invocation parked on a blocking installer. The slash task must reach `Installing` *before* the periodic loop starts so the loop's first tick deterministically observes the skip case.
 
 **Files:**
 - Modify: `crates/savvagent/src/plugin/builtin/self_update/mod.rs`
@@ -795,7 +828,7 @@ In the `#[cfg(test)] mod tests` block, after `CountingFetcher`, add:
 
 - [ ] **Step 2: Write the failing test**
 
-Add inside the `mod tests` block, after the test added in Task 4:
+Add inside the `mod tests` block, after the four tests from Task 4. Sequencing: start the slash task FIRST (so the slash-driven install enters `BlockingStubInstaller::install` and parks at the `notify`, leaving state at `Installing`), THEN start `on_event(HostStarting)`. The loop's first tick will observe `Installing` from the start.
 
 ```rust
     #[tokio::test(start_paused = true)]
@@ -808,8 +841,6 @@ Add inside the `mod tests` block, after the test added in Task 4:
         let installer = Arc::new(BlockingStubInstaller::new(Arc::clone(&release)));
         let fetcher = Arc::new(FixedFetcher("v99.99.99"));
 
-        // Pre-seed state to Available so handle_slash will call run_install
-        // immediately — no need to wait for the loop's first tick to set it.
         let mut p = {
             let _lock = HOME_LOCK.lock().unwrap();
             rust_i18n::set_locale("en");
@@ -821,21 +852,17 @@ Add inside the `mod tests` block, after the test added in Task 4:
             .with_install_method(InstallMethod::Installed)
             .with_periodic_interval(interval)
         };
+        // Pre-seed Available so handle_slash will pick the Install branch
+        // immediately (no need to wait for the loop's first tick to set it).
         *p.state.lock().unwrap() = UpdateState::Available {
             current: Version::parse("0.10.0").unwrap(),
             latest: Version::parse("99.99.99").unwrap(),
         };
 
-        // Spawn the loop (HostStarting).
-        p.on_event(HostEvent::HostStarting).await.unwrap();
-
-        // On a separate task, drive /update. It parks at the installer's
-        // notify, leaving state at Installing. We cannot await this task
-        // because it blocks until the notify is released.
-        //
-        // handle_slash requires &mut self; create a second plugin instance
-        // that shares the same Arc<Mutex<UpdateState>> + installer so the
-        // state mutation is visible to the loop's plugin.
+        // STEP A: Start the slash task BEFORE the periodic loop. The slash
+        // helper shares the primary plugin's state + installer via Arc, so
+        // the install it triggers mutates `p.state` directly. helper.handle_slash
+        // calls run_install -> sets state to Installing -> awaits the notify.
         let shared_state = Arc::clone(&p.state);
         let shared_installer = Arc::clone(&installer) as Arc<dyn Installer>;
         let slash_task = tokio::spawn(async move {
@@ -848,20 +875,25 @@ Add inside the `mod tests` block, after the test added in Task 4:
             let _ = helper.handle_slash("update", vec![]).await;
         });
 
-        // Yield enough for the slash task to enter run_install and set
-        // state to Installing.
+        // Yield enough for the slash task to enter run_install and park at
+        // the installer's notify.
         for _ in 0..32 {
             tokio::task::yield_now().await;
         }
         assert!(
             matches!(p.state(), UpdateState::Installing { .. }),
-            "expected Installing after slash task enters installer, got {:?}",
+            "slash task must park at installer with state Installing, got {:?}",
             p.state()
         );
+        assert_eq!(installer.invocation_count(), 1);
 
-        // Advance several intervals. The loop's tick must observe Installing
-        // and skip, so no second install starts.
-        advance_and_yield(interval * 3).await;
+        // STEP B: Now start the periodic loop. Its first tick must observe
+        // Installing (set by the slash task) and skip.
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+
+        // Drive three periodic ticks. The loop must observe Installing on
+        // every iteration and skip — no second installer invocation.
+        advance_n_ticks(3, interval).await;
         assert_eq!(
             installer.invocation_count(),
             1,
@@ -888,7 +920,8 @@ Add inside the `mod tests` block, after the test added in Task 4:
 - [ ] **Step 3: Run the test — expect failure**
 
 Run: `cargo test -p savvagent self_update::tests::periodic_check_skips_during_concurrent_slash_install`
-Expected: FAIL. Without the Installing skip, the loop's first tick after the slash task enters Installing will reach `run_check_once`, classify Available, and call `run_install` — which enters `BlockingStubInstaller::install` again and increments the counter. Assertion `installer.invocation_count() == 1` fails (count is 2).
+
+Expected: FAIL. Without the `Installing` skip rule, the loop's first tick falls through to `run_check_once`, classifies `Available`, calls `run_install`, which sets state back to `Installing` (no-op overwrite) and invokes `BlockingStubInstaller::install` a SECOND time — `installer.invocation_count()` becomes 2, failing the `== 1` assertion.
 
 - [ ] **Step 4: Add the Installing skip rule**
 
@@ -926,10 +959,10 @@ git add crates/savvagent/src/plugin/builtin/self_update/mod.rs
 git commit -m "feat(self-update): skip periodic tick while state is Installing
 
 Adds the Installing skip rule and a test that models the real
-concurrency case (concurrent /update on the dispatcher task while
-the spawned interval task ticks). BlockingStubInstaller parks the
-slash-driven install on a Notify so the loop's tick can observe
-Installing and skip."
+concurrency case: the slash-driven install starts FIRST (parking
+at a Notify-backed installer), then the HostStarting loop is
+spawned and its first tick observes Installing → continue.
+BlockingStubInstaller backs the parking behavior."
 ```
 
 ---
@@ -974,7 +1007,7 @@ Add inside `mod tests`, after the test from Task 5:
         };
 
         p.on_event(HostEvent::HostStarting).await.unwrap();
-        advance_and_yield(interval * 3).await;
+        advance_n_ticks(3, interval).await;
 
         assert_eq!(
             installer.invocation_count(),
@@ -1031,13 +1064,11 @@ Add inside `mod tests`, after the test from Task 5:
 - [ ] **Step 2: Run the tests — expect failure**
 
 Run: `cargo test -p savvagent self_update::tests::install_failed_periodic`
-Expected: `install_failed_periodic_skips_install_when_tag_unchanged` FAILS — the current loop body sees pre-state `InstallFailed`, runs the check, classifies the tag as `Available` (because v99.99.99 > CARGO_PKG_VERSION), then calls `run_install` and installs. The `installer.invocation_count() == 0` assertion fails.
+Expected: `install_failed_periodic_skips_install_when_tag_unchanged` FAILS — the current loop body sees pre-state `InstallFailed`, runs the check, classifies `Available`, then calls `run_install` and installs. The `installer.invocation_count() == 0` assertion fails (count is 1).
 
-`install_failed_periodic_installs_when_new_tag_appears` may already pass coincidentally since the current behavior installs whatever Available it sees; that's the case we *want* to install, so it accidentally lines up.
+`install_failed_periodic_installs_when_new_tag_appears` may pass coincidentally with current behavior.
 
-- [ ] **Step 3: Implement the tag-changed decision logic**
-
-The logic belongs inside `run_check_once` (so the loop body stays simple). Update `run_check_once` to accept the pre-state and adjust its post-classification handling:
+- [ ] **Step 3: Add `pre_state` parameter to `run_check_once`**
 
 Change the signature:
 
@@ -1054,16 +1085,16 @@ async fn run_check_once(
 ) {
 ```
 
-Replace the existing tail of the function (the block starting with `let pending_install = if let UpdateState::Available { current, latest } = &result { ... };` and including the state-publish + run_install call) with:
+Replace the existing tail of the function (the block starting with `let pending_install = if let UpdateState::Available { current, latest } = &result { ... };` through the run_install call) with:
 
 ```rust
     // Decide what to publish + whether to install based on the pre-tick state.
     //
     // Special case: when pre-state is InstallFailed with tag `failed`, the
-    // periodic loop re-runs the check (in case GitHub has published a
-    // newer release) but only installs when the live tag differs from
-    // `failed`. This avoids hammering a known-broken release while still
-    // recovering automatically once a new release lands.
+    // periodic loop re-runs the check (in case GitHub has published a newer
+    // release) but only installs when the live tag differs from `failed`.
+    // This avoids hammering a known-broken release while still recovering
+    // automatically once a new release lands.
     let (publish, pending_install) = match (&pre_state, &result) {
         // Same-tag install failure: keep the failure context, do nothing.
         (
@@ -1129,7 +1160,7 @@ Expected: both pass.
 - [ ] **Step 6: Run the full module's tests**
 
 Run: `cargo test -p savvagent self_update::tests`
-Expected: all pass (28 existing + 7 new = 35 total). If the existing test `slash_update_when_install_failed_retries_install` (currently at `mod.rs:846`) fails, double-check the decision logic — it tests `handle_slash`, which calls `run_install` directly without going through `run_check_once`, so it should be unaffected. If it does fail, the regression is in your code; debug before moving on.
+Expected: all pass (28 existing + 7 new = 35 total). If the existing `slash_update_when_install_failed_retries_install` (currently at `mod.rs:846`) fails, the regression is in the new decision logic — `handle_slash` calls `run_install` directly without going through `run_check_once`, so it should be unaffected; debug before moving on.
 
 - [ ] **Step 7: Clippy + fmt**
 
@@ -1159,7 +1190,7 @@ same-tag-skip and new-tag-installs."
 
 - [ ] **Step 1: Edit the workspace version + dependency literals**
 
-Read the current `Cargo.toml` and update these specific lines (verified against grep output 2026-05-15):
+Update these specific lines (verified against grep output 2026-05-15):
 
 - Line 20: `version = "0.14.2"` → `version = "0.14.3"`
 - Line 28: `savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.14.2" }` → `version = "0.14.3"`
@@ -1385,13 +1416,21 @@ Once the release is live, delegate to git-expert:
 ## Self-review notes
 
 **Spec coverage:** Every section of the spec is implemented:
-- "Approach" / `tokio::time::interval` loop → Tasks 2–3
-- "Per-tick skip rules" table → Tasks 3 (Disabled, Updated), 5 (Installing), 6 (InstallFailed transitions)
-- "Cache interaction" (first-tick reads, subsequent bypass, all writes) → Task 4
-- "Interval" + `MissedTickBehavior::Delay` → Task 2
-- "Module changes" (1–5) → Tasks 1, 2, 3
-- "Tests added" 1–8 → Tasks 3, 4, 5, 6 (existing 8 covered by ensuring each task runs the full module suite)
-- "Concurrency notes" → realized in Task 5's spawn-task structure
-- "Versioning, changelog, docs" → Tasks 7, 8, 9
-- "Out of scope" — nothing implemented here (configurable interval, plugin-trait hook, cache-TTL changes, notify-only mode) — confirmed
-- "Ship plan" → Tasks 10–11
+
+- **"Approach"** (interval loop, `MissedTickBehavior::Delay`) → Tasks 3, 4.
+- **"Per-tick skip rules" table:**
+  - `Disabled` / `Updated` breaks → Task 4
+  - `Installing` skip → Task 5
+  - `InstallFailed { latest: failed }` retry-only-on-new-tag → Task 6
+- **"Cache interaction"** (first tick reads, subsequent bypass, all writes) → Task 4 (depends on Task 1's `&Path` broadening for clean signatures).
+- **"Interval"** + `MissedTickBehavior::Delay` → Task 3.
+- **"Module changes"** 1–5 in the spec map to Tasks 2, 3, 4.
+- **"Tests added"** 1–8 in the spec → all delivered: tests 1–3 + 7 in Task 4, test 8 ("existing stay green") verified by every task running the full module suite, test 3 in Task 5, tests 5–6 in Task 6.
+- **"Concurrency notes"** → realized in Task 5's spawn-task structure + the `&Arc<…>` borrows in `run_check_once`.
+- **"Versioning, changelog, docs"** → Tasks 7, 8, 9.
+- **"Out of scope"** items not implemented here: configurable interval, plugin-trait hook, cache-TTL changes, notify-only mode — confirmed.
+- **"Ship plan"** → Tasks 10–11.
+
+**Placeholder scan:** No `TBD`, `TODO`, or "add appropriate X" lines. Every code step contains the complete code. Every command step contains the exact command + expected output.
+
+**Type consistency:** `run_check_once` signature evolves: Task 2 = 6 params, Task 4 adds `is_first_tick: bool`, Task 6 adds `pre_state: UpdateState`. Each task explicitly redeclares the full signature in its step, and updates the single call site accordingly. `CountingFetcher`, `BlockingStubInstaller`, and the `advance_*` helpers are introduced in the task that first uses them and referenced consistently thereafter.
