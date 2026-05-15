@@ -8,7 +8,7 @@
 //! degrade silently to "fetch as usual" — the cache is an optimisation,
 //! never a correctness boundary.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,7 @@ pub fn is_fresh(entry: &CacheEntry, now: u64, ttl_secs: u64) -> bool {
 
 /// Load the cache file at `path`. Returns `None` on missing file,
 /// invalid JSON, schema mismatch, or any IO error.
-pub fn load(path: &PathBuf) -> Option<CacheEntry> {
+pub fn load(path: &Path) -> Option<CacheEntry> {
     let text = std::fs::read_to_string(path).ok()?;
     let entry: CacheEntry = match serde_json::from_str(&text) {
         Ok(e) => e,
@@ -101,7 +101,7 @@ pub fn load(path: &PathBuf) -> Option<CacheEntry> {
 /// Persist `entry` to `path` atomically. Creates the parent directory if
 /// needed. Errors are logged at `debug` and swallowed — the cache is an
 /// optimisation, not a correctness boundary.
-pub fn save(path: &PathBuf, entry: &CacheEntry) {
+pub fn save(path: &Path, entry: &CacheEntry) {
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::debug!(path = %parent.display(), error = %e, "self-update: cache mkdir failed");

@@ -349,7 +349,7 @@ impl Plugin for SelfUpdatePlugin {
             // version and must re-fetch.
             let cache_path = cache_path_override.or_else(cache::cache_path);
             let cached_fresh = cache_path
-                .as_ref()
+                .as_deref()
                 .and_then(cache::load)
                 .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS))
                 .filter(|e| {
