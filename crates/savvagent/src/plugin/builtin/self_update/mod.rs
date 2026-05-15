@@ -389,6 +389,7 @@ impl Plugin for SelfUpdatePlugin {
                     &current_version,
                     cache_path.as_deref(),
                     is_first_tick,
+                    pre_state,
                 )
                 .await;
                 is_first_tick = false;
@@ -500,6 +501,7 @@ async fn run_install(
 /// the `HostStarting` interval loop (each tick calls this) and the
 /// auto-install path. Stateless aside from the shared `Arc`s and the
 /// cache file — safe to call repeatedly.
+#[allow(clippy::too_many_arguments)]
 async fn run_check_once(
     state: &Arc<Mutex<UpdateState>>,
     fetcher: &Arc<dyn ReleasesFetcher>,
@@ -508,6 +510,7 @@ async fn run_check_once(
     current_version: &str,
     cache_path: Option<&std::path::Path>,
     is_first_tick: bool,
+    pre_state: UpdateState,
 ) {
     // 24h cache: if a fresh entry exists on the first tick, skip the
     // network. Tests that exercise this code path pass an explicit
@@ -562,14 +565,44 @@ async fn run_check_once(
         fresh
     };
 
-    let pending_install = if let UpdateState::Available { current, latest } = &result {
-        Some((current.clone(), latest.clone()))
-    } else {
-        None
+    // Decide what to publish + whether to install based on the pre-tick state.
+    //
+    // Special case: when pre-state is InstallFailed with tag `failed`, the
+    // periodic loop re-runs the check (in case GitHub has published a newer
+    // release) but only installs when the live tag differs from `failed`.
+    // This avoids hammering a known-broken release while still recovering
+    // automatically once a new release lands.
+    let (publish, pending_install) = match (&pre_state, &result) {
+        // Same-tag install failure: keep the failure context, do nothing.
+        (
+            UpdateState::InstallFailed { latest: failed, .. },
+            UpdateState::Available { latest: new, .. },
+        ) if failed == new => (None, None),
+
+        // Live check now says we're up-to-date — clear the InstallFailed banner.
+        (UpdateState::InstallFailed { .. }, UpdateState::UpToDate) => {
+            (Some(UpdateState::UpToDate), None)
+        }
+
+        // Network failure with no new info — preserve the InstallFailed state.
+        (UpdateState::InstallFailed { .. }, UpdateState::CheckFailed) => (None, None),
+
+        // Either pre-state is not InstallFailed, or it is and the live tag
+        // differs. Publish the new classification; install if Available.
+        _ => {
+            let install = if let UpdateState::Available { current, latest } = &result {
+                Some((current.clone(), latest.clone()))
+            } else {
+                None
+            };
+            (Some(result), install)
+        }
     };
 
-    if let Ok(mut guard) = state.lock() {
-        *guard = result;
+    if let Some(new_state) = publish {
+        if let Ok(mut guard) = state.lock() {
+            *guard = new_state;
+        }
     }
 
     if let Some((current, latest)) = pending_install {
@@ -1532,5 +1565,86 @@ mod tests {
             p.state()
         );
         assert_eq!(installer.invocation_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn install_failed_periodic_skips_install_when_tag_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+        // Pre-seed with the SAME tag the fetcher will return.
+        *p.state.lock().unwrap() = UpdateState::InstallFailed {
+            current: Version::parse("0.10.0").unwrap(),
+            latest: Version::parse("99.99.99").unwrap(),
+            error: "previous failure".into(),
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        advance_n_ticks(3, interval).await;
+
+        assert_eq!(
+            installer.invocation_count(),
+            0,
+            "must not re-attempt install when live tag matches previously failed tag"
+        );
+        assert!(
+            matches!(p.state(), UpdateState::InstallFailed { .. }),
+            "state must remain InstallFailed; got {:?}",
+            p.state()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn install_failed_periodic_installs_when_new_tag_appears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        // Fetcher returns 99.99.99; pre-seed InstallFailed with 99.99.98
+        // so the live tag is genuinely newer than the failed one.
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+        *p.state.lock().unwrap() = UpdateState::InstallFailed {
+            current: Version::parse("0.10.0").unwrap(),
+            latest: Version::parse("99.99.98").unwrap(),
+            error: "previous failure".into(),
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        let final_state =
+            advance_until_state(&p, interval, |s| matches!(s, UpdateState::Updated { .. })).await;
+
+        assert_eq!(installer.invocation_count(), 1);
+        match final_state {
+            UpdateState::Updated { to, .. } => assert_eq!(to.to_string(), "99.99.99"),
+            other => unreachable!("predicate guarantees Updated: {other:?}"),
+        }
     }
 }
