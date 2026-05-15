@@ -223,6 +223,7 @@ impl SelfUpdatePlugin {
     /// `Duration::from_millis(50)` so they can drive multiple ticks
     /// under `tokio::time::pause()` + `advance()`.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn with_periodic_interval(mut self, interval: Duration) -> Self {
         self.periodic_interval = interval;
         self
@@ -967,10 +968,6 @@ mod tests {
     ) -> SelfUpdatePlugin {
         SelfUpdatePlugin::with_fetcher_and_installer(fetcher, installer)
             .with_cache_path_override(cache_path)
-            // Use a tiny interval so the first tick resolves without
-            // requiring the tokio timer driver to advance a 2-hour wall
-            // clock inside the test runtime.
-            .with_periodic_interval(Duration::from_millis(1))
     }
 
     /// Spin until the plugin's state matches `predicate` or the iteration
