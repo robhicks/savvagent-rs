@@ -624,19 +624,22 @@ mod tests {
         }
     }
 
-    /// In-test installer that parks `install()` on a `Notify` until the
-    /// test explicitly releases it. Counts invocations the same way
-    /// `StubInstaller` does. Used to model the concurrent `/update`
-    /// case where state stays at `Installing` across a tick boundary.
+    /// In-test installer that parks `install()` on `release` until the
+    /// test explicitly releases it, and signals `parked` immediately
+    /// after incrementing the invocation count so the test can
+    /// synchronize on "the install has parked" without relying on
+    /// cooperative-scheduling yield depths.
     struct BlockingStubInstaller {
-        notify: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        parked: Arc<tokio::sync::Notify>,
         invocations: AtomicUsize,
     }
 
     impl BlockingStubInstaller {
-        fn new(notify: Arc<tokio::sync::Notify>) -> Self {
+        fn new(release: Arc<tokio::sync::Notify>, parked: Arc<tokio::sync::Notify>) -> Self {
             Self {
-                notify,
+                release,
+                parked,
                 invocations: AtomicUsize::new(0),
             }
         }
@@ -649,7 +652,12 @@ mod tests {
     impl Installer for BlockingStubInstaller {
         async fn install(&self, _latest: &Version) -> anyhow::Result<()> {
             self.invocations.fetch_add(1, Ordering::SeqCst);
-            self.notify.notified().await;
+            // Signal the test that we have entered install and are about
+            // to park. Notify::notify_one stores a permit if no waiter is
+            // present, so ordering with the test's notified().await is
+            // safe regardless of which arrives first.
+            self.parked.notify_one();
+            self.release.notified().await;
             Ok(())
         }
     }
@@ -1445,7 +1453,11 @@ mod tests {
         let interval = Duration::from_millis(50);
 
         let release = Arc::new(tokio::sync::Notify::new());
-        let installer = Arc::new(BlockingStubInstaller::new(Arc::clone(&release)));
+        let parked = Arc::new(tokio::sync::Notify::new());
+        let installer = Arc::new(BlockingStubInstaller::new(
+            Arc::clone(&release),
+            Arc::clone(&parked),
+        ));
         let fetcher = Arc::new(FixedFetcher("v99.99.99"));
 
         let mut p = {
@@ -1482,11 +1494,10 @@ mod tests {
             let _ = helper.handle_slash("update", vec![]).await;
         });
 
-        // Yield enough for the slash task to enter run_install and park at
-        // the installer's notify.
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
+        // Wait for the slash task to enter the installer and signal it
+        // has parked. Explicit synchronization replaces a yield-count
+        // bet on the run_install / handle_slash yield depth.
+        parked.notified().await;
         assert!(
             matches!(p.state(), UpdateState::Installing { .. }),
             "slash task must park at installer with state Installing, got {:?}",
