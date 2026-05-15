@@ -93,12 +93,14 @@ impl Screen for ConnectPickerScreen {
                 let Some((pid, _)) = self.candidates.get(self.cursor).cloned() else {
                     return Ok(vec![Effect::CloseScreen]);
                 };
+                let name = if key.modifiers.alt {
+                    format!("connect {} --rekey", pid.as_str())
+                } else {
+                    format!("connect {}", pid.as_str())
+                };
                 Ok(vec![Effect::Stack(vec![
                     Effect::CloseScreen,
-                    Effect::RunSlash {
-                        name: format!("connect {}", pid.as_str()),
-                        args: vec![],
-                    },
+                    Effect::RunSlash { name, args: vec![] },
                 ])])
             }
             _ => Ok(vec![]),
@@ -160,6 +162,29 @@ mod tests {
                 assert!(matches!(children[0], Effect::CloseScreen));
                 match &children[1] {
                     Effect::RunSlash { name, .. } => assert_eq!(name, "connect anthropic"),
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn alt_enter_emits_rekey_slash() {
+        let mut s = ConnectPickerScreen::with_candidates(vec![(
+            ProviderId::new("anthropic").unwrap(),
+            "Anthropic".into(),
+        )]);
+        let mut k = key(KeyCodePortable::Enter);
+        k.modifiers.alt = true;
+        let effs = s.on_key(k).await.unwrap();
+        match &effs[0] {
+            Effect::Stack(children) => {
+                assert!(matches!(children[0], Effect::CloseScreen));
+                match &children[1] {
+                    Effect::RunSlash { name, .. } => {
+                        assert_eq!(name, "connect anthropic --rekey");
+                    }
                     _ => panic!(),
                 }
             }

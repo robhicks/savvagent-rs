@@ -173,7 +173,7 @@ tips         = "↑/↓ selecionar · Enter confirmar · Esc cancelar"
 modal-title           = "Conectar a um provedor"
 no-providers          = "Nenhum provedor está habilitado no momento."
 open-plugins-hint     = "Abra /plugins para habilitar um provedor e volte."
-tips                  = "↑/↓ navegar · Enter conectar · Esc cancelar"
+tips                  = "↑/↓ navegar · Enter conectar · Alt-Enter reinserir chave API · Esc cancelar"
 
 [picker.resume]
 modal-title       = "Retomar"

@@ -177,7 +177,7 @@ tips         = "↑/↓ select · Enter confirm · Esc cancel"
 modal-title           = "Connect to a provider"
 no-providers          = "No providers are currently enabled."
 open-plugins-hint     = "Open /plugins to enable a provider, then come back."
-tips                  = "↑/↓ navigate · Enter connect · Esc cancel"
+tips                  = "↑/↓ navigate · Enter connect · Alt-Enter re-enter API key · Esc cancel"
 
 [picker.resume]
 modal-title       = "Resume"
