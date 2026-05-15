@@ -88,7 +88,13 @@ pub enum HostError {
     /// Loop ran past [`HostConfig::max_iterations`] without reaching `end_turn`.
     #[error("tool-use loop exceeded {0} iterations")]
     LoopLimit(u32),
-    /// Tool routing produced a malformed `tool_use` block.
+    /// Tool routing produced a malformed `tool_use` block. No longer
+    /// constructed — kept in the public API so external `match` arms still
+    /// compile. Slated for removal in the next minor (0.15.0) version.
+    #[deprecated(
+        since = "0.14.2",
+        note = "tool_use blocks are now authoritative; this variant is never produced and will be removed in 0.15.0"
+    )]
     #[error("malformed assistant response: {0}")]
     MalformedResponse(String),
 }
@@ -460,14 +466,24 @@ impl Host {
                 }
             }
 
-            // Loop terminates when there are no tool uses, or the model
-            // explicitly ended the turn.
-            if tool_uses.is_empty() || matches!(resp.stop_reason, StopReason::EndTurn) {
-                if !tool_uses.is_empty() {
-                    return Err(HostError::MalformedResponse(format!(
-                        "stop_reason=end_turn but {} tool_use block(s) present",
-                        tool_uses.len()
-                    )));
+            // Tool-use blocks drive continuation. Providers disagree on how
+            // they signal tool use through `stop_reason` (Anthropic emits
+            // `tool_use`; Gemini happily emits `end_turn` alongside a
+            // functionCall part), so the actual content blocks are the only
+            // reliable signal. If any `ToolUse` blocks are present, run them
+            // and loop again, regardless of `stop_reason`.
+            if tool_uses.is_empty() {
+                if !matches!(resp.stop_reason, StopReason::EndTurn) {
+                    // Anomalous terminations (MaxTokens cut-off, Refusal,
+                    // StopSequence, Other) currently collapse into the same
+                    // success path as EndTurn — but they aren't noise: a
+                    // MaxTokens truncation can corrupt the assistant turn
+                    // we are about to commit to state. Surface it as a warn
+                    // so it shows up at default log levels.
+                    tracing::warn!(
+                        stop_reason = ?resp.stop_reason,
+                        "terminating turn with non-end_turn stop_reason and no tool_use blocks"
+                    );
                 }
                 let outcome = TurnOutcome {
                     text: text_buf,
@@ -1147,8 +1163,8 @@ mod policy_tests {
     use async_trait::async_trait;
     use savvagent_mcp::ProviderClient;
     use savvagent_protocol::{
-        CompleteRequest, CompleteResponse, ContentBlock, ProviderError, StopReason, StreamEvent,
-        Usage,
+        CompleteRequest, CompleteResponse, ContentBlock, ProviderError, Role, StopReason,
+        StreamEvent, Usage,
     };
     use serde_json::json;
     use tokio::sync::mpsc;
@@ -1524,6 +1540,232 @@ mod policy_tests {
             "{}",
             outcome.tool_calls[0].result
         );
+    }
+
+    /// Some providers (notably Gemini) emit `stop_reason=end_turn`
+    /// alongside `tool_use` content blocks because their wire format has no
+    /// distinct "tool_use" finish reason. The host must treat tool_use
+    /// blocks as authoritative and dispatch them rather than rejecting the
+    /// response.
+    #[tokio::test]
+    async fn tool_use_blocks_run_even_when_stop_reason_says_end_turn() {
+        struct EndTurnWithToolUseProvider {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ProviderClient for EndTurnWithToolUseProvider {
+            async fn complete(
+                &self,
+                req: CompleteRequest,
+                _events: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let content = if n == 0 {
+                    vec![ContentBlock::ToolUse {
+                        id: "tu_1".into(),
+                        name: "definitely_no_such_tool".into(),
+                        input: json!({"arg": "value"}),
+                    }]
+                } else {
+                    vec![ContentBlock::Text {
+                        text: "all done".into(),
+                    }]
+                };
+                Ok(CompleteResponse {
+                    id: format!("resp-{n}"),
+                    model: req.model,
+                    content,
+                    stop_reason: StopReason::EndTurn,
+                    stop_sequence: None,
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(EndTurnWithToolUseProvider {
+                calls: AtomicUsize::new(0),
+            });
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+        host.add_session_rule(
+            "definitely_no_such_tool",
+            &json!({"arg": "value"}),
+            PermissionDecision::Allow,
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let outcome = host.run_turn_streaming("hi", tx).await.unwrap();
+        while rx.recv().await.is_some() {}
+
+        assert_eq!(
+            outcome.tool_calls.len(),
+            1,
+            "host must dispatch the tool_use block even when stop_reason=end_turn"
+        );
+        assert_eq!(outcome.text, "all done");
+    }
+
+    /// A response that pairs `tool_use` with `StopReason::MaxTokens` still
+    /// runs the tool — the new "content is authoritative" rule applies to
+    /// every non-`EndTurn` stop reason, not just `EndTurn`. This pins the
+    /// behavior so a future refactor can't accidentally restore a
+    /// `stop_reason`-gated short-circuit for `MaxTokens`/`Refusal`/etc.
+    #[tokio::test]
+    async fn tool_use_blocks_run_even_when_stop_reason_is_max_tokens() {
+        struct MaxTokensWithToolUseProvider {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ProviderClient for MaxTokensWithToolUseProvider {
+            async fn complete(
+                &self,
+                req: CompleteRequest,
+                _events: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let (content, stop_reason) = if n == 0 {
+                    (
+                        vec![ContentBlock::ToolUse {
+                            id: "tu_max".into(),
+                            name: "definitely_no_such_tool".into(),
+                            input: json!({}),
+                        }],
+                        StopReason::MaxTokens,
+                    )
+                } else {
+                    (
+                        vec![ContentBlock::Text {
+                            text: "done".into(),
+                        }],
+                        StopReason::EndTurn,
+                    )
+                };
+                Ok(CompleteResponse {
+                    id: format!("resp-{n}"),
+                    model: req.model,
+                    content,
+                    stop_reason,
+                    stop_sequence: None,
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(MaxTokensWithToolUseProvider {
+                calls: AtomicUsize::new(0),
+            });
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+        host.add_session_rule(
+            "definitely_no_such_tool",
+            &json!({}),
+            PermissionDecision::Allow,
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let outcome = host.run_turn_streaming("hi", tx).await.unwrap();
+        while rx.recv().await.is_some() {}
+
+        assert_eq!(outcome.tool_calls.len(), 1);
+        assert_eq!(outcome.text, "done");
+    }
+
+    /// Many real responses (Gemini especially) carry preamble text in the
+    /// same turn as a tool_use ("I'll check that for you" + `functionCall`).
+    /// The host must still dispatch the tool and continue; the intermediate
+    /// turn's text is not exposed via `TurnOutcome` (only the final turn's
+    /// text is), so we assert on the assistant turn the host commits to
+    /// `state.messages`.
+    #[tokio::test]
+    async fn mixed_text_and_tool_use_in_one_response_runs_tool() {
+        struct MixedProvider {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ProviderClient for MixedProvider {
+            async fn complete(
+                &self,
+                req: CompleteRequest,
+                _events: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let content = if n == 0 {
+                    vec![
+                        ContentBlock::Text {
+                            text: "I'll check that.".into(),
+                        },
+                        ContentBlock::ToolUse {
+                            id: "tu_mixed".into(),
+                            name: "definitely_no_such_tool".into(),
+                            input: json!({}),
+                        },
+                    ]
+                } else {
+                    vec![ContentBlock::Text {
+                        text: "final reply".into(),
+                    }]
+                };
+                Ok(CompleteResponse {
+                    id: format!("resp-{n}"),
+                    model: req.model,
+                    content,
+                    stop_reason: StopReason::EndTurn,
+                    stop_sequence: None,
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        let provider: Box<dyn ProviderClient + Send + Sync> = Box::new(MixedProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+        host.add_session_rule(
+            "definitely_no_such_tool",
+            &json!({}),
+            PermissionDecision::Allow,
+        )
+        .await;
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let outcome = host.run_turn_streaming("hi", tx).await.unwrap();
+        while rx.recv().await.is_some() {}
+
+        assert_eq!(outcome.tool_calls.len(), 1);
+        assert_eq!(outcome.text, "final reply");
+
+        // The intermediate assistant turn that mixed text + tool_use must
+        // round-trip into session state verbatim — both blocks preserved.
+        let state = host.state.lock().await;
+        let first_assistant = state
+            .messages
+            .iter()
+            .find(|m| matches!(m.role, Role::Assistant))
+            .expect("session must record the assistant turn");
+        assert_eq!(
+            first_assistant.content.len(),
+            2,
+            "intermediate assistant turn must keep both Text and ToolUse blocks"
+        );
+        assert!(matches!(
+            &first_assistant.content[0],
+            ContentBlock::Text { text } if text == "I'll check that."
+        ));
+        assert!(matches!(
+            &first_assistant.content[1],
+            ContentBlock::ToolUse { name, .. } if name == "definitely_no_such_tool"
+        ));
     }
 
     #[test]

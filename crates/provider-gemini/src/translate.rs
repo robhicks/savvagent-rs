@@ -60,7 +60,7 @@ pub fn response_from_gemini(r: api::GenerateContentResponse) -> spp::CompleteRes
     let candidate = r.candidates.into_iter().next();
     let (content, stop_reason) = match candidate {
         Some(c) => {
-            let blocks = c
+            let blocks: Vec<spp::ContentBlock> = c
                 .content
                 .map(|c| {
                     let mut counter = 0u32;
@@ -70,7 +70,27 @@ pub fn response_from_gemini(r: api::GenerateContentResponse) -> spp::CompleteRes
                         .collect()
                 })
                 .unwrap_or_default();
-            let stop = stop_reason_from_gemini(c.finish_reason.as_deref());
+            // Gemini does not signal tool use in `finishReason` (it stays
+            // "STOP" even when the candidate carries a functionCall part).
+            // Override based on the actual content so the host can drive its
+            // tool-use loop on stop_reason like every other provider. If we
+            // are overriding away from a Refusal/Other signal, warn so the
+            // original isn't silently lost.
+            let mapped = stop_reason_from_gemini(c.finish_reason.as_deref());
+            let has_tool_use = blocks
+                .iter()
+                .any(|b| matches!(b, spp::ContentBlock::ToolUse { .. }));
+            let stop = if has_tool_use {
+                if matches!(mapped, spp::StopReason::Refusal | spp::StopReason::Other) {
+                    tracing::warn!(
+                        original_stop_reason = ?mapped,
+                        "gemini emitted a functionCall alongside a refusal/other finishReason; overriding stop_reason to ToolUse"
+                    );
+                }
+                spp::StopReason::ToolUse
+            } else {
+                mapped
+            };
             (blocks, stop)
         }
         None => {
@@ -471,6 +491,7 @@ mod tests {
         });
         let r: api::GenerateContentResponse = serde_json::from_value(raw).unwrap();
         let resp = response_from_gemini(r);
+        assert_eq!(resp.stop_reason, spp::StopReason::ToolUse);
         match &resp.content[0] {
             spp::ContentBlock::ToolUse { name, input, id } => {
                 assert_eq!(name, "ls");

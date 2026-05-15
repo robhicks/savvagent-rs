@@ -71,6 +71,10 @@ struct Accumulator {
     model: Option<String>,
     usage: Usage,
     stop_reason: Option<spp::StopReason>,
+    /// Gemini reports `finishReason="STOP"` for tool-call turns just like
+    /// plain-text ones, so we track whether any `functionCall` part has been
+    /// observed and override the stop reason to `ToolUse` ourselves.
+    saw_function_call: bool,
     /// Open block state, indexed by SPP block index. `None` slots represent
     /// blocks already closed.
     blocks: Vec<Option<BlockState>>,
@@ -147,6 +151,7 @@ impl Accumulator {
         if let Some(reason) = finish_reason.as_deref() {
             self.stop_reason = Some(stop_reason_from_gemini(Some(reason)));
         }
+        self.coerce_tool_use_stop_reason();
 
         if let Some(u) = chunk.usage_metadata {
             let new_out = u.candidates_token_count.unwrap_or(0);
@@ -178,6 +183,7 @@ impl Accumulator {
     fn consume_part(&mut self, part: api::Part, out: &mut Vec<StreamEvent>) {
         // Function call: arrives as a whole part, never streamed in fragments.
         if let Some(fc) = part.function_call.clone() {
+            self.saw_function_call = true;
             let idx = self.next_block_index();
             let id = synthesize_tool_use_id(&fc.name, self.tool_use_counter);
             self.tool_use_counter += 1;
@@ -369,6 +375,7 @@ impl Accumulator {
         if self.stop_reason.is_none() {
             self.stop_reason = Some(spp::StopReason::EndTurn);
         }
+        self.coerce_tool_use_stop_reason();
         events.push(StreamEvent::MessageStop);
         events
     }
@@ -385,6 +392,29 @@ impl Accumulator {
             stop_sequence: None,
             usage: self.usage,
         })
+    }
+
+    /// Tool-use blocks are authoritative regardless of the upstream
+    /// `finishReason`. Gemini emits `"STOP"` for tool-call turns just like
+    /// plain-text ones, and may even emit `"SAFETY"` /
+    /// `"MALFORMED_FUNCTION_CALL"` alongside a `functionCall` part. Once any
+    /// function_call has been observed in this stream, force the stop
+    /// reason to `ToolUse` — and warn loudly when overriding away from a
+    /// `Refusal`/`Other` so the original signal isn't silently lost.
+    fn coerce_tool_use_stop_reason(&mut self) {
+        if !self.saw_function_call || matches!(self.stop_reason, Some(spp::StopReason::ToolUse)) {
+            return;
+        }
+        if matches!(
+            self.stop_reason,
+            Some(spp::StopReason::Refusal) | Some(spp::StopReason::Other)
+        ) {
+            tracing::warn!(
+                original_stop_reason = ?self.stop_reason,
+                "gemini emitted a functionCall alongside a refusal/other finishReason; overriding stop_reason to ToolUse"
+            );
+        }
+        self.stop_reason = Some(spp::StopReason::ToolUse);
     }
 }
 
@@ -546,7 +576,7 @@ mod tests {
         assert!(has_tool_use_start, "missing tool_use start: {evs:#?}");
         let _ = acc.flush();
         let out = acc.finish().unwrap();
-        assert_eq!(out.stop_reason, spp::StopReason::EndTurn);
+        assert_eq!(out.stop_reason, spp::StopReason::ToolUse);
         match &out.content[0] {
             ContentBlock::ToolUse { name, input, .. } => {
                 assert_eq!(name, "ls");
@@ -554,6 +584,71 @@ mod tests {
             }
             _ => panic!("expected tool_use"),
         }
+    }
+
+    /// Gemini occasionally splits a tool-call turn across chunks: a chunk
+    /// carrying just the `functionCall` part, followed by a chunk that
+    /// carries only `finishReason="STOP"`. The accumulator must still end
+    /// with `stop_reason=ToolUse` — the override has to re-evaluate on every
+    /// chunk, not just the one that flips `saw_function_call`.
+    #[test]
+    fn accumulator_function_call_split_across_chunks_yields_tool_use_stop() {
+        let mut acc = Accumulator::default();
+        let _ = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "ls", "args": {"path": "/tmp"}}}
+                ]},
+                "index": 0
+            }],
+            "responseId": "r_split"
+        })));
+        let _ = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": []},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 3}
+        })));
+        let _ = acc.flush();
+        let out = acc.finish().unwrap();
+        assert_eq!(out.stop_reason, spp::StopReason::ToolUse);
+        match &out.content[0] {
+            ContentBlock::ToolUse { name, .. } => assert_eq!(name, "ls"),
+            _ => panic!("expected tool_use"),
+        }
+    }
+
+    /// The other split-chunk ordering: `finishReason="STOP"` arrives before
+    /// any function_call part. The override must fire when the later chunk
+    /// finally emits the function_call, not just when the finishReason
+    /// chunk is processed.
+    #[test]
+    fn accumulator_stop_before_function_call_still_yields_tool_use() {
+        let mut acc = Accumulator::default();
+        let _ = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"text": "calling tool"}
+                ]},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "responseId": "r_reverse"
+        })));
+        let _ = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "ls", "args": {}}}
+                ]},
+                "index": 0
+            }],
+            "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 3}
+        })));
+        let _ = acc.flush();
+        let out = acc.finish().unwrap();
+        assert_eq!(out.stop_reason, spp::StopReason::ToolUse);
     }
 
     #[test]
