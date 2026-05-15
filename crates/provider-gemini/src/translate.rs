@@ -73,14 +73,23 @@ pub fn response_from_gemini(r: api::GenerateContentResponse) -> spp::CompleteRes
             // Gemini does not signal tool use in `finishReason` (it stays
             // "STOP" even when the candidate carries a functionCall part).
             // Override based on the actual content so the host can drive its
-            // tool-use loop on stop_reason like every other provider.
-            let stop = if blocks
+            // tool-use loop on stop_reason like every other provider. If we
+            // are overriding away from a Refusal/Other signal, warn so the
+            // original isn't silently lost.
+            let mapped = stop_reason_from_gemini(c.finish_reason.as_deref());
+            let has_tool_use = blocks
                 .iter()
-                .any(|b| matches!(b, spp::ContentBlock::ToolUse { .. }))
-            {
+                .any(|b| matches!(b, spp::ContentBlock::ToolUse { .. }));
+            let stop = if has_tool_use {
+                if matches!(mapped, spp::StopReason::Refusal | spp::StopReason::Other) {
+                    tracing::warn!(
+                        original_stop_reason = ?mapped,
+                        "gemini emitted a functionCall alongside a refusal/other finishReason; overriding stop_reason to ToolUse"
+                    );
+                }
                 spp::StopReason::ToolUse
             } else {
-                stop_reason_from_gemini(c.finish_reason.as_deref())
+                mapped
             };
             (blocks, stop)
         }
@@ -482,9 +491,6 @@ mod tests {
         });
         let r: api::GenerateContentResponse = serde_json::from_value(raw).unwrap();
         let resp = response_from_gemini(r);
-        // Gemini emits `finishReason="STOP"` for tool-call turns; the
-        // translator must override that to `ToolUse` so the host runs the
-        // tool-use loop instead of treating the turn as ended.
         assert_eq!(resp.stop_reason, spp::StopReason::ToolUse);
         match &resp.content[0] {
             spp::ContentBlock::ToolUse { name, input, id } => {

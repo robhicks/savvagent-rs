@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
-## v0.14.2 — Gemini tool calls no longer abort with "stop_reason=end_turn but tool_use block(s) present" (2026-05-14)
+## v0.14.2 — Gemini tool calls no longer abort with "stop_reason=end_turn but tool_use block(s) present" (2026-05-15)
 
 ### Fixed
 
@@ -19,22 +19,39 @@ boundary changes and PATCH captures fixes).
   reason and emits `finishReason="STOP"` even when the candidate carries
   a `functionCall` part, but the host's `Host::run_turn_streaming` loop
   treated `stop_reason=EndTurn` alongside `tool_use` content blocks as a
-  hard `HostError::MalformedResponse` and dropped the turn. Two fixes
+  hard `HostError::MalformedResponse` and dropped the turn. Three fixes
   ship together:
   - The Gemini translator (`translate.rs::response_from_gemini`) and
     streaming accumulator (`stream.rs`) now force `StopReason::ToolUse`
     whenever the assistant content carries any `ToolUse` block,
-    regardless of the upstream `finishReason`.
+    regardless of the upstream `finishReason`. The override is applied
+    in every accumulator entry point (`consume_chunk`, `flush`, `finish`)
+    via a new `Accumulator::coerce_tool_use_stop_reason` helper so it
+    survives Gemini's occasional split-chunk streaming order (function
+    call in one chunk, `finishReason="STOP"` in a later chunk). When
+    overriding away from a `Refusal`/`Other` finish reason the provider
+    now `tracing::warn!`s with the original reason so safety / malformed
+    signals aren't silently lost.
   - `Host::run_turn_streaming` now treats the presence of `tool_use`
     blocks as authoritative: when any are present the host runs them
     and continues the tool-use loop regardless of the provider-reported
-    `stop_reason`. The historical Anthropic-shaped `MalformedResponse`
-    check is gone (replaced with a `tracing::debug!` when a turn
-    terminates with a non-`end_turn` stop reason but no tool calls).
-    Defensive against other providers with the same `finishReason`
-    conflation.
+    `stop_reason`. Defensive against other providers with the same
+    `finishReason` conflation.
+  - When a turn terminates with a non-`EndTurn` stop reason and no
+    tool calls (`MaxTokens`, `Refusal`, `StopSequence`, `Other`), the
+    host now `tracing::warn!`s instead of swallowing the anomaly at
+    `debug!`. The clearest hazard is a `MaxTokens` cutoff committing a
+    truncated assistant turn to session state — at least it's loud
+    now. Surfacing this in `TurnOutcome` for the TUI is a separate
+    follow-up.
 
   Closes [#76](https://github.com/robhicks/savvagent-rs/issues/76).
+
+### Deprecated
+
+- `savvagent_host::HostError::MalformedResponse` is no longer
+  constructed. The variant is preserved for the public API surface and
+  marked `#[deprecated]` (slated for removal in 0.15.0).
 
 ## v0.14.1 — self-update cache invalidation on out-of-band upgrade (2026-05-14)
 

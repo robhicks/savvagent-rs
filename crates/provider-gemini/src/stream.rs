@@ -149,13 +149,9 @@ impl Accumulator {
         }
 
         if let Some(reason) = finish_reason.as_deref() {
-            let mapped = stop_reason_from_gemini(Some(reason));
-            self.stop_reason = Some(if self.saw_function_call {
-                spp::StopReason::ToolUse
-            } else {
-                mapped
-            });
+            self.stop_reason = Some(stop_reason_from_gemini(Some(reason)));
         }
+        self.coerce_tool_use_stop_reason();
 
         if let Some(u) = chunk.usage_metadata {
             let new_out = u.candidates_token_count.unwrap_or(0);
@@ -377,12 +373,9 @@ impl Accumulator {
             }
         }
         if self.stop_reason.is_none() {
-            self.stop_reason = Some(if self.saw_function_call {
-                spp::StopReason::ToolUse
-            } else {
-                spp::StopReason::EndTurn
-            });
+            self.stop_reason = Some(spp::StopReason::EndTurn);
         }
+        self.coerce_tool_use_stop_reason();
         events.push(StreamEvent::MessageStop);
         events
     }
@@ -391,19 +384,37 @@ impl Accumulator {
         if !self.started {
             return Err(stream_decode_error("stream produced no chunks"));
         }
-        let default_stop = if self.saw_function_call {
-            spp::StopReason::ToolUse
-        } else {
-            spp::StopReason::EndTurn
-        };
         Ok(spp::CompleteResponse {
             id: self.id.unwrap_or_default(),
             model: self.model.unwrap_or_default(),
             content: self.final_blocks,
-            stop_reason: self.stop_reason.unwrap_or(default_stop),
+            stop_reason: self.stop_reason.unwrap_or(spp::StopReason::EndTurn),
             stop_sequence: None,
             usage: self.usage,
         })
+    }
+
+    /// Tool-use blocks are authoritative regardless of the upstream
+    /// `finishReason`. Gemini emits `"STOP"` for tool-call turns just like
+    /// plain-text ones, and may even emit `"SAFETY"` /
+    /// `"MALFORMED_FUNCTION_CALL"` alongside a `functionCall` part. Once any
+    /// function_call has been observed in this stream, force the stop
+    /// reason to `ToolUse` — and warn loudly when overriding away from a
+    /// `Refusal`/`Other` so the original signal isn't silently lost.
+    fn coerce_tool_use_stop_reason(&mut self) {
+        if !self.saw_function_call || matches!(self.stop_reason, Some(spp::StopReason::ToolUse)) {
+            return;
+        }
+        if matches!(
+            self.stop_reason,
+            Some(spp::StopReason::Refusal) | Some(spp::StopReason::Other)
+        ) {
+            tracing::warn!(
+                original_stop_reason = ?self.stop_reason,
+                "gemini emitted a functionCall alongside a refusal/other finishReason; overriding stop_reason to ToolUse"
+            );
+        }
+        self.stop_reason = Some(spp::StopReason::ToolUse);
     }
 }
 
@@ -565,8 +576,6 @@ mod tests {
         assert!(has_tool_use_start, "missing tool_use start: {evs:#?}");
         let _ = acc.flush();
         let out = acc.finish().unwrap();
-        // Gemini reports `STOP` even for tool-call turns; the accumulator
-        // must override that to `ToolUse` so the host's tool-use loop runs.
         assert_eq!(out.stop_reason, spp::StopReason::ToolUse);
         match &out.content[0] {
             ContentBlock::ToolUse { name, input, .. } => {
@@ -575,6 +584,71 @@ mod tests {
             }
             _ => panic!("expected tool_use"),
         }
+    }
+
+    /// Gemini occasionally splits a tool-call turn across chunks: a chunk
+    /// carrying just the `functionCall` part, followed by a chunk that
+    /// carries only `finishReason="STOP"`. The accumulator must still end
+    /// with `stop_reason=ToolUse` — the override has to re-evaluate on every
+    /// chunk, not just the one that flips `saw_function_call`.
+    #[test]
+    fn accumulator_function_call_split_across_chunks_yields_tool_use_stop() {
+        let mut acc = Accumulator::default();
+        let _ = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "ls", "args": {"path": "/tmp"}}}
+                ]},
+                "index": 0
+            }],
+            "responseId": "r_split"
+        })));
+        let _ = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": []},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 3}
+        })));
+        let _ = acc.flush();
+        let out = acc.finish().unwrap();
+        assert_eq!(out.stop_reason, spp::StopReason::ToolUse);
+        match &out.content[0] {
+            ContentBlock::ToolUse { name, .. } => assert_eq!(name, "ls"),
+            _ => panic!("expected tool_use"),
+        }
+    }
+
+    /// The other split-chunk ordering: `finishReason="STOP"` arrives before
+    /// any function_call part. The override must fire when the later chunk
+    /// finally emits the function_call, not just when the finishReason
+    /// chunk is processed.
+    #[test]
+    fn accumulator_stop_before_function_call_still_yields_tool_use() {
+        let mut acc = Accumulator::default();
+        let _ = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"text": "calling tool"}
+                ]},
+                "finishReason": "STOP",
+                "index": 0
+            }],
+            "responseId": "r_reverse"
+        })));
+        let _ = acc.consume_chunk(chunk(json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "ls", "args": {}}}
+                ]},
+                "index": 0
+            }],
+            "usageMetadata": {"promptTokenCount": 7, "candidatesTokenCount": 3}
+        })));
+        let _ = acc.flush();
+        let out = acc.finish().unwrap();
+        assert_eq!(out.stop_reason, spp::StopReason::ToolUse);
     }
 
     #[test]
