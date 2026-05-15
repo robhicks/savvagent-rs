@@ -32,7 +32,9 @@ mod i18n_smoke {
 }
 
 mod app;
+mod config_file;
 mod creds;
+mod migration;
 mod models_pref;
 mod palette;
 mod plugin;

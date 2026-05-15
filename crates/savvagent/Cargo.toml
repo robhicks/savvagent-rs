@@ -60,6 +60,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 dotenvy.workspace = true
+dirs.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 ratatui-themes.workspace = true
