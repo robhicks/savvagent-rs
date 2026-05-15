@@ -433,22 +433,7 @@ async fn bootstrap_pool_host(
     }
 }
 
-/// Build a host whose `ProviderClient` is an [`InProcessProviderClient`],
-/// using the per-provider default (or `SAVVAGENT_MODEL` env override) as
-/// the model id.
-async fn build_in_process_host(
-    spec: &'static ProviderSpec,
-    api_key: &str,
-    project_root: &Path,
-    tool_bins: &ToolBins,
-) -> Result<Arc<Host>> {
-    // SAVVAGENT_MODEL > persisted in ~/.savvagent/models.toml >
-    // spec.default_model. See [`resolve_initial_model_for`].
-    let model = resolve_initial_model_for(spec);
-    build_in_process_host_with_model(spec, api_key, project_root, tool_bins, model).await
-}
-
-/// Same as [`build_in_process_host`] but with an explicit `model` id —
+/// Build an in-process host with an explicit `model` id —
 /// used by `/model <id>` to reconnect against the same provider with a
 /// different model.
 async fn build_in_process_host_with_model(
@@ -1562,6 +1547,12 @@ async fn perform_connect(
     tool_bins: &ToolBins,
     app: &mut App,
 ) {
+    use crate::plugin::builtin::{
+        provider_anthropic::ProviderAnthropicPlugin, provider_gemini::ProviderGeminiPlugin,
+        provider_local::ProviderLocalPlugin, provider_openai::ProviderOpenAiPlugin,
+    };
+
+    // 1. Persist the key so the plugin can read it back via keyring.
     if spec.api_key_required {
         if let Err(e) = creds::save(spec.id, &api_key) {
             app.push_note(
@@ -1573,8 +1564,33 @@ async fn perform_connect(
 
     app.push_note(rust_i18n::t!("notes.connecting-to", name = spec.display_name).to_string());
 
-    let host = match build_in_process_host(spec, &api_key, project_root, tool_bins).await {
-        Ok(h) => h,
+    // 2. Build the ProviderRegistration via the matching plugin. The plugin
+    //    reads the key from the keyring; we just saved it above so the read
+    //    will succeed. Surface any build failure with a note.
+    let reg_result = match spec.id {
+        "anthropic" => {
+            ProviderAnthropicPlugin::new()
+                .try_build_registration()
+                .await
+        }
+        "gemini" => ProviderGeminiPlugin::new().try_build_registration().await,
+        "openai" => ProviderOpenAiPlugin::new().try_build_registration().await,
+        "local" => ProviderLocalPlugin::new().try_build_registration().await,
+        other => {
+            app.push_note(rust_i18n::t!("notes.connect-unknown-provider", id = other).to_string());
+            return;
+        }
+    };
+    let reg = match reg_result {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            // Keyring read returned None despite the just-saved key — likely
+            // a backend issue.
+            app.push_note(
+                rust_i18n::t!("notes.connect-keyring-not-found", id = spec.id).to_string(),
+            );
+            return;
+        }
         Err(e) => {
             app.push_note(
                 rust_i18n::t!("notes.connect-failed", id = spec.id, err = format!("{e:#}"))
@@ -1584,50 +1600,95 @@ async fn perform_connect(
         }
     };
 
-    let old = {
-        let mut guard = host_slot.write().await;
-        guard.replace(host)
-    };
-    if let Some(old) = old {
-        // Old host — fire-and-forget shutdown. Tool children get reaped here.
-        tokio::spawn(async move { old.shutdown().await });
+    // 3. Add to the pool, or build a first host when no host exists yet.
+    //    The pool is additive — no history clear, no host replacement.
+    let is_first_connect = current_host(host_slot).await.is_none();
+    if is_first_connect {
+        // No host yet — startup produced no registrations (e.g. user
+        // dismissed the migration picker with startup_providers = []).
+        // Build a fresh single-entry pool host.
+        let mut cfg = tool_bins.apply(
+            HostConfig::new(
+                ProviderEndpoint::StreamableHttp {
+                    url: "inproc://pool".into(),
+                },
+                resolve_initial_model_for(spec),
+            )
+            .with_project_root(project_root.to_path_buf())
+            .with_app_version(env!("CARGO_PKG_VERSION")),
+        );
+        cfg.providers = vec![reg];
+        cfg.startup_connect = savvagent_host::StartupConnectPolicy::All;
+        match Host::start(cfg).await {
+            Ok(h) => {
+                *host_slot.write().await = Some(Arc::new(h));
+            }
+            Err(e) => {
+                app.push_note(
+                    rust_i18n::t!("notes.connect-failed", id = spec.id, err = format!("{e:#}"))
+                        .to_string(),
+                );
+                return;
+            }
+        }
+    } else {
+        // Pool already exists — add this provider to it additively.
+        let host = current_host(host_slot).await.expect("checked above");
+        match host.add_provider(reg).await {
+            Ok(()) => {}
+            Err(savvagent_host::PoolError::AlreadyRegistered(_)) => {
+                app.push_note(
+                    rust_i18n::t!("notes.connect-already", name = spec.display_name).to_string(),
+                );
+                return;
+            }
+            Err(e) => {
+                app.push_note(
+                    rust_i18n::t!("notes.connect-failed", id = spec.id, err = format!("{e}"))
+                        .to_string(),
+                );
+                return;
+            }
+        }
     }
 
-    // Switching providers can leave dangling tool_use ids; safer to start
-    // a fresh conversation than to mix histories.
-    if let Some(host) = current_host(host_slot).await {
-        host.clear_history().await;
-    }
-    app.entries.clear();
-    app.live_text.clear();
-    app.update_metrics();
-
+    // 4. Update TUI state. Pool is additive — do NOT clear app.entries,
+    //    live_text, or call clear_history. The conversation continues on the
+    //    existing active provider.
     app.connected = true;
-    app.active_provider_id = Some(spec.id);
-    // SAVVAGENT_MODEL > persisted in ~/.savvagent/models.toml >
-    // spec.default_model. Match the precedence used in build_in_process_host
-    // so the header model matches what the host was actually built with.
-    app.model = resolve_initial_model_for(spec);
-    refresh_cached_models(app, host_slot).await;
-    // Align the splash sandbox indicator with the now-active host's config.
-    // If the user lands on `/connect` within the 3s splash window, this
-    // refresh makes the banner reflect what tools will actually be wrapped
-    // with rather than the on-disk file read at TUI launch.
-    if let Some(host) = current_host(host_slot).await {
-        app.refresh_splash_sandbox_from_host(host.sandbox_config());
+    if app.active_provider_id.is_none() {
+        // First connection — set this provider as active, resolve the model,
+        // and refresh caches.
+        app.active_provider_id = Some(spec.id);
+        app.model = resolve_initial_model_for(spec);
+        refresh_cached_models(app, host_slot).await;
+        // Align the splash sandbox indicator with the newly-started host.
+        if let Some(host) = current_host(host_slot).await {
+            app.refresh_splash_sandbox_from_host(host.sandbox_config());
+        }
+        // Tell provider plugins to flip their active marker.
+        if let Ok(pid) = savvagent_plugin::ProviderId::new(spec.id) {
+            if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                app,
+                savvagent_plugin::HostEvent::ActiveProviderChanged { id: pid },
+                0,
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "ActiveProviderChanged dispatch from perform_connect failed");
+            }
+        }
     }
     app.push_note(rust_i18n::t!("notes.connected-to", name = spec.display_name).to_string());
 
-    // Notify hook subscribers about the new provider + active
-    // connection. The `/connect <provider>` slash path emits
-    // `ProviderRegistered` + `Connect` via `Effect::RegisterProvider`,
-    // but this legacy in-TUI provider-picker flow registers the host
-    // directly without going through that effect — so without these
-    // dispatches the splash HUD never flips to "Connected" and
-    // anything else subscribed to `Connect` (telemetry, status
-    // indicators, future auto-prompt rewriters) is silently skipped
-    // for users on the picker path. Errors are warn-only so a buggy
-    // subscriber can't tank the connect.
+    // 5. Dispatch ProviderRegistered + Connect for plugin subscribers.
+    //
+    // The `/connect <provider>` slash path emits `ProviderRegistered` +
+    // `Connect` via `Effect::RegisterProvider`, but this legacy in-TUI
+    // provider-picker flow registers directly — so without these dispatches
+    // the splash HUD never flips to "Connected" and anything else subscribed
+    // to `Connect` (telemetry, status indicators) is silently skipped.
+    // Errors are warn-only so a buggy subscriber can't tank the connect.
     match savvagent_plugin::ProviderId::new(spec.id) {
         Ok(provider_id) => {
             if let Err(err) = crate::plugin::effects::dispatch_host_event(
