@@ -24,6 +24,12 @@ pub struct ProviderIdError(String);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProviderId(pub(crate) String);
 
+impl std::fmt::Display for ProviderId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl ProviderId {
     /// Construct a validated provider id. Must be non-empty and consist
     /// only of `[a-z0-9_-]` characters, starting with `[a-z]`.

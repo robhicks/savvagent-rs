@@ -20,6 +20,8 @@
 
 pub mod capabilities;
 mod config;
+pub mod pool;
+pub use pool::{DisconnectMode, PoolEntry, PoolError, ProviderLease};
 mod default_prompt;
 mod logging;
 mod permissions;
