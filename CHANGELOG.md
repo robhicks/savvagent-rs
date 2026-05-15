@@ -6,6 +6,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.14.3 — Self-update plugin re-checks GitHub Releases every 2 hours (2026-05-15)
+
+### Fixed
+
+- **Long-running TUI sessions now notice new releases.** Previously,
+  the `internal:self-update` plugin only consulted the GitHub Releases
+  API when the `HostStarting` hook fired (i.e., at TUI launch), so a
+  session that stayed open for days would never observe a release
+  published mid-session. The spawned check task now runs on a
+  `tokio::time::interval` with a 2-hour cadence: the first tick
+  preserves today's startup behavior (and the 24h on-disk cache at
+  `~/.savvagent/update-check.json`), while subsequent ticks bypass the
+  cache and re-query GitHub. New releases auto-install in exactly the
+  same way as the startup path; the banner shows the progression and
+  the existing restart hint fires on exit.
+
+  The 2-hour interval is fixed (no env var override yet — file an
+  issue if you need one). `MissedTickBehavior::Delay` is set so a
+  suspended laptop or a long install never produces a burst of
+  catch-up network calls when the system resumes.
+
+  Skip rules per tick:
+  - `Disabled` / `Updated` end the loop (opt-out, or binary already
+    swapped and awaiting restart).
+  - `Installing` skips the tick — covers the case where the user
+    typed `/update` and the dispatcher task is parked on the
+    installer.
+  - `InstallFailed { latest: T }` re-runs the check on every tick to
+    pick up any *newer* release GitHub publishes, but skips the
+    install when the live check still resolves to `T`. This avoids
+    hammering a known-broken release while still recovering
+    automatically once a new release lands.
+
+  Closes #78.
+
 ## v0.14.2 — Gemini tool calls no longer abort with "stop_reason=end_turn but tool_use block(s) present" (2026-05-15)
 
 ### Fixed
