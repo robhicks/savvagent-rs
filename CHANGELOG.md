@@ -6,6 +6,85 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.15.0 — Multi-provider connection pool (2026-05-15)
+
+### Added
+
+- **Multi-provider connection pool.** `/connect <provider>` is now silent when
+  the keyring already has a stored key; the API-key modal only opens when a key
+  is missing or `--rekey` is passed. Multiple providers can be connected
+  simultaneously; the pool is an `Arc`-held `HashMap<ProviderId, PoolEntry>` in
+  the host.
+- **`/disconnect <provider> [--force]`** removes a provider from the pool. Drain
+  mode (default) waits for any in-flight turn to finish; Force mode signals
+  cooperative cancel, waits 500 ms, then aborts. `TurnEvent::Cancelled { reason }`
+  and `TurnEvent::AbortedAfterGrace { reason }` (with
+  `CancellationReason::ProviderDisconnected` and `UserAbort`) emit during
+  force-disconnect.
+- **`/use <provider>`** switches the active provider and clears the conversation
+  thread. Phase 1 invariant: a conversation runs on one active provider
+  end-to-end; cross-provider routing within a conversation lands in Phase 3+
+  once the cross-vendor compatibility gate (Phase 2) is green.
+- **`~/.savvagent/config.toml`** for startup connection policy and per-provider
+  connect timeout. Schema:
+
+  ```toml
+  [startup]
+  # "opt-in" (default), "all", "last-used", "none"
+  policy = "opt-in"
+  startup_providers = ["anthropic"]
+  connect_timeout_ms = 3000
+
+  [migration]
+  v1_done = true
+  ```
+
+- **First-launch migration picker.** Users upgrading with multiple stored keys
+  see a one-time picker that selects which providers to connect on startup; the
+  selection is persisted to `~/.savvagent/config.toml` under `startup_providers`.
+  Single-key users see no UI change.
+- **`Alt-Enter` on the `/connect` picker** re-enters the API key for the focused
+  provider (equivalent to typing `/connect <id> --rekey`).
+- **Status bar active-provider marker.** The active provider in the footer is
+  prefixed with `▸ `; pool members that are connected but inactive are listed
+  without the marker.
+
+### Changed
+
+- **`/connect <provider>`** no longer replaces the active host or clears the
+  conversation. The new provider joins the pool additively; use `/use <provider>`
+  to switch the active turn context.
+- **`/model`** lists only the active provider's models. Switching to a different
+  provider's model requires `/use <provider>` first.
+- **`SAVVAGENT_MODEL`** accepts both legacy bare-model form
+  (`claude-opus-4-7`) and new `provider/model` form
+  (`anthropic/claude-opus-4-7`); ambiguous bare forms log a warning and
+  fall back to the active provider's default.
+
+### Migration notes
+
+- Pre-existing users with multiple stored keys see a one-time picker on first
+  launch; the selection writes `startup_providers` to
+  `~/.savvagent/config.toml`. Single-key users see no UI change beyond the
+  silent re-connect behavior.
+- Users who relied on `/connect <other>` to switch providers should now use
+  `/use <other>` (which also clears conversation history).
+
+### Internal
+
+- `ProviderId` moved from `savvagent-plugin` to `savvagent-protocol`;
+  re-exported from `savvagent-plugin` for backwards compatibility.
+- New types in `savvagent-host` and `savvagent-protocol`:
+  `ProviderCapabilities`, `ModelCapabilities`, `ModelAlias`, `CostTier`,
+  `ProviderRegistration`, `StartupConnectPolicy`, `PoolEntry`, `ProviderLease`,
+  `DisconnectMode`, `PoolError`, `LegacyModelResolution`.
+- `Host` gains: `add_provider`, `remove_provider`, `set_active_provider`,
+  `active_capabilities`, `is_connected`.
+- `TurnEvent::Cancelled { reason }` and `TurnEvent::AbortedAfterGrace { reason }`
+  with `CancellationReason::ProviderDisconnected` and `UserAbort`.
+- `HostEvent::ActiveProviderChanged` (and matching `HookKind`) fires on `/use`
+  and startup so plugin slot rendering stays in sync.
+
 ## v0.14.3 — Self-update plugin re-checks GitHub Releases every 2 hours (2026-05-15)
 
 ### Fixed

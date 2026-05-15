@@ -115,8 +115,10 @@ provider has a key on file.
 
 | Command | What it does |
 |---|---|
-| `/connect` | Pick a provider, set its API key, swap the active host. |
-| `/model` | Open the model picker for the active provider (no args), or switch directly: `/model gemini-2.5-pro`. Selection persists per provider to `~/.savvagent/models.toml`. |
+| `/connect [<provider>] [--rekey]` | Add a provider to the connection pool. Silent when the keyring already has a stored key — the API-key modal only opens when a key is missing or `--rekey` is passed. Multiple providers can be connected simultaneously; switch with `/use <provider>`. |
+| `/disconnect <provider> [--force]` | Remove a provider from the pool. Default (drain) mode waits for any in-flight turn to finish. `--force` signals a cooperative cancel, waits 500 ms, then aborts. |
+| `/use <provider>` | Switch the active provider and start a fresh conversation thread. Currently a conversation runs on one active provider end-to-end; cross-provider routing within a conversation lands in a future release. |
+| `/model` | Open the model picker for the active provider (no args), or switch directly: `/model gemini-2.5-pro`. Lists only the active provider's models; use `/use <provider>` first to switch providers. Selection persists per provider to `~/.savvagent/models.toml`. |
 | `/theme` | Open the theme picker (no args), or switch directly: `/theme tokyo-night`. Persists to `~/.savvagent/theme.toml`. |
 | `/language` | Open the locale picker. Persists to `~/.savvagent/language.toml`. Ships with en / es / pt / hi; falls back to en for missing keys. |
 | `/plugins` | Open the plugin manager — toggle optional plugins on/off; core plugins can't be disabled. Persists to `~/.savvagent/plugins.toml`. |
@@ -134,6 +136,41 @@ provider has a key on file.
 | `/quit` | Exit. |
 
 `@` opens a file picker that inserts `@path` into the prompt.
+
+### Multi-provider pool (Phase 1)
+
+As of v0.15.0 Savvagent maintains a *connection pool* — you can `/connect`
+multiple providers and they all hold active keyring sessions. The currently
+active provider drives the turn loop; everything else sits connected but idle.
+
+**Phase 1 invariant:** a conversation thread runs on one active provider
+end-to-end. Switching providers with `/use <provider>` starts a fresh
+conversation (history is cleared). Cross-provider routing within a single
+conversation — auto-routing by cost/capability, `@provider:model` mid-turn
+overrides — is deferred to Phase 3+ and depends on the cross-vendor
+compatibility gate passing in Phase 2.
+
+**Startup policy** is configured in `~/.savvagent/config.toml`:
+
+```toml
+[startup]
+# Which providers to connect automatically when the TUI starts.
+# "opt-in"   — only the providers listed in startup_providers (default)
+# "all"      — every provider that has a key in the keyring
+# "last-used"— reconnect to whichever provider was active at last exit
+# "none"     — boot disconnected; use /connect manually
+policy = "opt-in"
+startup_providers = ["anthropic"]
+connect_timeout_ms = 3000
+
+[migration]
+# Set to true after the first-launch migration picker has run.
+v1_done = true
+```
+
+First-time users with multiple keys already in the keyring see a one-time
+picker on launch that initializes `startup_providers`. Single-key users see
+no UI change.
 
 ### Default behavior
 
@@ -246,15 +283,17 @@ or pointing at a third-party MCP provider.
 
 ## Architecture in five sentences
 
-`Host` (in `savvagent-host`) holds a `Box<dyn ProviderClient>` and a
-`ToolRegistry`. The `ProviderClient` is either an in-process bridge over a
-`ProviderHandler` (default) or an `rmcp` Streamable HTTP client connected
-to a remote provider binary (opt-in). Each user turn runs through
-`Host::run_turn_streaming`, which loops `provider.complete` →
+`Host` (in `savvagent-host`) owns a `ToolRegistry` and a
+*connected-provider pool* — a `HashMap<ProviderId, PoolEntry>` with one
+entry marked active. Each `PoolEntry` wraps an `Arc<dyn ProviderClient>`
+that is either an in-process bridge over a `ProviderHandler` (default) or an
+`rmcp` Streamable HTTP client connected to a remote provider binary (opt-in).
+Each user turn runs through `Host::run_turn_streaming`, which pulls the
+active entry from the pool and loops `provider.complete` →
 `tool_registry.call` until the model emits `end_turn`, forwarding stream
-events to the TUI as it goes. The TUI keeps the active host in
+events to the TUI as it goes. The TUI keeps the host in
 `Arc<RwLock<Option<Arc<Host>>>>` so per-turn tasks can snapshot it without
-holding a lock across awaits, and `/connect` swaps the slot atomically.
+holding a lock across awaits, and `/connect` adds to the pool atomically.
 Tool servers are stdio children, owned by the registry and reaped on
 shutdown.
 
@@ -310,7 +349,7 @@ Tools are stdio MCP servers. Mirror `crates/tool-fs`:
 | Var | Where read | Default | Notes |
 |---|---|---|---|
 | `SAVVAGENT_PROVIDER_URL` | `savvagent` | (unset) | When set, skips in-process bridge; uses MCP HTTP. |
-| `SAVVAGENT_MODEL` | `savvagent` | per-provider | Overrides both `~/.savvagent/models.toml` and `ProviderSpec::default_model`. Precedence on connect: env > persisted > default. |
+| `SAVVAGENT_MODEL` | `savvagent` | per-provider | Overrides both `~/.savvagent/models.toml` and `ProviderSpec::default_model`. Accepts `provider/model` form (`anthropic/claude-opus-4-7`) or bare model name (`claude-opus-4-7`; ambiguous bare names log a warning and fall back to the active provider). Precedence on connect: env > persisted > default. |
 | `SAVVAGENT_TOOL_FS_BIN` | `savvagent` | `savvagent-tool-fs` (PATH) | Path to the fs tool binary. |
 | `SAVVAGENT_TOOL_BASH_BIN` | `savvagent` | `savvagent-tool-bash` (PATH) | Path to the bash tool binary. |
 | `SAVVAGENT_TOOL_GREP_BIN` | `savvagent` | `savvagent-tool-grep` (PATH) | Path to the grep tool binary. |
@@ -334,6 +373,7 @@ Tools are stdio MCP servers. Mirror `crates/tool-fs`:
 | Path | Owner | Contents |
 |---|---|---|
 | `~/.savvagent/transcripts/<unix_secs>.json` | TUI | One pretty-printed `Vec<spp::Message>` per save (auto on `TurnComplete`, manual on `/save`). |
+| `~/.savvagent/config.toml` | TUI startup | Startup connection policy (`opt-in` / `all` / `last-used` / `none`), `startup_providers` list, per-provider `connect_timeout_ms`, and one-time migration flag. Created automatically on first launch when multiple keyring entries are found. |
 | `~/.savvagent/models.toml` | `/model` | `{ providers: { id = model } }`. Re-applied at `/connect`. |
 | `~/.savvagent/theme.toml` | `/theme` | Selected theme slug. |
 | `~/.savvagent/language.toml` | `/language` | Selected locale code. |
