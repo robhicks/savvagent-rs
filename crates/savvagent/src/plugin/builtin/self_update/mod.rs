@@ -1271,10 +1271,8 @@ mod tests {
         };
 
         p.on_event(HostEvent::HostStarting).await.unwrap();
-        // Let the first tick run.
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
+        // Force the timer driver to fire the immediate startup tick.
+        advance_and_yield(Duration::ZERO).await;
         // Drive three periodic ticks (Delay-mode interval requires
         // advancing one step at a time).
         advance_n_ticks(3, interval).await;
@@ -1310,8 +1308,11 @@ mod tests {
         p.on_event(HostEvent::HostStarting).await.unwrap();
         advance_until_state(&p, interval, |s| matches!(s, UpdateState::Updated { .. })).await;
 
-        // Loop must have broken; advance several more intervals and confirm
-        // the fetcher and installer were not re-invoked.
+        // Loop must have broken; advance well past the next interval and
+        // confirm the fetcher and installer were not re-invoked. Under
+        // MissedTickBehavior::Delay, a single large advance fires AT MOST
+        // ONE tick (it skips missed ticks and resumes after now), so this
+        // tightly bounds any rogue post-Updated tick at exactly 1.
         advance_and_yield(interval * 5).await;
         assert_eq!(
             installer.invocation_count(),
@@ -1389,9 +1390,8 @@ mod tests {
         };
 
         p.on_event(HostEvent::HostStarting).await.unwrap();
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
+        // Force the timer driver to fire the immediate startup tick.
+        advance_and_yield(Duration::ZERO).await;
         assert_eq!(
             fetcher.invocation_count(),
             0,
