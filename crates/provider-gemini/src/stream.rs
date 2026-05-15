@@ -71,6 +71,10 @@ struct Accumulator {
     model: Option<String>,
     usage: Usage,
     stop_reason: Option<spp::StopReason>,
+    /// Gemini reports `finishReason="STOP"` for tool-call turns just like
+    /// plain-text ones, so we track whether any `functionCall` part has been
+    /// observed and override the stop reason to `ToolUse` ourselves.
+    saw_function_call: bool,
     /// Open block state, indexed by SPP block index. `None` slots represent
     /// blocks already closed.
     blocks: Vec<Option<BlockState>>,
@@ -145,7 +149,12 @@ impl Accumulator {
         }
 
         if let Some(reason) = finish_reason.as_deref() {
-            self.stop_reason = Some(stop_reason_from_gemini(Some(reason)));
+            let mapped = stop_reason_from_gemini(Some(reason));
+            self.stop_reason = Some(if self.saw_function_call {
+                spp::StopReason::ToolUse
+            } else {
+                mapped
+            });
         }
 
         if let Some(u) = chunk.usage_metadata {
@@ -178,6 +187,7 @@ impl Accumulator {
     fn consume_part(&mut self, part: api::Part, out: &mut Vec<StreamEvent>) {
         // Function call: arrives as a whole part, never streamed in fragments.
         if let Some(fc) = part.function_call.clone() {
+            self.saw_function_call = true;
             let idx = self.next_block_index();
             let id = synthesize_tool_use_id(&fc.name, self.tool_use_counter);
             self.tool_use_counter += 1;
@@ -367,7 +377,11 @@ impl Accumulator {
             }
         }
         if self.stop_reason.is_none() {
-            self.stop_reason = Some(spp::StopReason::EndTurn);
+            self.stop_reason = Some(if self.saw_function_call {
+                spp::StopReason::ToolUse
+            } else {
+                spp::StopReason::EndTurn
+            });
         }
         events.push(StreamEvent::MessageStop);
         events
@@ -377,11 +391,16 @@ impl Accumulator {
         if !self.started {
             return Err(stream_decode_error("stream produced no chunks"));
         }
+        let default_stop = if self.saw_function_call {
+            spp::StopReason::ToolUse
+        } else {
+            spp::StopReason::EndTurn
+        };
         Ok(spp::CompleteResponse {
             id: self.id.unwrap_or_default(),
             model: self.model.unwrap_or_default(),
             content: self.final_blocks,
-            stop_reason: self.stop_reason.unwrap_or(spp::StopReason::EndTurn),
+            stop_reason: self.stop_reason.unwrap_or(default_stop),
             stop_sequence: None,
             usage: self.usage,
         })
@@ -546,7 +565,9 @@ mod tests {
         assert!(has_tool_use_start, "missing tool_use start: {evs:#?}");
         let _ = acc.flush();
         let out = acc.finish().unwrap();
-        assert_eq!(out.stop_reason, spp::StopReason::EndTurn);
+        // Gemini reports `STOP` even for tool-call turns; the accumulator
+        // must override that to `ToolUse` so the host's tool-use loop runs.
+        assert_eq!(out.stop_reason, spp::StopReason::ToolUse);
         match &out.content[0] {
             ContentBlock::ToolUse { name, input, .. } => {
                 assert_eq!(name, "ls");

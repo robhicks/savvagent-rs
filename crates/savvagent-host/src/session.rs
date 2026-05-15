@@ -460,14 +460,18 @@ impl Host {
                 }
             }
 
-            // Loop terminates when there are no tool uses, or the model
-            // explicitly ended the turn.
-            if tool_uses.is_empty() || matches!(resp.stop_reason, StopReason::EndTurn) {
-                if !tool_uses.is_empty() {
-                    return Err(HostError::MalformedResponse(format!(
-                        "stop_reason=end_turn but {} tool_use block(s) present",
-                        tool_uses.len()
-                    )));
+            // Tool-use blocks drive continuation. Providers disagree on how
+            // they signal tool use through `stop_reason` (Anthropic emits
+            // `tool_use`; Gemini happily emits `end_turn` alongside a
+            // functionCall part), so the actual content blocks are the only
+            // reliable signal. If any `ToolUse` blocks are present, run them
+            // and loop again, regardless of `stop_reason`.
+            if tool_uses.is_empty() {
+                if !matches!(resp.stop_reason, StopReason::EndTurn) {
+                    tracing::debug!(
+                        stop_reason = ?resp.stop_reason,
+                        "terminating turn with non-end_turn stop_reason and no tool_use blocks"
+                    );
                 }
                 let outcome = TurnOutcome {
                     text: text_buf,
@@ -1524,6 +1528,76 @@ mod policy_tests {
             "{}",
             outcome.tool_calls[0].result
         );
+    }
+
+    /// Regression for #76: some providers (notably Gemini) emit
+    /// `stop_reason=end_turn` alongside `tool_use` content blocks because
+    /// their wire format has no distinct "tool_use" finish reason. The host
+    /// must treat the presence of tool_use blocks as authoritative and run
+    /// them — not treat the response as malformed.
+    #[tokio::test]
+    async fn end_turn_with_tool_use_blocks_runs_tool_then_terminates() {
+        /// First call returns a tool_use block paired with `StopReason::EndTurn`
+        /// (the exact shape Gemini produces). Second call returns plain text
+        /// to terminate the loop.
+        struct EndTurnWithToolUseProvider {
+            calls: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ProviderClient for EndTurnWithToolUseProvider {
+            async fn complete(
+                &self,
+                req: CompleteRequest,
+                _events: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+                let content = if n == 0 {
+                    vec![ContentBlock::ToolUse {
+                        id: "tu_1".into(),
+                        name: "read_file".into(),
+                        input: json!({"path": ".env"}),
+                    }]
+                } else {
+                    vec![ContentBlock::Text {
+                        text: "all done".into(),
+                    }]
+                };
+                Ok(CompleteResponse {
+                    id: format!("resp-{n}"),
+                    model: req.model,
+                    content,
+                    // Crucially `EndTurn`, not `ToolUse` — this is the bug.
+                    stop_reason: StopReason::EndTurn,
+                    stop_sequence: None,
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        let provider: Box<dyn ProviderClient + Send + Sync> =
+            Box::new(EndTurnWithToolUseProvider {
+                calls: AtomicUsize::new(0),
+            });
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let outcome = host.run_turn_streaming("hi", tx).await.unwrap();
+        while rx.recv().await.is_some() {}
+
+        // The tool ran (here `read_file` against `.env` is policy-denied,
+        // which is fine — the point is that the host *dispatched* it
+        // instead of erroring out with MalformedResponse).
+        assert_eq!(
+            outcome.tool_calls.len(),
+            1,
+            "host must execute the tool_use block even when stop_reason=end_turn"
+        );
+        assert_eq!(outcome.tool_calls[0].name, "read_file");
+        // The second call terminated the loop with plain text.
+        assert_eq!(outcome.text, "all done");
     }
 
     #[test]

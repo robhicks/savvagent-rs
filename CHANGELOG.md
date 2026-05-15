@@ -6,6 +6,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## v0.14.2 — Gemini tool calls no longer abort with "stop_reason=end_turn but tool_use block(s) present" (2026-05-14)
+
+### Fixed
+
+- **Gemini tool calls now actually dispatch.** Any Gemini-routed turn
+  that asked the model to invoke a tool (e.g. *"Do we have any issues
+  on GitHub?"* on top of a shell tool) was aborting the turn with
+  `Error: malformed assistant response: stop_reason=end_turn but 1
+  tool_use block(s) present`. Root cause was a two-layer mismatch:
+  Gemini's `generateContent` API has no distinct `TOOL_USE` finish
+  reason and emits `finishReason="STOP"` even when the candidate carries
+  a `functionCall` part, but the host's `Host::run_turn_streaming` loop
+  treated `stop_reason=EndTurn` alongside `tool_use` content blocks as a
+  hard `HostError::MalformedResponse` and dropped the turn. Two fixes
+  ship together:
+  - The Gemini translator (`translate.rs::response_from_gemini`) and
+    streaming accumulator (`stream.rs`) now force `StopReason::ToolUse`
+    whenever the assistant content carries any `ToolUse` block,
+    regardless of the upstream `finishReason`.
+  - `Host::run_turn_streaming` now treats the presence of `tool_use`
+    blocks as authoritative: when any are present the host runs them
+    and continues the tool-use loop regardless of the provider-reported
+    `stop_reason`. The historical Anthropic-shaped `MalformedResponse`
+    check is gone (replaced with a `tracing::debug!` when a turn
+    terminates with a non-`end_turn` stop reason but no tool calls).
+    Defensive against other providers with the same `finishReason`
+    conflation.
+
+  Closes [#76](https://github.com/robhicks/savvagent-rs/issues/76).
+
 ## v0.14.1 — self-update cache invalidation on out-of-band upgrade (2026-05-14)
 
 ### Fixed

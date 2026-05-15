@@ -60,7 +60,7 @@ pub fn response_from_gemini(r: api::GenerateContentResponse) -> spp::CompleteRes
     let candidate = r.candidates.into_iter().next();
     let (content, stop_reason) = match candidate {
         Some(c) => {
-            let blocks = c
+            let blocks: Vec<spp::ContentBlock> = c
                 .content
                 .map(|c| {
                     let mut counter = 0u32;
@@ -70,7 +70,18 @@ pub fn response_from_gemini(r: api::GenerateContentResponse) -> spp::CompleteRes
                         .collect()
                 })
                 .unwrap_or_default();
-            let stop = stop_reason_from_gemini(c.finish_reason.as_deref());
+            // Gemini does not signal tool use in `finishReason` (it stays
+            // "STOP" even when the candidate carries a functionCall part).
+            // Override based on the actual content so the host can drive its
+            // tool-use loop on stop_reason like every other provider.
+            let stop = if blocks
+                .iter()
+                .any(|b| matches!(b, spp::ContentBlock::ToolUse { .. }))
+            {
+                spp::StopReason::ToolUse
+            } else {
+                stop_reason_from_gemini(c.finish_reason.as_deref())
+            };
             (blocks, stop)
         }
         None => {
@@ -471,6 +482,10 @@ mod tests {
         });
         let r: api::GenerateContentResponse = serde_json::from_value(raw).unwrap();
         let resp = response_from_gemini(r);
+        // Gemini emits `finishReason="STOP"` for tool-call turns; the
+        // translator must override that to `ToolUse` so the host runs the
+        // tool-use loop instead of treating the turn as ended.
+        assert_eq!(resp.stop_reason, spp::StopReason::ToolUse);
         match &resp.content[0] {
             spp::ContentBlock::ToolUse { name, input, id } => {
                 assert_eq!(name, "ls");
