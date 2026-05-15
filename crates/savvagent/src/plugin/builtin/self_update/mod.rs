@@ -335,76 +335,16 @@ impl Plugin for SelfUpdatePlugin {
                 return;
             }
 
-            // 24h cache: if a fresh entry exists, skip the network. Tests
-            // that exercise this code path pass an explicit override (set
-            // via `with_cache_path_override`) so the production cache file
-            // under the developer's real `$HOME` is never touched by the
-            // suite.
-            //
-            // A cached `latest_tag` strictly older than the running binary
-            // is treated as a cache miss: it implies the user upgraded
-            // out-of-band (cargo install, downloaded tarball, package
-            // manager) since the cache was written, so we have no
-            // authoritative info about what's newer than the current
-            // version and must re-fetch.
             let cache_path = cache_path_override.or_else(cache::cache_path);
-            let cached_fresh = cache_path
-                .as_deref()
-                .and_then(cache::load)
-                .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS))
-                .filter(|e| {
-                    !matches!(
-                        check::compare_versions(&current_version, &e.latest_tag),
-                        check::Comparison::Ahead | check::Comparison::Unparseable
-                    )
-                });
-
-            let result = if let Some(entry) = cached_fresh {
-                tracing::debug!(tag = %entry.latest_tag, "self-update: using cached tag");
-                check::classify_tag(&current_version, &entry.latest_tag)
-            } else {
-                let fresh =
-                    check_for_update(&current_version, install_method, fetcher.as_ref()).await;
-                // Persist any tag we successfully classified so the next
-                // launch within DEFAULT_TTL_SECS skips the network.
-                if let Some(path) = cache_path {
-                    if let Some(tag) = match &fresh {
-                        UpdateState::Available { latest, .. } => Some(format!("v{latest}")),
-                        UpdateState::UpToDate => Some(format!("v{current_version}")),
-                        _ => None,
-                    } {
-                        cache::save(
-                            &path,
-                            &cache::CacheEntry {
-                                schema_version: 1,
-                                checked_at_unix: cache::now_unix(),
-                                latest_tag: tag,
-                            },
-                        );
-                    }
-                }
-                fresh
-            };
-
-            // Capture the versions before publishing the check result so
-            // we can fall through into the auto-install path without
-            // re-locking immediately to read them back.
-            let pending_install = if let UpdateState::Available { current, latest } = &result {
-                Some((current.clone(), latest.clone()))
-            } else {
-                None
-            };
-
-            if let Ok(mut guard) = state.lock() {
-                *guard = result;
-            }
-
-            if let Some((current, latest)) = pending_install {
-                // Kicked off automatically — discard the returned effects
-                // because nothing in this background task can push notes;
-                // the banner is the user-visible signal.
-                let _ = run_install(state, installer, current, latest).await;
-            }
+            run_check_once(
+                &state,
+                &fetcher,
+                &installer,
+                install_method,
+                &current_version,
+                cache_path.as_deref(),
+            )
+            .await;
         });
 
         Ok(vec![])
@@ -505,6 +445,79 @@ async fn run_install(
             let fail_note = rust_i18n::t!("self-update.note-update-fail", err = error).to_string();
             vec![note_effect(starting_note), note_effect(fail_note)]
         }
+    }
+}
+
+/// One pass of the version-check + maybe-install pipeline. Shared by
+/// the `HostStarting` interval loop (each tick calls this) and the
+/// auto-install path. Stateless aside from the shared `Arc`s and the
+/// cache file — safe to call repeatedly.
+async fn run_check_once(
+    state: &Arc<Mutex<UpdateState>>,
+    fetcher: &Arc<dyn ReleasesFetcher>,
+    installer: &Arc<dyn Installer>,
+    install_method: InstallMethod,
+    current_version: &str,
+    cache_path: Option<&std::path::Path>,
+) {
+    // 24h cache: if a fresh entry exists, skip the network. Tests
+    // that exercise this code path pass an explicit override (set
+    // via `with_cache_path_override`) so the production cache file
+    // under the developer's real `$HOME` is never touched by the
+    // suite.
+    //
+    // A cached `latest_tag` strictly older than the running binary
+    // is treated as a cache miss: it implies the user upgraded
+    // out-of-band (cargo install, downloaded tarball, package
+    // manager) since the cache was written, so we have no
+    // authoritative info about what's newer than the current
+    // version and must re-fetch.
+    let cached_fresh = cache_path
+        .and_then(cache::load)
+        .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS))
+        .filter(|e| {
+            !matches!(
+                check::compare_versions(current_version, &e.latest_tag),
+                check::Comparison::Ahead | check::Comparison::Unparseable
+            )
+        });
+
+    let result = if let Some(entry) = cached_fresh {
+        tracing::debug!(tag = %entry.latest_tag, "self-update: using cached tag");
+        check::classify_tag(current_version, &entry.latest_tag)
+    } else {
+        let fresh = check_for_update(current_version, install_method, fetcher.as_ref()).await;
+        if let Some(path) = cache_path {
+            if let Some(tag) = match &fresh {
+                UpdateState::Available { latest, .. } => Some(format!("v{latest}")),
+                UpdateState::UpToDate => Some(format!("v{current_version}")),
+                _ => None,
+            } {
+                cache::save(
+                    path,
+                    &cache::CacheEntry {
+                        schema_version: 1,
+                        checked_at_unix: cache::now_unix(),
+                        latest_tag: tag,
+                    },
+                );
+            }
+        }
+        fresh
+    };
+
+    let pending_install = if let UpdateState::Available { current, latest } = &result {
+        Some((current.clone(), latest.clone()))
+    } else {
+        None
+    };
+
+    if let Ok(mut guard) = state.lock() {
+        *guard = result;
+    }
+
+    if let Some((current, latest)) = pending_install {
+        let _ = run_install(Arc::clone(state), Arc::clone(installer), current, latest).await;
     }
 }
 
