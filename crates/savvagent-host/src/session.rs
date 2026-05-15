@@ -1139,6 +1139,16 @@ impl Host {
         self.active_provider.read().await.clone()
     }
 
+    /// Snapshot of the active provider's capabilities. Returns `None` if
+    /// the pool is empty or the active provider isn't in the pool (which
+    /// would be a bug). Clones the [`ProviderCapabilities`] so the caller
+    /// doesn't hold a pool lock.
+    pub async fn active_capabilities(&self) -> Option<ProviderCapabilities> {
+        let active = self.active_provider.read().await.clone();
+        let pool = self.pool.read().await;
+        pool.get(&active).map(|entry| entry.capabilities().clone())
+    }
+
     /// Whether `id` is currently registered (and connected) in the pool.
     pub async fn is_connected(&self, id: &str) -> bool {
         let Ok(pid) = savvagent_protocol::ProviderId::new(id) else {

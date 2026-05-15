@@ -491,12 +491,12 @@ async fn dispatch_slash_command(
             return;
         }
         // Typed-arg invocations (`/model <id>`) and the no-host case still
-        // flow through `handle_model_command`'s legacy path: it validates
-        // against `Host::list_models`, rebuilds the host, and surfaces a
-        // useful note when nothing is connected yet. With no args AND an
-        // active host, the guard is false, the arm doesn't match, and
-        // control falls through to the plugin router so the
-        // `internal:model` plugin can open the picker screen.
+        // flow through `handle_model_command`'s path: it validates the id
+        // against the active provider's capability metadata, rebuilds the
+        // host, and surfaces a useful note when nothing is connected yet.
+        // With no args AND an active host, the guard is false, the arm
+        // doesn't match, and control falls through to the plugin router so
+        // the `internal:model` plugin can open the picker screen.
         "/model" if !rest.is_empty() || current_host(host_slot).await.is_none() => {
             handle_model_command(app, rest, host_slot, project_root, tool_bins).await;
             return;
@@ -604,6 +604,10 @@ async fn show_tools(app: &mut App, host_slot: &HostSlot) {
 
 /// Validate `requested` against the provider's advertised `models`. Returns
 /// `Ok(())` when the id is in the list, `Err(known_ids)` otherwise.
+///
+/// Used only by unit tests — production validation now goes through
+/// [`Host::active_capabilities`] instead of a live `list_models` RPC.
+#[cfg(test)]
 fn validate_model_id<'a>(
     requested: &str,
     models: &'a [savvagent_host::ModelInfo],
@@ -617,10 +621,9 @@ fn validate_model_id<'a>(
 
 /// Outcome of asking the provider whether `requested` is a known model id.
 ///
-/// [`Proceed`](ModelChangeOutcome::Proceed) means the TUI should switch to the
-/// new model; `warning` is an optional note to surface to the user first (e.g.
-/// "could not verify, proceeding optimistically"). [`Reject`](ModelChangeOutcome::Reject)
-/// means the id is definitively unknown — the TUI must show the note and stop.
+/// Used only by unit tests — production validation now goes through
+/// [`Host::active_capabilities`] instead of a live `list_models` RPC.
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 enum ModelChangeOutcome {
     /// Switch to the new model. When `warning` is `Some`, push it as a note
@@ -636,6 +639,10 @@ enum ModelChangeOutcome {
 ///
 /// Pure (no IO, no [`App`] mutation) so it can be unit-tested without standing
 /// up a [`Host`] or worker channel.
+///
+/// Used only by unit tests — production validation now goes through
+/// [`Host::active_capabilities`] instead of a live `list_models` RPC.
+#[cfg(test)]
 fn resolve_model_change(
     requested: &str,
     list_result: Result<&savvagent_host::ListModelsResponse, &savvagent_protocol::ProviderError>,
@@ -686,9 +693,9 @@ fn resolve_model_change(
 }
 
 /// `/model` (no args) shows the current model. `/model <id>` validates the
-/// requested id against `host.list_models()` (when advertised) and then
-/// reconnects the active provider with the new id. Providers that don't
-/// advertise `list_models` fall through to the optimistic path — the
+/// requested id against the active provider's capability metadata and then
+/// reconnects the active provider with the new id. When the pool has no
+/// models registered for the active provider the check is skipped and the
 /// provider rejects an invalid id at first turn instead.
 async fn handle_model_command(
     app: &mut App,
@@ -745,26 +752,22 @@ async fn handle_model_command(
         String::new()
     };
 
-    // Validate the requested id against the provider's advertised list when
-    // available. `resolve_model_change` encapsulates the branching so it can
-    // be unit-tested without a live `Host`.
+    // Validate the requested id against the active provider's capability
+    // metadata. When the pool has no capabilities registered for the active
+    // provider (shouldn't happen in practice) we fall through optimistically.
     if let Some(host) = current_host(host_slot).await {
-        let list_result = host.list_models().await;
-        let outcome = resolve_model_change(&new_model, list_result.as_ref());
-        match outcome {
-            ModelChangeOutcome::Reject { note } => {
-                app.push_note(note);
+        if let Some(caps) = host.active_capabilities().await {
+            if !caps.models.is_empty() && caps.model(&new_model).is_none() {
+                let active = host.active_provider().await;
+                app.push_note(
+                    rust_i18n::t!(
+                        "notes.model-not-in-active",
+                        id = new_model,
+                        provider = active.as_str()
+                    )
+                    .to_string(),
+                );
                 return;
-            }
-            ModelChangeOutcome::Proceed { warning } => {
-                if let Some(w) = warning {
-                    if let Err(ref e) = list_result {
-                        tracing::warn!(?e, "list_models failed; proceeding optimistically");
-                    }
-                    app.push_note(w);
-                } else if let Err(ref e) = list_result {
-                    tracing::debug!(?e, "list_models unsupported; proceeding optimistically");
-                }
             }
         }
     }
@@ -887,11 +890,13 @@ async fn do_resume_from_path(app: &mut App, host_slot: &HostSlot, path: &Path) {
     }
 }
 
-/// Refresh [`App::cached_models`] from the active host's `list_models`.
-/// On failure (provider doesn't advertise list_models, network error,
-/// no active host), fall back to a single-entry catalog containing just
-/// the current model so the picker still has something to render. This
-/// is the "show error + default-only" scope agreed for MVP.
+/// Refresh [`App::cached_models`] from the active provider's capability
+/// metadata. Only models from the currently-active provider are shown in
+/// the picker; switching providers (`/use`) triggers a fresh refresh.
+///
+/// Falls back to a single-entry catalog containing the current model id when
+/// no host is connected or the active provider has no models registered, so
+/// the picker always has something to render.
 async fn refresh_cached_models(app: &mut App, host_slot: &HostSlot) {
     let fallback = vec![savvagent_plugin::ModelEntry {
         id: app.model.clone(),
@@ -901,32 +906,28 @@ async fn refresh_cached_models(app: &mut App, host_slot: &HostSlot) {
         app.cached_models = fallback;
         return;
     };
-    match host.list_models().await {
-        Ok(resp) => {
-            let models: Vec<savvagent_plugin::ModelEntry> = resp
-                .models
-                .into_iter()
-                .map(|m| savvagent_plugin::ModelEntry {
-                    display_name: m
-                        .display_name
-                        .clone()
-                        .filter(|n| !n.is_empty())
-                        .unwrap_or_else(|| m.id.clone()),
-                    id: m.id,
-                })
-                .collect();
-            if models.is_empty() {
-                tracing::debug!("list_models returned an empty catalog; using fallback");
-                app.cached_models = fallback;
-            } else {
-                app.cached_models = models;
-            }
-        }
-        Err(e) => {
-            tracing::debug!(error = ?e, "list_models failed; using single-entry fallback");
-            app.cached_models = fallback;
-        }
+    let Some(caps) = host.active_capabilities().await else {
+        tracing::debug!("active_capabilities returned None; using single-entry fallback");
+        app.cached_models = fallback;
+        return;
+    };
+    if caps.models.is_empty() {
+        tracing::debug!("active provider has no models in capabilities; using fallback");
+        app.cached_models = fallback;
+        return;
     }
+    app.cached_models = caps
+        .models
+        .into_iter()
+        .map(|m| savvagent_plugin::ModelEntry {
+            display_name: if m.display_name.is_empty() {
+                m.id.clone()
+            } else {
+                m.display_name
+            },
+            id: m.id,
+        })
+        .collect();
 }
 
 /// Drain `app.pending_model_change` (set by `Effect::SetActiveModel`)
@@ -967,25 +968,24 @@ async fn apply_pending_model_change(
         String::new()
     };
 
-    // Validate against the advertised list when available (mirrors
-    // handle_model_command). When the active host can't enumerate
-    // models we proceed optimistically — the provider rejects an
-    // invalid id at first turn instead.
+    // Validate against the active provider's capability metadata. The picker
+    // is already filtered to the active provider's models, so this is a
+    // belt-and-suspenders check. When no capabilities are registered we
+    // proceed optimistically — the provider rejects an invalid id at first
+    // turn instead.
     if let Some(host) = current_host(host_slot).await {
-        let list_result = host.list_models().await;
-        let outcome = resolve_model_change(&pending.id, list_result.as_ref());
-        match outcome {
-            ModelChangeOutcome::Reject { note } => {
-                app.push_note(note);
+        if let Some(caps) = host.active_capabilities().await {
+            if !caps.models.is_empty() && caps.model(&pending.id).is_none() {
+                let active = host.active_provider().await;
+                app.push_note(
+                    rust_i18n::t!(
+                        "notes.model-not-in-active",
+                        id = pending.id,
+                        provider = active.as_str()
+                    )
+                    .to_string(),
+                );
                 return;
-            }
-            ModelChangeOutcome::Proceed { warning } => {
-                if let Some(w) = warning {
-                    if let Err(ref e) = list_result {
-                        tracing::warn!(?e, "list_models failed; proceeding optimistically");
-                    }
-                    app.push_note(w);
-                }
             }
         }
     }
