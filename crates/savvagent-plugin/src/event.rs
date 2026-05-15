@@ -36,6 +36,10 @@ pub enum HookKind {
     /// Carries the current `app.context_size` (chars/4 heuristic) so the
     /// home footer can render a `~N ctx` segment without polling.
     ContextSizeChanged,
+    /// Emitted when the active provider changes, either on startup or when
+    /// the user runs `/use <provider>`. Subscribers (typically provider
+    /// plugins) use this to update their slot rendering.
+    ActiveProviderChanged,
 }
 
 /// Typed host-lifecycle events that the runtime fires into the plugin bus.
@@ -112,6 +116,13 @@ pub enum HostEvent {
         /// Estimated total context size in tokens.
         tokens: u32,
     },
+    /// The active provider changed. Fired by the TUI after a successful
+    /// [`crate::effect::Effect::SetActiveProvider`] call (e.g. from
+    /// `/use <provider>`) and once on startup with the initial active id.
+    ActiveProviderChanged {
+        /// Identifier of the provider that is now active.
+        id: ProviderId,
+    },
 }
 
 impl HostEvent {
@@ -132,6 +143,7 @@ impl HostEvent {
             HostEvent::TranscriptSaved { .. } => HookKind::TranscriptSaved,
             HostEvent::ProviderRegistered { .. } => HookKind::ProviderRegistered,
             HostEvent::ContextSizeChanged { .. } => HookKind::ContextSizeChanged,
+            HostEvent::ActiveProviderChanged { .. } => HookKind::ActiveProviderChanged,
         }
     }
 }
@@ -218,6 +230,10 @@ mod tests {
             (
                 HostEvent::ContextSizeChanged { tokens: 42 },
                 HookKind::ContextSizeChanged,
+            ),
+            (
+                HostEvent::ActiveProviderChanged { id: pid.clone() },
+                HookKind::ActiveProviderChanged,
             ),
         ];
         for (event, expected) in cases {

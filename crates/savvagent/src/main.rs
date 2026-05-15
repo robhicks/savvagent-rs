@@ -1265,6 +1265,17 @@ async fn handle_use_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
             app.entries.clear();
             app.live_text.clear();
             app.update_metrics();
+            // Notify provider plugins so they can flip their active
+            // marker in render_slot without polling.
+            if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                app,
+                savvagent_plugin::HostEvent::ActiveProviderChanged { id: pid.clone() },
+                0,
+            )
+            .await
+            {
+                tracing::warn!(error = %err, "ActiveProviderChanged dispatch failed");
+            }
             app.push_note(rust_i18n::t!("notes.use-switched", name = provider).to_string());
         }
         Err(savvagent_host::PoolError::NotRegistered(_)) => {
@@ -1658,6 +1669,29 @@ async fn run_app(
     .await
     {
         tracing::warn!(error = %e, "HostStarting dispatch failed");
+    }
+    // If there is an initial active provider (bootstrap succeeded),
+    // notify plugins immediately so their render_slot shows the `▸`
+    // marker before the user's first interaction. Without this,
+    // `ActiveProviderChanged` would only fire on the first `/use`
+    // invocation, leaving the footer unmarked on startup.
+    if let Some(initial_pid) = app.active_provider_id {
+        match savvagent_plugin::ProviderId::new(initial_pid) {
+            Ok(id) => {
+                if let Err(e) = crate::plugin::effects::dispatch_host_event(
+                    app,
+                    savvagent_plugin::HostEvent::ActiveProviderChanged { id },
+                    0,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "startup ActiveProviderChanged dispatch failed");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "startup ActiveProviderChanged: invalid provider id");
+            }
+        }
     }
 
     loop {

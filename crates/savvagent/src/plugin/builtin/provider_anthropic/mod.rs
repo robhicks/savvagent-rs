@@ -33,12 +33,19 @@ const DISPLAY_NAME: &str = "Anthropic";
 /// Anthropic provider shim.
 pub(crate) struct ProviderAnthropicPlugin {
     client: Option<Box<dyn ProviderClient>>,
+    /// Set to `true` while this provider is the host's active provider.
+    /// Updated via [`HostEvent::ActiveProviderChanged`]; used by
+    /// [`render_slot`] to prepend the `▸ ` active marker.
+    active: bool,
 }
 
 impl ProviderAnthropicPlugin {
     /// Construct a new shim with no client yet.
     pub(crate) fn new() -> Self {
-        Self { client: None }
+        Self {
+            client: None,
+            active: false,
+        }
     }
 
     /// Try to read the API key from the keyring and, on success, build an
@@ -89,7 +96,16 @@ impl ProviderAnthropicPlugin {
     pub(crate) fn with_test_client(client: Box<dyn ProviderClient>) -> Self {
         Self {
             client: Some(client),
+            active: false,
         }
+    }
+
+    /// Test-only seam: directly set the active flag without going through
+    /// `on_event`. Used by unit tests that exercise `render_slot` in
+    /// isolation without wiring up the full plugin dispatch machinery.
+    #[cfg(test)]
+    pub(crate) fn set_active_for_render(&mut self, active: bool) {
+        self.active = active;
     }
 }
 
@@ -119,7 +135,7 @@ impl Plugin for ProviderAnthropicPlugin {
             slot_id: "home.footer.left".into(),
             priority: 100,
         }];
-        contributions.hooks = vec![HookKind::HostStarting];
+        contributions.hooks = vec![HookKind::HostStarting, HookKind::ActiveProviderChanged];
 
         Manifest {
             id: PluginId::new(PLUGIN_ID).expect("valid built-in id"),
@@ -152,13 +168,22 @@ impl Plugin for ProviderAnthropicPlugin {
     }
 
     async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
-        if matches!(event, HostEvent::HostStarting) && self.try_connect_from_keyring().is_some() {
-            return Ok(vec![Effect::RegisterProvider {
-                id: ProviderId::new(PROVIDER_ID).expect("valid"),
-                display_name: DISPLAY_NAME.into(),
-            }]);
+        match event {
+            HostEvent::HostStarting => {
+                if self.try_connect_from_keyring().is_some() {
+                    return Ok(vec![Effect::RegisterProvider {
+                        id: ProviderId::new(PROVIDER_ID).expect("valid"),
+                        display_name: DISPLAY_NAME.into(),
+                    }]);
+                }
+                Ok(vec![])
+            }
+            HostEvent::ActiveProviderChanged { ref id } => {
+                self.active = id.as_str() == PROVIDER_ID;
+                Ok(vec![])
+            }
+            _ => Ok(vec![]),
         }
-        Ok(vec![])
     }
 
     fn render_slot(&self, slot_id: &str, _: Region) -> Vec<StyledLine> {
@@ -170,9 +195,10 @@ impl Plugin for ProviderAnthropicPlugin {
                 bold: true,
                 ..TextMods::default()
             };
+            let prefix = if self.active { "\u{25b8} " } else { "  " };
             vec![StyledLine {
                 spans: vec![StyledSpan {
-                    text: DISPLAY_NAME.into(),
+                    text: format!("{prefix}{DISPLAY_NAME}"),
                     fg: Some(ThemeColor::Success),
                     bg: None,
                     modifiers: mods,
@@ -320,5 +346,73 @@ mod tests {
             },
         );
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn render_slot_marks_active_provider() {
+        rust_i18n::set_locale("en");
+        use async_trait::async_trait;
+        use savvagent_mcp::ProviderClient;
+        use savvagent_protocol::{
+            CompleteRequest, CompleteResponse, ListModelsResponse, ProviderError, StreamEvent,
+        };
+        use tokio::sync::mpsc;
+
+        struct StubClient;
+        #[async_trait]
+        impl ProviderClient for StubClient {
+            async fn complete(
+                &self,
+                _: CompleteRequest,
+                _: Option<mpsc::Sender<StreamEvent>>,
+            ) -> Result<CompleteResponse, ProviderError> {
+                unreachable!()
+            }
+            async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+                unreachable!()
+            }
+        }
+
+        let mut p = ProviderAnthropicPlugin::with_test_client(Box::new(StubClient));
+        p.set_active_for_render(true);
+        let lines = p.render_slot(
+            "home.footer.left",
+            Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 1,
+            },
+        );
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            joined.starts_with('\u{25b8}'),
+            "active marker missing in: {joined}"
+        );
+
+        p.set_active_for_render(false);
+        let lines = p.render_slot(
+            "home.footer.left",
+            Region {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 1,
+            },
+        );
+        let joined: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.text.clone()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            joined.starts_with("  "),
+            "inactive prefix missing in: {joined}"
+        );
+        rust_i18n::set_locale("en");
     }
 }
