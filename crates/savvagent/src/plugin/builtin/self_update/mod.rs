@@ -377,6 +377,7 @@ impl Plugin for SelfUpdatePlugin {
                 match pre_state {
                     UpdateState::Disabled => return,
                     UpdateState::Updated { .. } => return,
+                    UpdateState::Installing { .. } => continue,
                     _ => {}
                 }
 
@@ -620,6 +621,36 @@ mod tests {
         async fn latest_tag(&self) -> anyhow::Result<String> {
             self.invocations.fetch_add(1, Ordering::SeqCst);
             Ok(self.tag.to_string())
+        }
+    }
+
+    /// In-test installer that parks `install()` on a `Notify` until the
+    /// test explicitly releases it. Counts invocations the same way
+    /// `StubInstaller` does. Used to model the concurrent `/update`
+    /// case where state stays at `Installing` across a tick boundary.
+    struct BlockingStubInstaller {
+        notify: Arc<tokio::sync::Notify>,
+        invocations: AtomicUsize,
+    }
+
+    impl BlockingStubInstaller {
+        fn new(notify: Arc<tokio::sync::Notify>) -> Self {
+            Self {
+                notify,
+                invocations: AtomicUsize::new(0),
+            }
+        }
+        fn invocation_count(&self) -> usize {
+            self.invocations.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Installer for BlockingStubInstaller {
+        async fn install(&self, _latest: &Version) -> anyhow::Result<()> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            self.notify.notified().await;
+            Ok(())
         }
     }
 
@@ -1405,5 +1436,90 @@ mod tests {
             "subsequent tick must bypass cache and call the fetcher, got {}",
             fetcher.invocation_count()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_check_skips_during_concurrent_slash_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        let release = Arc::new(tokio::sync::Notify::new());
+        let installer = Arc::new(BlockingStubInstaller::new(Arc::clone(&release)));
+        let fetcher = Arc::new(FixedFetcher("v99.99.99"));
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+        // Pre-seed Available so handle_slash will pick the Install branch
+        // immediately (no need to wait for the loop's first tick to set it).
+        *p.state.lock().unwrap() = UpdateState::Available {
+            current: Version::parse("0.10.0").unwrap(),
+            latest: Version::parse("99.99.99").unwrap(),
+        };
+
+        // STEP A: Start the slash task BEFORE the periodic loop. The slash
+        // helper shares the primary plugin's state + installer via Arc, so
+        // the install it triggers mutates `p.state` directly. helper.handle_slash
+        // calls run_install -> sets state to Installing -> awaits the notify.
+        let shared_state = Arc::clone(&p.state);
+        let shared_installer = Arc::clone(&installer) as Arc<dyn Installer>;
+        let slash_task = tokio::spawn(async move {
+            let mut helper = SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::new(FixedFetcher("v99.99.99")),
+                shared_installer,
+            )
+            .with_install_method(InstallMethod::Installed);
+            helper.state = shared_state;
+            let _ = helper.handle_slash("update", vec![]).await;
+        });
+
+        // Yield enough for the slash task to enter run_install and park at
+        // the installer's notify.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            matches!(p.state(), UpdateState::Installing { .. }),
+            "slash task must park at installer with state Installing, got {:?}",
+            p.state()
+        );
+        assert_eq!(installer.invocation_count(), 1);
+
+        // STEP B: Now start the periodic loop. Its first tick must observe
+        // Installing (set by the slash task) and skip.
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+
+        // Drive three periodic ticks. The loop must observe Installing on
+        // every iteration and skip — no second installer invocation.
+        advance_n_ticks(3, interval).await;
+        assert_eq!(
+            installer.invocation_count(),
+            1,
+            "loop must skip while state is Installing; got {} invocations",
+            installer.invocation_count()
+        );
+
+        // Release the notify; the slash task's install completes and the
+        // shared state transitions to Updated.
+        release.notify_one();
+        let _ = slash_task.await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            matches!(p.state(), UpdateState::Updated { .. }),
+            "expected Updated after install completes, got {:?}",
+            p.state()
+        );
+        assert_eq!(installer.invocation_count(), 1);
     }
 }
