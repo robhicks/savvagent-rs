@@ -1,7 +1,7 @@
-//! Pool lifecycle tests: drain, lock hygiene. Force-mode tests live
-//! in Task 5.
+//! Pool lifecycle tests: drain, lock hygiene, force-disconnect.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -144,4 +144,101 @@ async fn remove_provider_drain_blocks_new_turns_but_lets_inflight_finish() {
         .expect("drain finished in time")
         .unwrap()
         .unwrap();
+}
+
+/// A provider client whose `complete` sleeps for 60 s — far beyond the grace
+/// period — so that it can only finish via `AbortHandle::abort`.
+struct StuckClient {
+    started: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl ProviderClient for StuckClient {
+    async fn complete(
+        &self,
+        _req: CompleteRequest,
+        _events: Option<mpsc::Sender<StreamEvent>>,
+    ) -> Result<CompleteResponse, ProviderError> {
+        self.started.store(true, Ordering::SeqCst);
+        // Sleep way past the grace period.  If we are aborted, the future is
+        // dropped during this sleep and `complete` never returns.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        Err(ProviderError {
+            kind: savvagent_protocol::ErrorKind::Internal,
+            message: "should never reach here".into(),
+            retry_after_ms: None,
+            provider_code: None,
+        })
+    }
+
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        Ok(ListModelsResponse {
+            models: vec![],
+            default_model_id: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn force_disconnect_aborts_uncooperative_turn_within_grace() {
+    let started = Arc::new(AtomicBool::new(false));
+    let stuck = StuckClient {
+        started: Arc::clone(&started),
+    };
+    let mut cfg = HostConfig::new(
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
+        "m",
+    );
+    cfg.providers = vec![ProviderRegistration {
+        id: ProviderId::new("stuck").unwrap(),
+        display_name: "Stuck".into(),
+        client: Arc::new(stuck) as Arc<dyn ProviderClient + Send + Sync>,
+        capabilities: caps("m"),
+        aliases: vec![],
+    }];
+    cfg.startup_connect = StartupConnectPolicy::All;
+    cfg.force_disconnect_grace_ms = 200; // tighten for a faster test
+
+    let host = Arc::new(Host::start(cfg).await.unwrap());
+
+    // Spawn a turn that will get stuck inside `StuckClient::complete`.
+    let host_t = Arc::clone(&host);
+    let turn_handle = tokio::spawn(async move { host_t.run_turn("hello").await });
+
+    // Wait until the stuck client has entered `complete` so we know the
+    // turn is genuinely in-flight before we force-disconnect.
+    for _ in 0..200 {
+        if started.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        started.load(Ordering::SeqCst),
+        "StuckClient::complete never started"
+    );
+
+    // Force-disconnect; must complete in much less than grace + slack.
+    let t0 = std::time::Instant::now();
+    host.remove_provider(&ProviderId::new("stuck").unwrap(), DisconnectMode::Force)
+        .await
+        .unwrap();
+    let elapsed = t0.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(400),
+        "force_disconnect took {elapsed:?}, expected < 400 ms"
+    );
+
+    // The spawned turn must resolve (as an error — it was aborted or cancelled)
+    // within a generous deadline.
+    let outcome = tokio::time::timeout(Duration::from_secs(2), turn_handle)
+        .await
+        .expect("turn task should resolve after abort")
+        .expect("JoinHandle should not panic");
+    assert!(
+        outcome.is_err(),
+        "expected an error from the aborted turn, got Ok"
+    );
 }

@@ -47,8 +47,9 @@ pub use sandbox::{
 };
 pub use savvagent_protocol::{ListModelsResponse, ModelInfo, ToolDef};
 pub use session::{
-    BASH_NETWORK_PROMPT_SUMMARY, BashNetResolveError, Host, HostError, TRANSCRIPT_SCHEMA_VERSION,
-    ToolCall, ToolCallStatus, TranscriptError, TranscriptFile, TurnEvent, TurnOutcome,
+    BASH_NETWORK_PROMPT_SUMMARY, BashNetResolveError, CancellationReason, Host, HostError,
+    TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError, TranscriptFile,
+    TurnEvent, TurnOutcome,
 };
 pub use tools::{BashNetContext, BashNetResolver, NetOverride};
 

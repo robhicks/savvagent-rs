@@ -609,6 +609,19 @@ impl App {
                 }
                 self.is_loading = false;
             }
+            TurnEvent::Cancelled { reason } => {
+                self.flush_live_text();
+                self.entries
+                    .push(Entry::Note(format!("turn cancelled: {reason}")));
+                self.is_loading = false;
+            }
+            TurnEvent::AbortedAfterGrace { reason } => {
+                self.flush_live_text();
+                self.entries.push(Entry::Note(format!(
+                    "turn aborted (grace expired): {reason}"
+                )));
+                self.is_loading = false;
+            }
         }
     }
 

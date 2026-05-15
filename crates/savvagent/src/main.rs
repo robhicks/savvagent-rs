@@ -1488,7 +1488,9 @@ fn translate_turn_event_to_host_event(
         TurnEvent::TextDelta { .. }
         | TurnEvent::PermissionRequested { .. }
         | TurnEvent::BashNetworkRequested { .. }
-        | TurnEvent::ToolCallDenied { .. } => None,
+        | TurnEvent::ToolCallDenied { .. }
+        | TurnEvent::Cancelled { .. }
+        | TurnEvent::AbortedAfterGrace { .. } => None,
     }
 }
 

@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use savvagent_mcp::ProviderClient;
 use savvagent_protocol::{
-    BlockDelta, CompleteRequest, ContentBlock, Message, ProviderError, Role, StopReason,
-    StreamEvent, ToolDef,
+    BlockDelta, CompleteRequest, ContentBlock, Message, ProviderError, ProviderId, Role,
+    StopReason, StreamEvent, ToolDef,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 
 use crate::capabilities::{CostTier, ModelCapabilities, ProviderCapabilities};
 use crate::config::{HostConfig, ProviderEndpoint, ProviderRegistration, StartupConnectPolicy};
@@ -78,6 +78,26 @@ pub enum TranscriptError {
     },
 }
 
+/// Reason a turn was cancelled before reaching `end_turn`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancellationReason {
+    /// The provider supplying this turn was force-disconnected mid-flight.
+    ProviderDisconnected(ProviderId),
+    /// The user explicitly requested an abort.
+    UserAbort,
+}
+
+impl std::fmt::Display for CancellationReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CancellationReason::ProviderDisconnected(id) => {
+                write!(f, "provider {} disconnected", id.as_str())
+            }
+            CancellationReason::UserAbort => write!(f, "user aborted"),
+        }
+    }
+}
+
 /// Top-level error surfaced from [`Host`] operations.
 #[derive(Debug, Error)]
 pub enum HostError {
@@ -94,6 +114,12 @@ pub enum HostError {
     /// active provider was drained while a turn was starting).
     #[error("no active provider in pool")]
     NoActiveProvider,
+    /// The turn was cancelled cooperatively (stage 1 cancel signal received).
+    #[error("turn cancelled: {0}")]
+    Cancelled(CancellationReason),
+    /// Generic internal error not covered by the above variants.
+    #[error("internal error: {0}")]
+    Other(String),
     /// Tool routing produced a malformed `tool_use` block. No longer
     /// constructed — kept in the public API so external `match` arms still
     /// compile. Slated for removal in the next minor (0.15.0) version.
@@ -207,6 +233,21 @@ pub enum TurnEvent {
         /// Final outcome — same value `run_turn_streaming` returns.
         outcome: TurnOutcome,
     },
+    /// A cooperative cancel signal was received and acted upon. The turn
+    /// did not complete normally; the in-flight `complete` future was
+    /// dropped. Emitted before returning [`HostError::Cancelled`].
+    Cancelled {
+        /// Why the turn was cancelled.
+        reason: CancellationReason,
+    },
+    /// The grace period expired and the task was hard-aborted.
+    /// Emitted by [`Host::remove_provider`] after calling
+    /// `AbortHandle::abort()` on all in-flight turn tasks for the
+    /// disconnected provider.
+    AbortedAfterGrace {
+        /// Why the abort was triggered.
+        reason: CancellationReason,
+    },
 }
 
 /// The agent host. Connects once, then handles turns. `Host` is `Send + Sync`
@@ -251,6 +292,17 @@ pub struct Host {
     /// Monotonic source for permission-request ids. `Arc`-shared so the
     /// resolver closure can mint ids.
     next_request_id: Arc<AtomicU64>,
+    /// Per-provider broadcast channel for cooperative cancel signals.
+    /// Created lazily on first turn start for a given provider. Sending
+    /// on this channel races the in-flight `complete` future in
+    /// `run_turn_inner` and causes it to return
+    /// [`HostError::Cancelled`] early.
+    cancel_signal: tokio::sync::Mutex<HashMap<ProviderId, broadcast::Sender<CancellationReason>>>,
+    /// Per-provider abort handles for currently in-flight turns. Each
+    /// handle refers to the `tokio::task` spawned inside
+    /// `run_turn_inner` for one provider-round-trip. Used by
+    /// [`Host::remove_provider`] in the hard-abort stage.
+    turn_handles: tokio::sync::Mutex<HashMap<ProviderId, Vec<tokio::task::AbortHandle>>>,
 }
 
 struct SessionState {
@@ -352,6 +404,8 @@ impl Host {
             pending_bash_network: Arc::new(Mutex::new(HashMap::new())),
             current_turn_events: Arc::new(std::sync::Mutex::new(None)),
             next_request_id: Arc::new(AtomicU64::new(1)),
+            cancel_signal: tokio::sync::Mutex::new(HashMap::new()),
+            turn_handles: tokio::sync::Mutex::new(HashMap::new()),
         };
         host.wire_self_into_resolver().await;
         Ok(host)
@@ -412,6 +466,8 @@ impl Host {
             pending_bash_network: Arc::new(Mutex::new(HashMap::new())),
             current_turn_events: Arc::new(std::sync::Mutex::new(None)),
             next_request_id: Arc::new(AtomicU64::new(1)),
+            cancel_signal: tokio::sync::Mutex::new(HashMap::new()),
+            turn_handles: tokio::sync::Mutex::new(HashMap::new()),
         };
         host.wire_self_into_resolver().await;
         Ok(host)
@@ -535,21 +591,88 @@ impl Host {
                 msg_count = messages.len(),
                 "dispatching provider.complete"
             );
-            // Acquire a lease, then drop the pool guard before awaiting.
-            // This satisfies the pool-lock hygiene rule: the RwLock guard
-            // must never be held across an `.await` on the provider client.
-            let lease: ProviderLease = {
+            // Acquire a lease and snapshot the active-provider id, then drop
+            // the pool guard before awaiting. The RwLock guard must never be
+            // held across an `.await` on the provider client.
+            let (lease, active_id): (ProviderLease, ProviderId) = {
                 let active = self.active_provider.read().await.clone();
                 let pool = self.pool.read().await;
                 let Some(entry) = pool.get(&active) else {
                     return Err(HostError::NoActiveProvider);
                 };
-                entry.lease()
+                (entry.lease(), active.clone())
                 // `pool` guard dropped here
             };
-            let resp_result = lease.client().complete(req, provider_tx).await;
-            // Lease (and thus the active-turns counter) drops at end of
-            // this loop body when `lease` goes out of scope.
+
+            // Obtain (or create) the cancel-signal receiver for this provider.
+            let mut cancel_rx: broadcast::Receiver<CancellationReason> = {
+                let mut map = self.cancel_signal.lock().await;
+                let tx = map
+                    .entry(active_id.clone())
+                    .or_insert_with(|| broadcast::channel(8).0);
+                tx.subscribe()
+            };
+
+            // Spawn the provider call so we can race it against a cancel signal.
+            let client = Arc::clone(lease.client());
+            let work_handle = tokio::spawn(async move { client.complete(req, provider_tx).await });
+            let abort = work_handle.abort_handle();
+            {
+                let mut handles = self.turn_handles.lock().await;
+                handles.entry(active_id.clone()).or_default().push(abort);
+            }
+
+            // Race: provider completes normally vs. cancel signal arrives.
+            // `lease` is held here so `active_turn_count` stays > 0 for the
+            // duration. It drops after this block.
+            let resp_result = tokio::select! {
+                join_res = work_handle => {
+                    match join_res {
+                        Ok(r) => r,
+                        Err(join_err) => {
+                            if join_err.is_cancelled() {
+                                // Aborted by hard-abort stage; propagate as Cancelled.
+                                drop(lease);
+                                return Err(HostError::Cancelled(
+                                    CancellationReason::ProviderDisconnected(active_id),
+                                ));
+                            }
+                            drop(lease);
+                            return Err(HostError::Other(format!(
+                                "turn task panicked: {join_err}"
+                            )));
+                        }
+                    }
+                }
+                cancel_res = cancel_rx.recv() => {
+                    let reason = match cancel_res {
+                        Ok(r) => r,
+                        // Lagged or sender dropped — treat as provider disconnected.
+                        Err(_) => CancellationReason::ProviderDisconnected(active_id.clone()),
+                    };
+                    if let Some(tx) = &events {
+                        let _ = tx
+                            .send(TurnEvent::Cancelled { reason: reason.clone() })
+                            .await;
+                    }
+                    drop(lease);
+                    return Err(HostError::Cancelled(reason));
+                }
+            };
+
+            // Drop the lease (decrementing active_turn_count) and clean up the
+            // abort handle we registered for this iteration.
+            drop(lease);
+            {
+                let mut handles = self.turn_handles.lock().await;
+                if let Some(vec) = handles.get_mut(&active_id) {
+                    vec.retain(|h| !h.is_finished());
+                    if vec.is_empty() {
+                        handles.remove(&active_id);
+                    }
+                }
+            }
+
             // Drop the sender side (if any) so the forwarder drains and exits.
             if let Some(task) = forwarder {
                 let _ = task.await;
@@ -1047,8 +1170,15 @@ impl Host {
     /// before returning. This lets in-flight turns finish before the entry is
     /// discarded.
     ///
-    /// `DisconnectMode::Force` — not yet implemented; panics. Implemented in
-    /// Task 5.
+    /// `DisconnectMode::Force` — 3-stage cancellation:
+    /// 1. Sends a cooperative cancel signal to all in-flight turns on this
+    ///    provider; each turn's `select!` will observe it and return
+    ///    [`HostError::Cancelled`].
+    /// 2. Waits up to `HostConfig::force_disconnect_grace_ms` for
+    ///    `active_turn_count` to reach zero.
+    /// 3. If time expires, calls `AbortHandle::abort()` on every registered
+    ///    in-flight task and emits [`TurnEvent::AbortedAfterGrace`] on the
+    ///    current turn's event channel.
     ///
     /// Returns [`PoolError::NotRegistered`] if `id` is not in the pool.
     pub async fn remove_provider(
@@ -1056,23 +1186,77 @@ impl Host {
         id: &savvagent_protocol::ProviderId,
         mode: DisconnectMode,
     ) -> Result<(), PoolError> {
-        if matches!(mode, DisconnectMode::Force) {
-            panic!("DisconnectMode::Force is implemented in Task 5");
-        }
         // Remove the entry from the pool immediately so new turns can't
-        // acquire it, then wait for outstanding leases to drain.
+        // acquire it, then handle outstanding leases according to `mode`.
         let entry = {
             let mut pool = self.pool.write().await;
             pool.remove(id)
                 .ok_or_else(|| PoolError::NotRegistered(id.clone()))?
             // Write guard dropped here.
         };
-        // Poll until all leases are released. Each drop() on a ProviderLease
-        // decrements the counter; we spin with a short sleep to avoid
-        // busy-waiting while holding no locks.
-        while entry.active_turn_count() > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        match mode {
+            DisconnectMode::Drain => {
+                // Poll until all leases are released. Each drop() on a
+                // ProviderLease decrements the counter; we spin with a short
+                // sleep to avoid busy-waiting while holding no locks.
+                while entry.active_turn_count() > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
+            DisconnectMode::Force => {
+                let reason = CancellationReason::ProviderDisconnected(id.clone());
+
+                // Stage 1: cooperative cancel — broadcast the signal so any
+                // in-flight `run_turn_inner` `select!` can observe it and
+                // return early without waiting for the provider response.
+                {
+                    let map = self.cancel_signal.lock().await;
+                    if let Some(tx) = map.get(id) {
+                        let _ = tx.send(reason.clone());
+                    }
+                }
+
+                // Stage 2: bounded grace — wait for active_turn_count to hit
+                // zero or for the deadline to expire.
+                let grace = std::time::Duration::from_millis(self.config.force_disconnect_grace_ms);
+                let deadline = tokio::time::Instant::now() + grace;
+                loop {
+                    if entry.active_turn_count() == 0 {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        // Stage 3: hard abort — abort every registered task
+                        // for this provider.
+                        let mut handles = self.turn_handles.lock().await;
+                        if let Some(hs) = handles.remove(id) {
+                            for h in hs {
+                                h.abort();
+                            }
+                        }
+                        drop(handles);
+
+                        // Emit AbortedAfterGrace on the current turn's event
+                        // channel so the TUI can surface it. The channel is
+                        // held behind a std::sync::Mutex; lock with unwrap
+                        // (it's never poisoned in normal operation).
+                        if let Some(tx) = self
+                            .current_turn_events
+                            .lock()
+                            .expect("current_turn_events poisoned")
+                            .as_ref()
+                        {
+                            let _ = tx.try_send(TurnEvent::AbortedAfterGrace {
+                                reason: reason.clone(),
+                            });
+                        }
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
         }
+
         drop(entry);
         Ok(())
     }
