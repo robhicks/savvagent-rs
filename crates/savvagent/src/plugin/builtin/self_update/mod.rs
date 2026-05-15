@@ -12,12 +12,14 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
     PluginKind, Region, SlashSpec, SlotSpec, StyledLine, StyledSpan, TextMods, ThemeColor,
 };
+use tokio::time::MissedTickBehavior;
 
 /// Install-method detection (pure helper + [`std::env::current_exe`]
 /// wrapper). Public to the crate so future PRs in this series can wire
@@ -82,6 +84,12 @@ const OPT_OUT_CLI_FLAG: &str = "--no-update-check";
 /// `render_slot` returns an empty Vec when there is no update available
 /// so the row paints as theme background only.
 const BANNER_SLOT_ID: &str = "home.banner";
+
+/// Re-check interval for the periodic loop spawned by `on_event(HostStarting)`.
+/// First tick fires immediately (preserves startup behavior); subsequent
+/// ticks fire every two hours. Tests override this via
+/// [`SelfUpdatePlugin::with_periodic_interval`].
+const PERIODIC_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Inspect the process environment + argv for the opt-out signal. Pure
 /// helper (works on any iterator + env lookup) so unit tests can verify
@@ -149,6 +157,11 @@ pub struct SelfUpdatePlugin {
     /// the stub fetcher's tag to the developer's real `$HOME` cache,
     /// poisoning subsequent launches of the installed binary.
     cache_path_override: Option<PathBuf>,
+    /// Re-check cadence. Defaults to [`PERIODIC_INTERVAL`]; tests
+    /// override via [`SelfUpdatePlugin::with_periodic_interval`] so
+    /// `tokio::time::pause()` + `advance()` can drive multiple ticks
+    /// without burning a real 2-hour wall clock.
+    periodic_interval: Duration,
 }
 
 impl SelfUpdatePlugin {
@@ -180,6 +193,7 @@ impl SelfUpdatePlugin {
             fetcher,
             installer,
             cache_path_override: None,
+            periodic_interval: PERIODIC_INTERVAL,
         }
     }
 
@@ -201,6 +215,16 @@ impl SelfUpdatePlugin {
     #[cfg(test)]
     pub fn with_install_method(mut self, method: InstallMethod) -> Self {
         self.install_method = method;
+        self
+    }
+
+    /// Test-only: override the periodic re-check cadence. Default is
+    /// [`PERIODIC_INTERVAL`] (2 hours); tests pass something tiny like
+    /// `Duration::from_millis(50)` so they can drive multiple ticks
+    /// under `tokio::time::pause()` + `advance()`.
+    #[cfg(test)]
+    pub fn with_periodic_interval(mut self, interval: Duration) -> Self {
+        self.periodic_interval = interval;
         self
     }
 
@@ -326,6 +350,7 @@ impl Plugin for SelfUpdatePlugin {
         let install_method = self.install_method;
         let current_version = env!("CARGO_PKG_VERSION").to_string();
         let cache_path_override = self.cache_path_override.clone();
+        let periodic_interval = self.periodic_interval;
 
         tokio::spawn(async move {
             if matches!(install_method, InstallMethod::Dev) {
@@ -336,6 +361,12 @@ impl Plugin for SelfUpdatePlugin {
             }
 
             let cache_path = cache_path_override.or_else(cache::cache_path);
+            let mut interval = tokio::time::interval(periodic_interval);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            // First tick resolves immediately, matching today's startup
+            // timing. The full loop with skip rules is added in Task 4.
+            interval.tick().await;
             run_check_once(
                 &state,
                 &fetcher,
@@ -936,17 +967,22 @@ mod tests {
     ) -> SelfUpdatePlugin {
         SelfUpdatePlugin::with_fetcher_and_installer(fetcher, installer)
             .with_cache_path_override(cache_path)
+            // Use a tiny interval so the first tick resolves without
+            // requiring the tokio timer driver to advance a 2-hour wall
+            // clock inside the test runtime.
+            .with_periodic_interval(Duration::from_millis(1))
     }
 
     /// Spin until the plugin's state matches `predicate` or the iteration
-    /// budget is exhausted. Yields between checks so the spawned task
-    /// driven by `on_event` can run on the same runtime.
+    /// budget is exhausted. Uses `sleep(Duration::ZERO)` so each iteration
+    /// drives the tokio timer driver (required now that the spawned task
+    /// awaits `interval.tick()` before calling `run_check_once`).
     async fn wait_for_state(
         plugin: &SelfUpdatePlugin,
         predicate: impl Fn(&UpdateState) -> bool,
     ) -> UpdateState {
         for _ in 0..200 {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::ZERO).await;
             let s = plugin.state();
             if predicate(&s) {
                 return s;
