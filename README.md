@@ -120,7 +120,7 @@ provider has a key on file.
 | `/theme` | Open the theme picker (no args), or switch directly: `/theme tokyo-night`. Persists to `~/.savvagent/theme.toml`. |
 | `/language` | Open the locale picker. Persists to `~/.savvagent/language.toml`. Ships with en / es / pt / hi; falls back to en for missing keys. |
 | `/plugins` | Open the plugin manager — toggle optional plugins on/off; core plugins can't be disabled. Persists to `~/.savvagent/plugins.toml`. |
-| `/update` | Re-run the latest-release install. As of the next release the TUI installs available updates automatically on launch (the banner above the prompt reports progress); `/update` is only needed to retry after a failed install or to force the install before the next polling window. Replaces every binary in the release archive — `savvagent` plus the six helpers. Opt out with `SAVVAGENT_NO_UPDATE_CHECK=1` or `--no-update-check`. |
+| `/update` | Re-run the latest-release install. The TUI checks for new releases on launch AND re-checks every 2 hours while the TUI is open, auto-installing any newer release (the banner above the prompt reports progress). `/update` is only needed to retry after a failed install or to force the install before the next 2-hour tick. Replaces every binary in the release archive — `savvagent` plus the six helpers. Opt out with `SAVVAGENT_NO_UPDATE_CHECK=1` or `--no-update-check`. |
 | `/save` | Write the current transcript to `~/.savvagent/transcripts/<unix>.json`. |
 | `/resume` | Re-open a previously-saved transcript and continue from where it ended. With no args opens a picker; takes an absolute path or a bare basename relative to `~/.savvagent/transcripts/`. |
 | `/clear` | Reset the conversation history (and the visible log). |
@@ -314,7 +314,7 @@ Tools are stdio MCP servers. Mirror `crates/tool-fs`:
 | `SAVVAGENT_TOOL_FS_BIN` | `savvagent` | `savvagent-tool-fs` (PATH) | Path to the fs tool binary. |
 | `SAVVAGENT_TOOL_BASH_BIN` | `savvagent` | `savvagent-tool-bash` (PATH) | Path to the bash tool binary. |
 | `SAVVAGENT_TOOL_GREP_BIN` | `savvagent` | `savvagent-tool-grep` (PATH) | Path to the grep tool binary. |
-| `SAVVAGENT_NO_UPDATE_CHECK` | `savvagent` | (unset) | When set, disables the launch-time version check and `/update`. CLI equivalent: `--no-update-check`. |
+| `SAVVAGENT_NO_UPDATE_CHECK` | `savvagent` | (unset) | When set, disables the launch-time and periodic (2-hour) version check, and the `/update` slash command. CLI equivalent: `--no-update-check`. |
 | `ANTHROPIC_API_KEY` | `savvagent-anthropic` | — | Read at server start. In-process flow gets it from `/connect`. |
 | `ANTHROPIC_BASE_URL` | `savvagent-anthropic` | `https://api.anthropic.com` | For local mocks. |
 | `SAVVAGENT_ANTHROPIC_LISTEN` | `savvagent-anthropic` | `127.0.0.1:8787` | Bind address. |
