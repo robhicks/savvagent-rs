@@ -14,6 +14,7 @@
 pub mod content;
 pub mod error;
 pub mod models;
+pub mod provider_id;
 pub mod request;
 pub mod response;
 pub mod stream;
@@ -21,6 +22,7 @@ pub mod tool;
 
 pub use content::{ContentBlock, ImageSource, MediaType};
 pub use error::{ErrorKind, ProviderError};
+pub use provider_id::{ProviderId, ProviderIdError};
 pub use models::{ListModelsRequest, ListModelsResponse, ModelInfo};
 pub use request::{CompleteRequest, Message, Role};
 pub use response::{CompleteResponse, StopReason, Usage};

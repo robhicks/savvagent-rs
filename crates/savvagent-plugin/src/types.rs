@@ -47,44 +47,7 @@ impl PluginId {
     }
 }
 
-/// Stable identifier for an LLM provider.
-///
-/// External callers must use [`ProviderId::new`] to construct a value; the inner
-/// field is `pub(crate)` so direct tuple construction is only available within
-/// this crate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ProviderId(pub(crate) String);
-
-impl ProviderId {
-    /// Construct a validated provider id. Must be non-empty and consist
-    /// only of `[a-z0-9_-]` characters, starting with `[a-z]`.
-    pub fn new(s: impl Into<String>) -> Result<Self, crate::error::PluginError> {
-        let s: String = s.into();
-        if s.is_empty() {
-            return Err(crate::error::PluginError::InvalidArgs(
-                "provider id must be non-empty".into(),
-            ));
-        }
-        let mut chars = s.chars();
-        let first = chars.next().unwrap();
-        if !first.is_ascii_lowercase() {
-            return Err(crate::error::PluginError::InvalidArgs(format!(
-                "provider id must start with [a-z] — got {s:?}"
-            )));
-        }
-        if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
-            return Err(crate::error::PluginError::InvalidArgs(format!(
-                "provider id must match [a-z][a-z0-9_-]* — got {s:?}"
-            )));
-        }
-        Ok(Self(s))
-    }
-
-    /// Borrow the inner string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+pub use savvagent_protocol::ProviderId;
 
 /// Transparent newtype identifying a live terminal screen instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -364,9 +327,9 @@ mod tests {
     #[test]
     fn ids_are_string_newtypes() {
         let p = PluginId("internal:themes".to_string());
-        let q = ProviderId("anthropic".to_string());
+        let q = ProviderId::new("anthropic").unwrap();
         assert_eq!(p.0, "internal:themes");
-        assert_eq!(q.0, "anthropic");
+        assert_eq!(q.as_str(), "anthropic");
     }
 
     #[test]
@@ -407,10 +370,9 @@ mod tests {
 
     #[test]
     fn provider_id_new_rejects_uppercase() {
-        assert!(matches!(
-            ProviderId::new("Anthropic").unwrap_err(),
-            crate::error::PluginError::InvalidArgs(_)
-        ));
+        // ProviderId now lives in savvagent-protocol; its error type is
+        // ProviderIdError, not PluginError.
+        assert!(ProviderId::new("Anthropic").is_err());
     }
 
     #[test]

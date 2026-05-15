@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn kind_matches_variant() {
         let e = HostEvent::Connect {
-            provider_id: ProviderId("anthropic".into()),
+            provider_id: ProviderId::new("anthropic").unwrap(),
         };
         assert_eq!(e.kind(), HookKind::Connect);
 
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn kind_maps_every_variant_correctly() {
-        let pid = ProviderId("p".into());
+        let pid = ProviderId::new("p").unwrap();
         let cases: Vec<(HostEvent, HookKind)> = vec![
             (HostEvent::HostStarting, HookKind::HostStarting),
             (
