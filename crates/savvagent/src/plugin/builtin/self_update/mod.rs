@@ -223,7 +223,6 @@ impl SelfUpdatePlugin {
     /// `Duration::from_millis(50)` so they can drive multiple ticks
     /// under `tokio::time::pause()` + `advance()`.
     #[cfg(test)]
-    #[allow(dead_code)]
     pub fn with_periodic_interval(mut self, interval: Duration) -> Self {
         self.periodic_interval = interval;
         self
@@ -364,19 +363,35 @@ impl Plugin for SelfUpdatePlugin {
             let cache_path = cache_path_override.or_else(cache::cache_path);
             let mut interval = tokio::time::interval(periodic_interval);
             interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            let mut is_first_tick = true;
 
-            // First tick resolves immediately, matching today's startup
-            // timing. The full loop with skip rules is added in Task 4.
-            interval.tick().await;
-            run_check_once(
-                &state,
-                &fetcher,
-                &installer,
-                install_method,
-                &current_version,
-                cache_path.as_deref(),
-            )
-            .await;
+            loop {
+                interval.tick().await;
+
+                // Snapshot pre-tick state. Skip rules evaluate before the
+                // network call so we can short-circuit cheap cases.
+                let pre_state = match state.lock() {
+                    Ok(g) => g.clone(),
+                    Err(_) => return,
+                };
+                match pre_state {
+                    UpdateState::Disabled => return,
+                    UpdateState::Updated { .. } => return,
+                    _ => {}
+                }
+
+                run_check_once(
+                    &state,
+                    &fetcher,
+                    &installer,
+                    install_method,
+                    &current_version,
+                    cache_path.as_deref(),
+                    is_first_tick,
+                )
+                .await;
+                is_first_tick = false;
+            }
         });
 
         Ok(vec![])
@@ -491,28 +506,36 @@ async fn run_check_once(
     install_method: InstallMethod,
     current_version: &str,
     cache_path: Option<&std::path::Path>,
+    is_first_tick: bool,
 ) {
-    // 24h cache: if a fresh entry exists, skip the network. Tests
-    // that exercise this code path pass an explicit override (set
-    // via `with_cache_path_override`) so the production cache file
-    // under the developer's real `$HOME` is never touched by the
-    // suite.
+    // 24h cache: if a fresh entry exists on the first tick, skip the
+    // network. Tests that exercise this code path pass an explicit
+    // override (set via `with_cache_path_override`) so the production
+    // cache file under the developer's real `$HOME` is never touched by
+    // the suite.
     //
-    // A cached `latest_tag` strictly older than the running binary
-    // is treated as a cache miss: it implies the user upgraded
-    // out-of-band (cargo install, downloaded tarball, package
-    // manager) since the cache was written, so we have no
-    // authoritative info about what's newer than the current
-    // version and must re-fetch.
-    let cached_fresh = cache_path
-        .and_then(cache::load)
-        .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS))
-        .filter(|e| {
-            !matches!(
-                check::compare_versions(current_version, &e.latest_tag),
-                check::Comparison::Ahead | check::Comparison::Unparseable
-            )
-        });
+    // A cached `latest_tag` strictly older than the running binary is
+    // treated as a cache miss: it implies the user upgraded out-of-band
+    // (cargo install, downloaded tarball, package manager) since the
+    // cache was written, so we have no authoritative info about what's
+    // newer than the current version and must re-fetch.
+    //
+    // Subsequent ticks always bypass the cache so the periodic loop
+    // actually contacts GitHub and can detect new releases published
+    // after startup.
+    let cached_fresh = if is_first_tick {
+        cache_path
+            .and_then(cache::load)
+            .filter(|e| cache::is_fresh(e, cache::now_unix(), cache::DEFAULT_TTL_SECS))
+            .filter(|e| {
+                !matches!(
+                    check::compare_versions(current_version, &e.latest_tag),
+                    check::Comparison::Ahead | check::Comparison::Unparseable
+                )
+            })
+    } else {
+        None
+    };
 
     let result = if let Some(entry) = cached_fresh {
         tracing::debug!(tag = %entry.latest_tag, "self-update: using cached tag");
@@ -569,6 +592,34 @@ mod tests {
     impl ReleasesFetcher for FixedFetcher {
         async fn latest_tag(&self) -> anyhow::Result<String> {
             Ok(self.0.to_string())
+        }
+    }
+
+    /// In-test releases fetcher that returns a fixed tag and counts
+    /// how many times `latest_tag()` is invoked. Used by tests that
+    /// need to assert the periodic loop is actually running ticks.
+    struct CountingFetcher {
+        tag: &'static str,
+        invocations: AtomicUsize,
+    }
+
+    impl CountingFetcher {
+        fn new(tag: &'static str) -> Self {
+            Self {
+                tag,
+                invocations: AtomicUsize::new(0),
+            }
+        }
+        fn invocation_count(&self) -> usize {
+            self.invocations.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ReleasesFetcher for CountingFetcher {
+        async fn latest_tag(&self) -> anyhow::Result<String> {
+            self.invocations.fetch_add(1, Ordering::SeqCst);
+            Ok(self.tag.to_string())
         }
     }
 
@@ -1153,5 +1204,206 @@ mod tests {
         // Cache must be rewritten with the freshly fetched tag.
         let entry = cache::load(&cache_path).expect("cache must be rewritten on re-fetch");
         assert_eq!(entry.latest_tag, "v99.99.99");
+    }
+
+    /// Advance virtual time and yield enough that the spawned task can
+    /// observe the tick. Pause must already be active via
+    /// `#[tokio::test(start_paused = true)]`.
+    async fn advance_and_yield(by: Duration) {
+        tokio::time::advance(by).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Drive `n` periodic ticks by advancing virtual time `n` times at
+    /// `step` each. Necessary because `MissedTickBehavior::Delay` (set on
+    /// the production interval) collapses a single large advance into
+    /// exactly ONE tick — it skips missed ticks and resumes after now.
+    /// To produce multiple ticks we must advance step-by-step.
+    async fn advance_n_ticks(n: usize, step: Duration) {
+        for _ in 0..n {
+            advance_and_yield(step).await;
+        }
+    }
+
+    /// Spin until the plugin's state matches `predicate`, advancing virtual
+    /// time by `step` between checks. Bounded to 200 iterations.
+    async fn advance_until_state(
+        plugin: &SelfUpdatePlugin,
+        step: Duration,
+        predicate: impl Fn(&UpdateState) -> bool,
+    ) -> UpdateState {
+        for _ in 0..200 {
+            advance_and_yield(step).await;
+            let s = plugin.state();
+            if predicate(&s) {
+                return s;
+            }
+        }
+        panic!(
+            "state predicate never matched; final state: {:?}",
+            plugin.state()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_check_runs_multiple_ticks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        // Tag below CARGO_PKG_VERSION → classification lands at UpToDate
+        // (the "Ahead" branch in compare_versions), keeping the loop alive.
+        let fetcher = Arc::new(CountingFetcher::new("v0.0.1"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        // Let the first tick run.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        // Drive three periodic ticks (Delay-mode interval requires
+        // advancing one step at a time).
+        advance_n_ticks(3, interval).await;
+
+        assert!(
+            fetcher.invocation_count() >= 3,
+            "expected ≥3 fetch invocations (1 startup + ≥2 periodic), got {}",
+            fetcher.invocation_count()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_check_breaks_after_updated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        advance_until_state(&p, interval, |s| matches!(s, UpdateState::Updated { .. })).await;
+
+        // Loop must have broken; advance several more intervals and confirm
+        // the fetcher and installer were not re-invoked.
+        advance_and_yield(interval * 5).await;
+        assert_eq!(
+            installer.invocation_count(),
+            1,
+            "installer must run exactly once before the Updated break"
+        );
+        assert_eq!(
+            fetcher.invocation_count(),
+            1,
+            "fetcher must run exactly once before the Updated break"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_check_does_not_start_in_dev() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Dev)
+            .with_periodic_interval(interval)
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        advance_and_yield(interval * 5).await;
+
+        assert_eq!(fetcher.invocation_count(), 0);
+        assert_eq!(installer.invocation_count(), 0);
+        assert_eq!(p.state(), UpdateState::Disabled);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_tick_uses_cache_subsequent_tick_bypasses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("update-check.json");
+        let interval = Duration::from_millis(50);
+
+        // Pre-write a fresh cache entry with the current version as the tag,
+        // so it is a startup cache HIT (not stale-vs-current) and classifies
+        // to UpToDate.
+        let current = env!("CARGO_PKG_VERSION");
+        cache::save(
+            &cache_path,
+            &cache::CacheEntry {
+                schema_version: 1,
+                checked_at_unix: cache::now_unix(),
+                latest_tag: format!("v{current}"),
+            },
+        );
+
+        let fetcher = Arc::new(CountingFetcher::new("v99.99.99"));
+        let installer = Arc::new(StubInstaller::ok());
+
+        let mut p = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            rust_i18n::set_locale("en");
+            SelfUpdatePlugin::with_fetcher_and_installer(
+                Arc::clone(&fetcher) as Arc<dyn ReleasesFetcher>,
+                Arc::clone(&installer) as Arc<dyn Installer>,
+            )
+            .with_cache_path_override(cache_path)
+            .with_install_method(InstallMethod::Installed)
+            .with_periodic_interval(interval)
+        };
+
+        p.on_event(HostEvent::HostStarting).await.unwrap();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            fetcher.invocation_count(),
+            0,
+            "first tick must use the on-disk cache when fresh and not stale"
+        );
+
+        // Second tick must bypass the cache and hit the fetcher.
+        advance_and_yield(interval).await;
+        assert!(
+            fetcher.invocation_count() >= 1,
+            "subsequent tick must bypass cache and call the fetcher, got {}",
+            fetcher.invocation_count()
+        );
     }
 }
