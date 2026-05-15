@@ -517,6 +517,10 @@ async fn dispatch_slash_command(
             handle_disconnect_command(app, rest, host_slot).await;
             return;
         }
+        "/use" => {
+            handle_use_command(app, rest, host_slot).await;
+            return;
+        }
         _ => {}
     }
 
@@ -1235,6 +1239,41 @@ async fn handle_disconnect_command(app: &mut App, rest: &str, host_slot: &HostSl
             tracing::warn!(error = %e, "remove_provider failed in /disconnect handler");
         }
     });
+}
+
+async fn handle_use_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
+    let provider = rest.split_whitespace().next().unwrap_or("");
+    if provider.is_empty() {
+        app.push_note(rust_i18n::t!("notes.use-needs-provider").to_string());
+        return;
+    }
+    let Some(host) = current_host(host_slot).await else {
+        app.push_note(rust_i18n::t!("notes.use-no-host").to_string());
+        return;
+    };
+    let pid = match savvagent_protocol::ProviderId::new(provider) {
+        Ok(p) => p,
+        Err(_) => {
+            app.push_note(rust_i18n::t!("notes.use-invalid-id", id = provider).to_string());
+            return;
+        }
+    };
+    match host.set_active_provider(&pid).await {
+        Ok(()) => {
+            // History is already cleared on the host side; reset the
+            // TUI's transcript view to match.
+            app.entries.clear();
+            app.live_text.clear();
+            app.update_metrics();
+            app.push_note(rust_i18n::t!("notes.use-switched", name = provider).to_string());
+        }
+        Err(savvagent_host::PoolError::NotRegistered(_)) => {
+            app.push_note(rust_i18n::t!("notes.use-not-connected", name = provider).to_string());
+        }
+        Err(e) => {
+            app.push_note(format!("{e}"));
+        }
+    }
 }
 
 /// `/bash <cmd>` — run `cmd` through `tool-bash` without round-tripping

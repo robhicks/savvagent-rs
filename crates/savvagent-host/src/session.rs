@@ -1261,6 +1261,26 @@ impl Host {
         Ok(())
     }
 
+    /// Switch the active provider. Clears conversation history before
+    /// swapping — Phase 1 invariant is "one active provider per
+    /// conversation," so a switch is effectively a fresh start.
+    ///
+    /// Returns [`PoolError::NotRegistered`] if `id` is not in the pool.
+    pub async fn set_active_provider(&self, id: &ProviderId) -> Result<(), PoolError> {
+        // Validate first, before mutating any state.
+        {
+            let pool = self.pool.read().await;
+            if !pool.contains_key(id) {
+                return Err(PoolError::NotRegistered(id.clone()));
+            }
+        }
+        // Order matters: clear history first (so the new provider sees a
+        // clean session), then swap active.
+        self.clear_history().await;
+        *self.active_provider.write().await = id.clone();
+        Ok(())
+    }
+
     /// Acquire a lease on the named provider without going through
     /// `run_turn`. Used by integration tests to simulate an in-flight turn
     /// and verify drain-mode semantics.

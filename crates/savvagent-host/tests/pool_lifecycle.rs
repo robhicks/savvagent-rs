@@ -242,3 +242,38 @@ async fn force_disconnect_aborts_uncooperative_turn_within_grace() {
         "expected an error from the aborted turn, got Ok"
     );
 }
+
+#[tokio::test]
+async fn set_active_provider_rejects_unknown() {
+    let mut cfg = HostConfig::new(
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
+        "m",
+    );
+    cfg.providers = vec![reg("anthropic", "m")];
+    cfg.startup_connect = StartupConnectPolicy::All;
+    let host = Host::start(cfg).await.unwrap();
+    let bad = ProviderId::new("missing").unwrap();
+    let err = host.set_active_provider(&bad).await.unwrap_err();
+    assert!(matches!(err, savvagent_host::PoolError::NotRegistered(_)));
+    // Active provider unchanged.
+    assert_eq!(host.active_provider().await.as_str(), "anthropic");
+}
+
+#[tokio::test]
+async fn set_active_provider_swaps_when_pool_has_entry() {
+    let mut cfg = HostConfig::new(
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
+        "m",
+    );
+    cfg.providers = vec![reg("anthropic", "m"), reg("gemini", "m")];
+    cfg.startup_connect = StartupConnectPolicy::All;
+    let host = Host::start(cfg).await.unwrap();
+    assert_eq!(host.active_provider().await.as_str(), "anthropic");
+    let gemini = ProviderId::new("gemini").unwrap();
+    host.set_active_provider(&gemini).await.unwrap();
+    assert_eq!(host.active_provider().await.as_str(), "gemini");
+}
