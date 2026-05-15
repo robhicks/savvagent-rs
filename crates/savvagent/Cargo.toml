@@ -75,5 +75,6 @@ semver.workspace = true
 
 [dev-dependencies]
 rmcp.workspace = true
+serial_test = "3"
 tempfile = "3"
 tokio = { version = "1.52", features = ["test-util"] }

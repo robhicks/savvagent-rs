@@ -97,10 +97,21 @@ impl Plugin for ProviderGeminiPlugin {
         }
     }
 
-    async fn handle_slash(&mut self, _: &str, _: Vec<String>) -> Result<Vec<Effect>, PluginError> {
-        // See `provider_anthropic::handle_slash` for the always-prompt
-        // rationale: the picker flow lets the user re-key even when a
-        // credential is stored. Enter-on-empty falls back to stored.
+    async fn handle_slash(
+        &mut self,
+        _: &str,
+        args: Vec<String>,
+    ) -> Result<Vec<Effect>, PluginError> {
+        let rekey = args.iter().any(|a| a == "--rekey");
+        if !rekey && self.try_connect_from_keyring().is_some() {
+            // Stored key worked; register without opening the modal.
+            return Ok(vec![Effect::RegisterProvider {
+                id: ProviderId::new(PROVIDER_ID).expect("valid"),
+                display_name: DISPLAY_NAME.into(),
+            }]);
+        }
+        // No stored key, --rekey explicitly requested, or stored key
+        // didn't yield a working client: open the modal.
         Ok(vec![Effect::PromptApiKey {
             provider_id: ProviderId::new(PROVIDER_ID).expect("valid"),
         }])
@@ -150,7 +161,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn no_creds_emits_prompt_api_key() {
+        rust_i18n::set_locale("en");
         let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.delete_credential());
 
         let mut p = ProviderGeminiPlugin::new();
@@ -161,6 +174,64 @@ mod tests {
             }
             other => panic!("expected PromptApiKey, got {other:?}"),
         }
+        rust_i18n::set_locale("en");
+    }
+
+    /// `/connect gemini` with a stored key must NOT emit
+    /// `Effect::PromptApiKey`; it must instead emit `RegisterProvider`
+    /// immediately via the keyring path.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn handle_slash_with_stored_key_skips_modal() {
+        rust_i18n::set_locale("en");
+
+        let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.set_password("test-key"));
+
+        let mut p = ProviderGeminiPlugin::new();
+        let effs = p.handle_slash("connect gemini", vec![]).await.unwrap();
+        let saw_prompt = effs
+            .iter()
+            .any(|e| matches!(e, Effect::PromptApiKey { .. }));
+        assert!(
+            !saw_prompt,
+            "with a stored key, /connect must not open the modal; got effects: {effs:?}"
+        );
+        let saw_register = effs.iter().any(
+            |e| matches!(e, Effect::RegisterProvider { id, .. } if id.as_str() == PROVIDER_ID),
+        );
+        assert!(
+            saw_register,
+            "must register the provider silently; got effects: {effs:?}"
+        );
+
+        let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.delete_credential());
+        rust_i18n::set_locale("en");
+    }
+
+    /// `--rekey` must open the API-key modal even with a stored key,
+    /// letting the user update their credentials.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn handle_slash_with_rekey_flag_opens_modal_even_when_client_exists() {
+        rust_i18n::set_locale("en");
+
+        // Gemini plugin doesn't expose with_test_client; install a keyring
+        // entry and verify --rekey overrides the silent-connect path.
+        let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.set_password("test-key"));
+
+        let mut p = ProviderGeminiPlugin::new();
+        let effs = p
+            .handle_slash("connect gemini", vec!["--rekey".into()])
+            .await
+            .unwrap();
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, Effect::PromptApiKey { .. })),
+            "--rekey must open the modal even with a stored key; got {effs:?}"
+        );
+
+        let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.delete_credential());
+        rust_i18n::set_locale("en");
     }
 
     #[test]

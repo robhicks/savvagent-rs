@@ -131,14 +131,21 @@ impl Plugin for ProviderAnthropicPlugin {
         }
     }
 
-    async fn handle_slash(&mut self, _: &str, _: Vec<String>) -> Result<Vec<Effect>, PluginError> {
-        // `/connect <provider>` (via the picker or directly) always
-        // opens the API-key entry modal so the user can re-key — even
-        // if a credential is already in the keyring. Pressing Enter on
-        // an empty input falls back to the stored key (see the modal's
-        // submit handler), so the stored-key path remains one keystroke.
-        // Silent auto-connect on startup happens in `on_event(HostStarting)`,
-        // not here.
+    async fn handle_slash(
+        &mut self,
+        _: &str,
+        args: Vec<String>,
+    ) -> Result<Vec<Effect>, PluginError> {
+        let rekey = args.iter().any(|a| a == "--rekey");
+        if !rekey && self.try_connect_from_keyring().is_some() {
+            // Stored key worked; register without opening the modal.
+            return Ok(vec![Effect::RegisterProvider {
+                id: ProviderId::new(PROVIDER_ID).expect("valid"),
+                display_name: DISPLAY_NAME.into(),
+            }]);
+        }
+        // No stored key, --rekey explicitly requested, or stored key
+        // didn't yield a working client: open the modal.
         Ok(vec![Effect::PromptApiKey {
             provider_id: ProviderId::new(PROVIDER_ID).expect("valid"),
         }])
@@ -192,7 +199,9 @@ mod tests {
     /// masked input — not a dead-end note telling the user to do
     /// what they just did.
     #[tokio::test]
+    #[serial_test::serial]
     async fn no_creds_emits_prompt_api_key() {
+        rust_i18n::set_locale("en");
         // Best-effort: clear any existing entry so the keyring read returns
         // `Ok(None)` on platforms that have a backend. On CI (no backend),
         // load() returns Ok(None) regardless.
@@ -206,14 +215,48 @@ mod tests {
             }
             other => panic!("expected PromptApiKey, got {other:?}"),
         }
+        rust_i18n::set_locale("en");
     }
 
-    /// `/connect <provider>` must open the API-key modal *even when the
-    /// plugin already has a constructed client* — letting the user
-    /// re-key from the picker. Pre-fix behavior short-circuited and
-    /// silently emitted `RegisterProvider`, denying re-key.
+    /// `/connect anthropic` with a stored key must NOT emit
+    /// `Effect::PromptApiKey`; it must instead emit `RegisterProvider`
+    /// immediately via the keyring path.
     #[tokio::test]
-    async fn handle_slash_with_existing_client_still_prompts() {
+    #[serial_test::serial]
+    async fn handle_slash_with_stored_key_skips_modal() {
+        rust_i18n::set_locale("en");
+
+        // Install a stored key for the duration of the test.
+        let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.set_password("test-key"));
+
+        let mut p = ProviderAnthropicPlugin::new();
+        let effs = p.handle_slash("connect anthropic", vec![]).await.unwrap();
+        let saw_prompt = effs
+            .iter()
+            .any(|e| matches!(e, Effect::PromptApiKey { .. }));
+        assert!(
+            !saw_prompt,
+            "with a stored key, /connect must not open the modal; got effects: {effs:?}"
+        );
+        let saw_register = effs.iter().any(
+            |e| matches!(e, Effect::RegisterProvider { id, .. } if id.as_str() == PROVIDER_ID),
+        );
+        assert!(
+            saw_register,
+            "must register the provider silently; got effects: {effs:?}"
+        );
+
+        // Cleanup.
+        let _ = keyring::Entry::new("savvagent", PROVIDER_ID).map(|e| e.delete_credential());
+        rust_i18n::set_locale("en");
+    }
+
+    /// `--rekey` must open the API-key modal even when the plugin already
+    /// has a constructed client, letting the user update their key.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn handle_slash_with_rekey_flag_opens_modal_even_when_client_exists() {
+        rust_i18n::set_locale("en");
         use async_trait::async_trait;
         use savvagent_mcp::ProviderClient;
         use savvagent_protocol::{
@@ -237,13 +280,15 @@ mod tests {
         }
 
         let mut p = ProviderAnthropicPlugin::with_test_client(Box::new(StubClient));
-        let effs = p.handle_slash("connect anthropic", vec![]).await.unwrap();
-        match &effs[0] {
-            Effect::PromptApiKey { provider_id } => {
-                assert_eq!(provider_id.as_str(), PROVIDER_ID);
-            }
-            other => panic!("expected PromptApiKey even with pre-installed client; got {other:?}"),
-        }
+        let effs = p
+            .handle_slash("connect anthropic", vec!["--rekey".into()])
+            .await
+            .unwrap();
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, Effect::PromptApiKey { .. }))
+        );
+        rust_i18n::set_locale("en");
     }
 
     #[test]
