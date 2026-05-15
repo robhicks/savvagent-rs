@@ -3664,6 +3664,7 @@ name = "savvagent-plugin"
 version = "0.14.3"
 dependencies = [
  "async-trait",
+ "savvagent-protocol",
  "tokio",
 ]
 
