@@ -1,7 +1,12 @@
 //! Host configuration types.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use savvagent_mcp::ProviderClient;
+use savvagent_protocol::ProviderId;
+
+use crate::capabilities::{ModelAlias, ProviderCapabilities};
 use crate::permissions::PermissionPolicy;
 use crate::sandbox::SandboxConfig;
 
@@ -30,8 +35,63 @@ pub enum ToolEndpoint {
     },
 }
 
-/// Top-level host configuration.
+/// A connected provider handed to the host at construction time (or
+/// later, via `Host::add_provider`). The plugin builds the `Arc<dyn
+/// ProviderClient>` once and the host stores that same Arc — no Box→Arc
+/// conversion exists anywhere in the system.
+pub struct ProviderRegistration {
+    /// Stable identifier for this provider (e.g. `"anthropic"`).
+    pub id: ProviderId,
+    /// Human-readable name for display in the UI.
+    pub display_name: String,
+    /// Pre-built client. Stored as `Arc` so the host and callers can
+    /// share the same allocation without a Box→Arc round-trip.
+    pub client: Arc<dyn ProviderClient + Send + Sync>,
+    /// Capability metadata for this provider's models.
+    pub capabilities: ProviderCapabilities,
+    /// Short aliases that map bare names to specific models on this
+    /// provider (e.g. `"opus"` → `"claude-opus-4-7"`).
+    pub aliases: Vec<ModelAlias>,
+}
+
+impl std::fmt::Debug for ProviderRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderRegistration")
+            .field("id", &self.id)
+            .field("display_name", &self.display_name)
+            .field("capabilities", &self.capabilities)
+            .field("aliases", &self.aliases)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Which providers should auto-connect when `Host::start` runs.
 #[derive(Debug, Clone)]
+pub enum StartupConnectPolicy {
+    /// Only providers in this allow-list are auto-connected.
+    OptIn(Vec<ProviderId>),
+    /// Every provider in `HostConfig::providers` is auto-connected.
+    All,
+    /// Skip auto-connect entirely; pool starts empty.
+    None,
+    /// Auto-connect only the provider(s) recorded in
+    /// `~/.savvagent/state.toml`'s `last_used` field. Resolution happens
+    /// in the embedder (TUI) before the policy is built — by the time
+    /// the host sees `LastUsed`, the inner vec is already populated.
+    LastUsed(Vec<ProviderId>),
+}
+
+impl Default for StartupConnectPolicy {
+    fn default() -> Self {
+        Self::OptIn(Vec::new())
+    }
+}
+
+/// Top-level host configuration.
+// `Clone` is intentionally absent: `ProviderRegistration` holds an
+// `Arc<dyn ProviderClient>` which could be cloned but shouldn't be — the host
+// owns a single Arc per provider.  Debug is implemented manually for the same
+// reason.
 pub struct HostConfig {
     /// Provider to route `complete` calls to.
     pub provider: ProviderEndpoint,
@@ -81,6 +141,26 @@ pub struct HostConfig {
     /// the version at runtime (config file, plugin host wrapper) can
     /// pass it without lifetime acrobatics. See [`Self::with_app_version`].
     pub app_version: Option<String>,
+
+    /// Providers handed in at construction time. Each entry becomes a
+    /// `PoolEntry` in the host's provider pool, subject to
+    /// `startup_connect`. The legacy `provider: ProviderEndpoint` field
+    /// is preserved for the rmcp HTTP-transport debug path; when
+    /// `providers` is non-empty, the host uses the pool and ignores
+    /// the legacy field.
+    pub providers: Vec<ProviderRegistration>,
+
+    /// Which `providers` entries to actually connect at `Host::start`.
+    pub startup_connect: StartupConnectPolicy,
+
+    /// Per-provider timeout (milliseconds) for auto-connect during
+    /// `Host::start`.
+    pub connect_timeout_ms: u64,
+
+    /// Grace period (milliseconds) for `DisconnectMode::Force` between
+    /// emitting the cooperative cancel signal and aborting outstanding
+    /// turn tasks.
+    pub force_disconnect_grace_ms: u64,
 }
 
 impl HostConfig {
@@ -102,6 +182,10 @@ impl HostConfig {
             sandbox: None,
             default_prompt_enabled: true,
             app_version: None,
+            providers: Vec::new(),
+            startup_connect: StartupConnectPolicy::default(),
+            connect_timeout_ms: 3000,
+            force_disconnect_grace_ms: 500,
         }
     }
 
@@ -170,6 +254,104 @@ impl HostConfig {
     pub fn with_app_version(mut self, version: impl Into<String>) -> Self {
         self.app_version = Some(version.into());
         self
+    }
+}
+
+impl std::fmt::Debug for HostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostConfig")
+            .field("provider", &self.provider)
+            .field("tools", &self.tools)
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("project_root", &self.project_root)
+            .field("system_prompt", &self.system_prompt)
+            .field("max_iterations", &self.max_iterations)
+            .field("policy", &self.policy)
+            .field("sandbox", &self.sandbox)
+            .field("default_prompt_enabled", &self.default_prompt_enabled)
+            .field("app_version", &self.app_version)
+            .field("providers", &self.providers)
+            .field("startup_connect", &self.startup_connect)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("force_disconnect_grace_ms", &self.force_disconnect_grace_ms)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use crate::capabilities::{CostTier, ModelCapabilities, ProviderCapabilities};
+    use async_trait::async_trait;
+    use savvagent_mcp::ProviderClient;
+    use savvagent_protocol::{
+        CompleteRequest, CompleteResponse, ListModelsResponse, ProviderError, ProviderId,
+        StreamEvent,
+    };
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    struct StubClient;
+    #[async_trait]
+    impl ProviderClient for StubClient {
+        async fn complete(
+            &self,
+            _: CompleteRequest,
+            _: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            unreachable!()
+        }
+        async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn provider_registration_constructs() {
+        let caps = ProviderCapabilities {
+            models: vec![ModelCapabilities {
+                id: "m".into(),
+                display_name: "M".into(),
+                supports_vision: false,
+                supports_audio: false,
+                context_window: 1000,
+                cost_tier: CostTier::Standard,
+            }],
+            default_model: "m".into(),
+        };
+        let reg = ProviderRegistration {
+            id: ProviderId::new("stub").unwrap(),
+            display_name: "Stub".into(),
+            client: Arc::new(StubClient) as Arc<dyn ProviderClient + Send + Sync>,
+            capabilities: caps,
+            aliases: vec![],
+        };
+        assert_eq!(reg.id.as_str(), "stub");
+        assert_eq!(reg.display_name, "Stub");
+    }
+
+    #[test]
+    fn startup_policy_defaults_to_opt_in() {
+        let p = StartupConnectPolicy::default();
+        assert!(matches!(p, StartupConnectPolicy::OptIn(ref v) if v.is_empty()));
+    }
+
+    #[test]
+    fn host_config_has_pool_fields_with_defaults() {
+        let cfg = HostConfig::new(
+            ProviderEndpoint::StreamableHttp {
+                url: "http://x".into(),
+            },
+            "model",
+        );
+        assert!(cfg.providers.is_empty());
+        assert!(matches!(
+            cfg.startup_connect,
+            StartupConnectPolicy::OptIn(_)
+        ));
+        assert_eq!(cfg.connect_timeout_ms, 3000);
+        assert_eq!(cfg.force_disconnect_grace_ms, 500);
     }
 }
 

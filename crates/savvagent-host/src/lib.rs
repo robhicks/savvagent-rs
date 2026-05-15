@@ -33,7 +33,9 @@ mod session;
 mod tools;
 
 pub use capabilities::{CostTier, ModelAlias, ModelCapabilities, ProviderCapabilities};
-pub use config::{HostConfig, ProviderEndpoint, ToolEndpoint};
+pub use config::{
+    HostConfig, ProviderEndpoint, ProviderRegistration, StartupConnectPolicy, ToolEndpoint,
+};
 pub use default_prompt::AppVersion;
 pub use permissions::{
     ArgPattern, BashNetworkChoice, BashNetworkPolicy, FrontMatterPermissions, PermissionDecision,
