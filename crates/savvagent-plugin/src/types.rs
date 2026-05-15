@@ -289,6 +289,12 @@ pub enum ScreenArgs {
     /// specific version" feature can land an arg here without breaking
     /// the public surface.
     Changelog,
+    /// Open the first-launch migration picker, populated with the detected
+    /// provider ids that have stored keyring credentials.
+    MigrationPicker {
+        /// Provider ids that have stored keyring credentials.
+        detected: Vec<String>,
+    },
 }
 
 impl ScreenArgs {
@@ -316,6 +322,7 @@ impl ScreenArgs {
             ScreenArgs::LanguagePicker { .. } => Some("language.picker"),
             ScreenArgs::ModelPicker { .. } => Some("model.picker"),
             ScreenArgs::Changelog => Some("changelog"),
+            ScreenArgs::MigrationPicker { .. } => Some("migration.picker"),
         }
     }
 }
@@ -544,5 +551,12 @@ mod tests {
             Some("plugins.manager")
         );
         assert_eq!(ScreenArgs::Changelog.screen_id(), Some("changelog"));
+        assert_eq!(
+            ScreenArgs::MigrationPicker {
+                detected: vec!["anthropic".into()]
+            }
+            .screen_id(),
+            Some("migration.picker")
+        );
     }
 }

@@ -1,9 +1,6 @@
 //! ~/.savvagent/config.toml schema, load, save, and migration marker.
 //! Single source of truth for non-routing knobs (startup connect policy,
 //! per-provider connect timeout, migration_v1_done marker).
-//!
-//! Task 9 will wire these types into the TUI; suppress dead_code until then.
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 
@@ -78,6 +75,8 @@ impl ConfigFile {
         std::fs::write(path, text)
     }
 
+    // Task 15 wires this into TUI startup; suppress dead_code until then.
+    #[allow(dead_code)]
     pub fn to_startup_policy(&self) -> StartupConnectPolicy {
         let ids: Vec<ProviderId> = self
             .startup

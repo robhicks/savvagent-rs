@@ -57,6 +57,7 @@ pub(crate) use registry::BuiltinSet;
 /// PR 5 adds: connect, resume, model, save, clear.
 /// PR 6 adds: themes + 4 providers (anthropic / openai / gemini / local).
 /// PR 8 adds: plugins-manager.
+/// Task 9 adds: migration-picker.
 ///
 /// Provider plugins are stored exactly once per plugin in
 /// [`crate::plugin::builtin::provider_common::ProviderEntry`], which exposes
@@ -86,6 +87,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::home_footer::HomeFooterPlugin::new()),
         Box::new(builtin::home_tips::HomeTipsPlugin::new()),
         Box::new(builtin::language::LanguagePlugin::new()),
+        Box::new(builtin::migration_picker::MigrationPickerPlugin::new()),
         Box::new(builtin::model::ModelPlugin::new()),
         Box::new(builtin::plugins_manager::PluginsManagerPlugin::new()),
         Box::new(builtin::prompt_keybindings::PromptKeybindingsPlugin::new()),
@@ -110,7 +112,8 @@ mod tests {
     #[tokio::test]
     async fn register_builtins_pr8_complete() {
         let set = register_builtins();
-        // Non-provider plugins from PR 1..PR 5 + themes (PR 6) + plugins-manager (PR 8).
+        // Non-provider plugins from PR 1..PR 5 + themes (PR 6) + plugins-manager (PR 8)
+        // + migration-picker (Task 9).
         let plugin_ids: Vec<_> = set
             .plugins
             .iter()
@@ -126,6 +129,7 @@ mod tests {
             "internal:home-footer",
             "internal:home-tips",
             "internal:language",
+            "internal:migration-picker",
             "internal:model",
             "internal:plugins-manager",
             "internal:prompt-keybindings",
@@ -142,7 +146,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 19);
+        assert_eq!(set.plugins.len(), 20);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -166,17 +170,14 @@ mod tests {
         }
         assert_eq!(set.providers.len(), 4);
 
-        // Registry shape: the post-fix invariant is that the registry's
-        // plugins HashMap has one entry per non-provider plugin PLUS one
-        // entry per provider plugin (same underlying Arc as the providers
-        // map). v0.11.0 PR 1 adds `internal:self-update`; the
-        // prompt/editor keybindings split brings the non-provider count
-        // to 18; changelog adds one more to 19; total registry size is 19 + 4 = 23.
+        // Registry shape: non-provider plugins PLUS 4 provider plugins.
+        // Task 9 adds migration-picker, bringing non-provider count to 20;
+        // total registry size is 20 + 4 = 24.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            23,
-            "registry should have 19 non-provider + 4 provider plugins"
+            24,
+            "registry should have 20 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),

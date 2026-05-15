@@ -520,6 +520,29 @@ async fn open_screen(app: &mut App, id: &str, args: ScreenArgs) -> Result<(), St
             ),
         );
         (screen, layout)
+    } else if id == "migration.picker" {
+        // The detected list is carried in ScreenArgs::MigrationPicker so we
+        // can pass it directly to the screen without reaching into App state.
+        let detected = match args {
+            ScreenArgs::MigrationPicker { detected } => detected,
+            _ => vec![],
+        };
+        let layout = {
+            let plugin = handle.lock().await;
+            let manifest = plugin.manifest();
+            manifest
+                .contributions
+                .screens
+                .iter()
+                .find(|s| s.id == id)
+                .ok_or_else(|| format!("plugin {} doesn't declare screen {id}", pid.as_str()))?
+                .layout
+                .clone()
+        };
+        let screen: Box<dyn savvagent_plugin::Screen> = Box::new(
+            crate::plugin::builtin::migration_picker::screen::MigrationPickerScreen::new(detected),
+        );
+        (screen, layout)
     } else {
         let plugin = handle.lock().await;
         let manifest = plugin.manifest();

@@ -308,6 +308,17 @@ self-update-description   = "Check for new releases and install them automatical
 splash-description        = "Startup HUD + parse-error screen"
 themes-description        = "Color themes + /theme picker"
 view-file-description     = "Read-only file viewer"
+migration-picker-description = "First-launch picker for startup_providers"
+
+[migration.picker]
+title        = "First launch — pick startup providers"
+hint         = "Found multiple stored keys. Choose which should auto-connect on startup. Space to toggle, Enter to confirm, Esc to use default."
+row-selected = "✓ %{name}"
+row-unselected = "  %{name}"
+
+[migration]
+saved    = "Saved startup_providers = [%{ids}] to ~/.savvagent/config.toml"
+fallback = "No selection confirmed; defaulting to startup_providers = [%{ids}]"
 
 [errors]
 tool-bash-not-found  = "Note: savvagent-tool-bash not found — bash disabled. Run `cargo build` or set SAVVAGENT_TOOL_BASH_BIN."

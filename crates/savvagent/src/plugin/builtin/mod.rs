@@ -89,3 +89,8 @@ pub mod provider_gemini;
 
 /// Local (Ollama) provider shim: keyless `internal:provider-local`.
 pub mod provider_local;
+
+/// First-launch migration picker for `startup_providers`.
+/// Runs once on `HostStarting`; opens a multi-select modal when multiple
+/// keyring credentials are detected.
+pub mod migration_picker;

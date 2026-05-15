@@ -3,9 +3,6 @@
 //! `startup_providers` list. If more than one key exists, the TUI opens
 //! a picker (UI side, Task 9); if exactly one or zero, write a deterministic
 //! default. Either way, set `v1_done = true` so the picker never reopens.
-//!
-//! Task 9 will wire these functions into the TUI; suppress dead_code until then.
-#![allow(dead_code)]
 
 use crate::config_file::ConfigFile;
 

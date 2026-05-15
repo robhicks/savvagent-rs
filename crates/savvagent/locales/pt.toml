@@ -304,6 +304,17 @@ self-update-description   = "Verificar novas versões e instalá-las automaticam
 splash-description        = "HUD de inicialização + tela de erro de parsing"
 themes-description        = "Temas de cor + seletor /theme"
 view-file-description     = "Visualizador de arquivos somente leitura"
+migration-picker-description = "Seletor de primeiro lançamento para startup_providers"
+
+[migration.picker]
+title        = "Primeiro lançamento — escolha provedores iniciais"
+hint         = "Várias chaves armazenadas encontradas. Escolha quais devem se conectar automaticamente na inicialização. Espaço para alternar, Enter para confirmar, Esc para usar o padrão."
+row-selected = "✓ %{name}"
+row-unselected = "  %{name}"
+
+[migration]
+saved    = "Salvo startup_providers = [%{ids}] em ~/.savvagent/config.toml"
+fallback = "Nenhuma seleção confirmada; usando startup_providers = [%{ids}] como padrão"
 
 [errors]
 tool-bash-not-found  = "Nota: savvagent-tool-bash não encontrado — bash desabilitado. Execute `cargo build` ou defina SAVVAGENT_TOOL_BASH_BIN."
