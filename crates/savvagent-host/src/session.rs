@@ -15,10 +15,12 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use crate::config::{HostConfig, ProviderEndpoint};
+use crate::capabilities::{CostTier, ModelCapabilities, ProviderCapabilities};
+use crate::config::{HostConfig, ProviderEndpoint, ProviderRegistration, StartupConnectPolicy};
 use crate::permissions::{
     BashNetworkChoice, BashNetworkPolicy, PermissionDecision, PermissionPolicy, Verdict,
 };
+use crate::pool::{DisconnectMode, PoolEntry, PoolError, ProviderLease};
 use crate::project;
 use crate::provider::RmcpProviderClient;
 use crate::sandbox::SandboxConfig;
@@ -88,6 +90,10 @@ pub enum HostError {
     /// Loop ran past [`HostConfig::max_iterations`] without reaching `end_turn`.
     #[error("tool-use loop exceeded {0} iterations")]
     LoopLimit(u32),
+    /// The pool has no active provider selected (e.g. pool is empty or the
+    /// active provider was drained while a turn was starting).
+    #[error("no active provider in pool")]
+    NoActiveProvider,
     /// Tool routing produced a malformed `tool_use` block. No longer
     /// constructed — kept in the public API so external `match` arms still
     /// compile. Slated for removal in the next minor (0.15.0) version.
@@ -207,7 +213,12 @@ pub enum TurnEvent {
 /// behind shared state so the TUI can hand it to background tasks.
 pub struct Host {
     config: HostConfig,
-    provider: Box<dyn ProviderClient + Send + Sync>,
+    /// Provider pool: keyed by [`ProviderId`], holds a [`PoolEntry`] per
+    /// registered provider. Guarded by a `tokio::sync::RwLock`; guards
+    /// **must never be held across an `.await` on the provider client**.
+    pool: tokio::sync::RwLock<HashMap<savvagent_protocol::ProviderId, PoolEntry>>,
+    /// The currently-active provider id. Turns are routed to this entry.
+    active_provider: tokio::sync::RwLock<savvagent_protocol::ProviderId>,
     tools: Mutex<Option<ToolRegistry>>,
     state: Mutex<SessionState>,
     system_prompt: Option<String>,
@@ -250,11 +261,67 @@ impl Host {
     /// Connect to the configured provider and tool servers, perform any MCP
     /// handshakes, and load the project context file.
     pub async fn start(config: HostConfig) -> Result<Self, HostError> {
-        let provider: Box<dyn ProviderClient + Send + Sync> = match &config.provider {
-            ProviderEndpoint::StreamableHttp { url } => {
-                Box::new(RmcpProviderClient::connect(url).await?)
+        // Build the pool. When `config.providers` is non-empty, populate it
+        // according to `config.startup_connect`. Otherwise fall back to the
+        // legacy single-provider path using the rmcp HTTP transport.
+        let (pool_map, active_id) = if !config.providers.is_empty() {
+            let mut map: HashMap<savvagent_protocol::ProviderId, PoolEntry> = HashMap::new();
+            let should_connect: Box<dyn Fn(&savvagent_protocol::ProviderId) -> bool> =
+                match &config.startup_connect {
+                    StartupConnectPolicy::All => Box::new(|_| true),
+                    StartupConnectPolicy::None => Box::new(|_| false),
+                    StartupConnectPolicy::OptIn(allow) | StartupConnectPolicy::LastUsed(allow) => {
+                        let set: std::collections::HashSet<_> = allow.iter().cloned().collect();
+                        Box::new(move |id| set.contains(id))
+                    }
+                };
+            for reg in &config.providers {
+                if should_connect(&reg.id) {
+                    map.insert(
+                        reg.id.clone(),
+                        PoolEntry::new(
+                            Arc::clone(&reg.client),
+                            reg.capabilities.clone(),
+                            reg.display_name.clone(),
+                        ),
+                    );
+                }
             }
+            // Active provider = first entry that was connected; if none were
+            // connected, fall back to the first registered provider id.
+            let active = config
+                .providers
+                .iter()
+                .find(|r| map.contains_key(&r.id))
+                .map(|r| r.id.clone())
+                .unwrap_or_else(|| config.providers[0].id.clone());
+            (map, active)
+        } else {
+            // Legacy fallback: rmcp HTTP transport, single "default" entry.
+            let provider_arc: Arc<dyn ProviderClient + Send + Sync> = match &config.provider {
+                ProviderEndpoint::StreamableHttp { url } => {
+                    Arc::new(RmcpProviderClient::connect(url).await?)
+                }
+            };
+            let id =
+                savvagent_protocol::ProviderId::new("default").expect("\"default\" is a valid id");
+            let caps = ProviderCapabilities {
+                models: vec![ModelCapabilities {
+                    id: config.model.clone(),
+                    display_name: config.model.clone(),
+                    supports_vision: false,
+                    supports_audio: false,
+                    context_window: 0,
+                    cost_tier: CostTier::Standard,
+                }],
+                default_model: config.model.clone(),
+            };
+            let entry = PoolEntry::new(provider_arc, caps, "Default".into());
+            let mut map = HashMap::new();
+            map.insert(id.clone(), entry);
+            (map, id)
         };
+
         let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
         // The real resolver — which calls back into the host's
         // permission state — captures `&self` and so can
@@ -272,7 +339,8 @@ impl Host {
             .unwrap_or_else(|| PermissionPolicy::default_for(&config.project_root));
         let host = Self {
             config,
-            provider,
+            pool: tokio::sync::RwLock::new(pool_map),
+            active_provider: tokio::sync::RwLock::new(active_id),
             tools: Mutex::new(Some(tools)),
             state: Mutex::new(SessionState {
                 messages: Vec::new(),
@@ -292,6 +360,9 @@ impl Host {
     /// Construct a host directly from a (possibly mock) [`ProviderClient`] and
     /// a pre-connected tool registry. Used by tests and embedders that want to
     /// bypass the standard transport layer.
+    ///
+    /// The supplied `provider` is stored as the sole pool entry under the
+    /// synthetic id `"default"`, which also becomes the active provider.
     #[doc(hidden)]
     pub async fn with_components(
         config: HostConfig,
@@ -306,9 +377,30 @@ impl Host {
             .policy
             .clone()
             .unwrap_or_else(|| PermissionPolicy::default_for(&config.project_root));
+
+        // Wrap the boxed client into an Arc-backed pool entry.
+        let provider_arc: Arc<dyn ProviderClient + Send + Sync> = Arc::from(provider);
+        let default_id =
+            savvagent_protocol::ProviderId::new("default").expect("\"default\" is a valid id");
+        let caps = ProviderCapabilities {
+            models: vec![ModelCapabilities {
+                id: config.model.clone(),
+                display_name: config.model.clone(),
+                supports_vision: false,
+                supports_audio: false,
+                context_window: 0,
+                cost_tier: CostTier::Standard,
+            }],
+            default_model: config.model.clone(),
+        };
+        let entry = PoolEntry::new(provider_arc, caps, "Default".into());
+        let mut pool_map: HashMap<savvagent_protocol::ProviderId, PoolEntry> = HashMap::new();
+        pool_map.insert(default_id.clone(), entry);
+
         let host = Self {
             config,
-            provider,
+            pool: tokio::sync::RwLock::new(pool_map),
+            active_provider: tokio::sync::RwLock::new(default_id),
             tools: Mutex::new(Some(tools)),
             state: Mutex::new(SessionState {
                 messages: Vec::new(),
@@ -352,7 +444,21 @@ impl Host {
     pub async fn list_models(
         &self,
     ) -> Result<savvagent_protocol::ListModelsResponse, savvagent_protocol::ProviderError> {
-        self.provider.list_models().await
+        let lease = {
+            let active = self.active_provider.read().await.clone();
+            let pool = self.pool.read().await;
+            let Some(entry) = pool.get(&active) else {
+                return Err(savvagent_protocol::ProviderError {
+                    kind: savvagent_protocol::ErrorKind::Internal,
+                    message: "no active provider in pool".into(),
+                    retry_after_ms: None,
+                    provider_code: None,
+                });
+            };
+            entry.lease()
+        };
+        // Pool read guard dropped here; now safe to await.
+        lease.client().list_models().await
     }
 
     async fn run_turn_inner(
@@ -429,7 +535,21 @@ impl Host {
                 msg_count = messages.len(),
                 "dispatching provider.complete"
             );
-            let resp_result = self.provider.complete(req, provider_tx).await;
+            // Acquire a lease, then drop the pool guard before awaiting.
+            // This satisfies the pool-lock hygiene rule: the RwLock guard
+            // must never be held across an `.await` on the provider client.
+            let lease: ProviderLease = {
+                let active = self.active_provider.read().await.clone();
+                let pool = self.pool.read().await;
+                let Some(entry) = pool.get(&active) else {
+                    return Err(HostError::NoActiveProvider);
+                };
+                entry.lease()
+                // `pool` guard dropped here
+            };
+            let resp_result = lease.client().complete(req, provider_tx).await;
+            // Lease (and thus the active-turns counter) drops at end of
+            // this loop body when `lease` goes out of scope.
             // Drop the sender side (if any) so the forwarder drains and exits.
             if let Some(task) = forwarder {
                 let _ = task.await;
@@ -890,10 +1010,92 @@ impl Host {
             r.shutdown().await;
         }
     }
+
+    /// The currently-active provider id. Turns are routed to this entry.
+    pub async fn active_provider(&self) -> savvagent_protocol::ProviderId {
+        self.active_provider.read().await.clone()
+    }
+
+    /// Whether `id` is currently registered (and connected) in the pool.
+    pub async fn is_connected(&self, id: &str) -> bool {
+        let Ok(pid) = savvagent_protocol::ProviderId::new(id) else {
+            return false;
+        };
+        self.pool.read().await.contains_key(&pid)
+    }
+
+    /// Register a new provider in the pool.
+    ///
+    /// Returns [`PoolError::AlreadyRegistered`] if a provider with the same
+    /// id is already present.
+    pub async fn add_provider(&self, reg: ProviderRegistration) -> Result<(), PoolError> {
+        let mut pool = self.pool.write().await;
+        if pool.contains_key(&reg.id) {
+            return Err(PoolError::AlreadyRegistered(reg.id));
+        }
+        pool.insert(
+            reg.id.clone(),
+            PoolEntry::new(reg.client, reg.capabilities, reg.display_name),
+        );
+        Ok(())
+    }
+
+    /// Remove a provider from the pool.
+    ///
+    /// `DisconnectMode::Drain` — removes the entry from the eligibility set
+    /// immediately, then waits for all outstanding [`ProviderLease`]s to drop
+    /// before returning. This lets in-flight turns finish before the entry is
+    /// discarded.
+    ///
+    /// `DisconnectMode::Force` — not yet implemented; panics. Implemented in
+    /// Task 5.
+    ///
+    /// Returns [`PoolError::NotRegistered`] if `id` is not in the pool.
+    pub async fn remove_provider(
+        &self,
+        id: &savvagent_protocol::ProviderId,
+        mode: DisconnectMode,
+    ) -> Result<(), PoolError> {
+        if matches!(mode, DisconnectMode::Force) {
+            panic!("DisconnectMode::Force is implemented in Task 5");
+        }
+        // Remove the entry from the pool immediately so new turns can't
+        // acquire it, then wait for outstanding leases to drain.
+        let entry = {
+            let mut pool = self.pool.write().await;
+            pool.remove(id)
+                .ok_or_else(|| PoolError::NotRegistered(id.clone()))?
+            // Write guard dropped here.
+        };
+        // Poll until all leases are released. Each drop() on a ProviderLease
+        // decrements the counter; we spin with a short sleep to avoid
+        // busy-waiting while holding no locks.
+        while entry.active_turn_count() > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        drop(entry);
+        Ok(())
+    }
+
+    /// Acquire a lease on the named provider without going through
+    /// `run_turn`. Used by integration tests to simulate an in-flight turn
+    /// and verify drain-mode semantics.
+    #[doc(hidden)]
+    pub async fn acquire_lease_for_test(
+        &self,
+        id: &savvagent_protocol::ProviderId,
+    ) -> Result<ProviderLease, PoolError> {
+        let pool = self.pool.read().await;
+        let entry = pool
+            .get(id)
+            .ok_or_else(|| PoolError::NotRegistered(id.clone()))?;
+        Ok(entry.lease())
+    }
 }
 
-// We hold a `Box<dyn ProviderClient + Send + Sync>`. The trait object is
-// Send + Sync; the rest of `Host` is too. Help the compiler verify it.
+// The pool and active_provider are wrapped in `tokio::sync::RwLock` which
+// is `Send + Sync`. `PoolEntry` holds `Arc<dyn ProviderClient + Send + Sync>`
+// which is also `Send + Sync`. The rest of `Host` is too.
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Host>();
