@@ -57,9 +57,9 @@ use app::{
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use providers::{PROVIDERS, ProviderSpec};
 use savvagent_host::{
-    BashNetworkChoice, Host, HostConfig, PermissionDecision, ProviderEndpoint,
-    ProviderRegistration, SandboxConfig, SandboxMode, ToolCallStatus, ToolEndpoint,
-    TranscriptError, TurnEvent,
+    BashNetworkChoice, Host, HostConfig, LegacyModelResolution, PermissionDecision,
+    ProviderEndpoint, ProviderRegistration, ProviderView, SandboxConfig, SandboxMode,
+    ToolCallStatus, ToolEndpoint, TranscriptError, TurnEvent, resolve_legacy_model,
 };
 use tokio::sync::{RwLock, mpsc};
 
@@ -389,18 +389,58 @@ async fn bootstrap_pool_host(
             .or_else(|| providers.first())
     };
 
-    let (initial_model, initial_provider_id) = match active_reg {
+    // Run the SAVVAGENT_MODEL legacy resolver against the full provider list.
+    // This handles both "provider/model" and bare-model forms and surfaces
+    // diagnostics when the value is ambiguous or unknown.
+    let env_model_raw = std::env::var("SAVVAGENT_MODEL").unwrap_or_default();
+    let provider_views: Vec<ProviderView<'_>> = providers
+        .iter()
+        .map(|r| ProviderView {
+            id: &r.id,
+            capabilities: &r.capabilities,
+        })
+        .collect();
+    let legacy_resolution = resolve_legacy_model(&env_model_raw, &provider_views);
+
+    // For Resolved/ResolvedFromBare the resolver picked a specific provider;
+    // override active_reg to that registration so the header and HostConfig
+    // both reflect the correct initial model. For all other outcomes the
+    // existing policy-filtered active_reg stands.
+    let (resolved_model, resolved_reg): (Option<String>, Option<&ProviderRegistration>) =
+        match &legacy_resolution {
+            LegacyModelResolution::Resolved { provider, model } => {
+                let reg = providers.iter().find(|r| &r.id == provider);
+                (Some(model.clone()), reg)
+            }
+            LegacyModelResolution::ResolvedFromBare {
+                provider,
+                model,
+                note,
+            } => {
+                deferred_notes.push(note.clone());
+                let reg = providers.iter().find(|r| &r.id == provider);
+                (Some(model.clone()), reg)
+            }
+            LegacyModelResolution::Ambiguous { note, .. }
+            | LegacyModelResolution::Unknown { note }
+            | LegacyModelResolution::UnknownProvider { note, .. } => {
+                deferred_notes.push(note.clone());
+                (None, None)
+            }
+            LegacyModelResolution::NoOverride => (None, None),
+        };
+
+    let effective_reg = resolved_reg.or(active_reg);
+
+    let (initial_model, initial_provider_id) = match effective_reg {
         Some(reg) => {
-            // Use the capabilities default_model, overridden by SAVVAGENT_MODEL
-            // or the persisted models.toml entry for this provider.
-            let base = reg.capabilities.default_model.clone();
-            let model = if let Ok(env_model) = std::env::var("SAVVAGENT_MODEL") {
-                if !env_model.is_empty() {
-                    env_model
-                } else {
-                    base
-                }
+            // Use the resolved model when the legacy resolver found one;
+            // otherwise fall back to the persisted models.toml preference or
+            // the provider's capability default_model.
+            let model = if let Some(m) = resolved_model {
+                m
             } else {
+                let base = reg.capabilities.default_model.clone();
                 let pref = models_pref::ModelsPref::load();
                 pref.get(reg.id.as_str())
                     .map(|s| s.to_string())
