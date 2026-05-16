@@ -1,15 +1,10 @@
 //! `internal:provider-local` — keyless Ollama shim.
 //!
 //! Unlike the other provider shims, this one needs no credentials. On
-//! `HostStarting` (and on `/connect local`) the plugin attempts a quick
-//! reachability probe against the configured Ollama endpoint and, on
-//! success, builds an in-process [`savvagent_mcp::ProviderClient`] and
-//! emits [`savvagent_plugin::Effect::RegisterProvider`].
-//!
-//! v0.9 deferred item: the actual ping is stubbed — we build the provider
-//! and emit `RegisterProvider` regardless. The first turn surfaces any
-//! reachability failure. A proper health-check + retry loop lands as part
-//! of PR 7's Host integration. See task 6.3 in the v0.9 plan.
+//! `HostStarting` (and on `/connect local`) the plugin builds an in-process
+//! [`savvagent_mcp::ProviderClient`] and emits
+//! [`savvagent_plugin::Effect::RegisterProvider`]. The health-check is a
+//! no-op; failures surface on the first turn.
 
 use std::sync::Arc;
 
@@ -117,8 +112,7 @@ impl ProviderLocalPlugin {
     }
 
     /// Try to construct an in-process Ollama client. Returns `Some(())` on
-    /// success. v0.9 ships without a true health-check — TODO is wired in
-    /// PR 7 alongside the rest of the Host integration.
+    /// success.
     ///
     /// A previously-failed build short-circuits this call. The user can
     /// retry via `/connect local`, which clears the sticky bit on success
@@ -130,7 +124,6 @@ impl ProviderLocalPlugin {
         if self.last_build_failed {
             // A prior call set the sticky bit; surface "endpoint unreachable"
             // again rather than spinning the builder per slash/hook re-entry.
-            // PR 7's real health-check will replace this with a timed probe.
             return None;
         }
         let provider = match provider_local::OllamaProvider::builder().build() {
@@ -263,11 +256,9 @@ impl BuiltinProviderPlugin for ProviderLocalPlugin {
 mod tests {
     use super::*;
 
-    /// Local is keyless, so the "no-creds" path doesn't apply. Until the
-    /// real Ollama ping lands (deferred to PR 7), `/connect local` always
-    /// builds a client and emits `RegisterProvider`. This test pins down
-    /// the v0.9 stub behavior so the deferred upgrade doesn't regress
-    /// silently.
+    /// Local is keyless, so the "no-creds" path doesn't apply. `/connect local`
+    /// builds a client and emits `RegisterProvider` when Ollama is reachable,
+    /// or `PushNote` when the build fails.
     #[tokio::test]
     async fn connect_emits_register_or_push_note() {
         let mut p = ProviderLocalPlugin::new();

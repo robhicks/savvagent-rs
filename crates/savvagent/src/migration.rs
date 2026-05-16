@@ -1,8 +1,9 @@
 //! First-launch migration: when config.toml is absent or `v1_done=false`,
 //! scan the keyring for existing provider keys and decide the initial
-//! `startup_providers` list. If more than one key exists, the TUI opens
-//! a picker (UI side, Task 9); if exactly one or zero, write a deterministic
-//! default. Either way, set `v1_done = true` so the picker never reopens.
+//! `startup_providers` list. If more than one key exists, the TUI opens a
+//! picker (see `migration_picker::screen`); if exactly one or zero, write a
+//! deterministic default. Either way, set `v1_done = true` so the picker
+//! never reopens.
 
 use crate::config_file::ConfigFile;
 

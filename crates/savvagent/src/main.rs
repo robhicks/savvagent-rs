@@ -284,11 +284,6 @@ async fn main() -> Result<()> {
 /// var is set we skip the pool path entirely and fall back to the rmcp HTTP
 /// transport (the headless debug workflow).
 ///
-/// TODO(task-15): add integration test in
-/// `crates/savvagent/tests/startup_policy.rs` that exercises the pool path
-/// via a TempDir + fake keyring + direct call to this function. Deferred
-/// because the headless tests in `savvagent-host` already cover policy
-/// filtering. See the multi-provider-pool Phase 1 plan, Task 15 step 5.
 async fn bootstrap_pool_host(
     project_root: &Path,
     tool_bins: &ToolBins,

@@ -93,7 +93,8 @@ impl Default for StartupConnectPolicy {
 // owns a single Arc per provider.  Debug is implemented manually for the same
 // reason.
 pub struct HostConfig {
-    /// Provider to route `complete` calls to.
+    /// Legacy single-provider endpoint, used only when [`Self::providers`] is
+    /// empty (rmcp HTTP debug transport).
     pub provider: ProviderEndpoint,
     /// Tool MCP servers to spawn at startup.
     pub tools: Vec<ToolEndpoint>,

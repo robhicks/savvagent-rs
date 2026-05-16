@@ -75,8 +75,6 @@ impl ConfigFile {
         std::fs::write(path, text)
     }
 
-    // Task 15 wires this into TUI startup; suppress dead_code until then.
-    #[allow(dead_code)]
     pub fn to_startup_policy(&self) -> StartupConnectPolicy {
         let ids: Vec<ProviderId> = self
             .startup

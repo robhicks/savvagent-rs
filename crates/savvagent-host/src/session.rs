@@ -1357,9 +1357,8 @@ impl Host {
         Ok(())
     }
 
-    /// Switch the active provider. Clears conversation history before
-    /// swapping — Phase 1 invariant is "one active provider per
-    /// conversation," so a switch is effectively a fresh start.
+    /// Switch the active provider. Clears conversation history first so the
+    /// new provider starts on a clean session.
     ///
     /// Returns [`PoolError::NotRegistered`] if `id` is not in the pool.
     pub async fn set_active_provider(&self, id: &ProviderId) -> Result<(), PoolError> {

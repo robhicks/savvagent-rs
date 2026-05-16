@@ -27,8 +27,6 @@ pub enum PoolError {
 }
 
 /// Controls how an active provider entry is removed from the pool.
-///
-/// `Force` is reserved for Task 5 — no branching on it is implemented here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisconnectMode {
     /// Wait for all outstanding [`ProviderLease`]s to drop before completing
@@ -36,7 +34,10 @@ pub enum DisconnectMode {
     /// `active_turns` counter.
     Drain,
     /// Immediately cancel in-flight turns (3-stage: cooperative cancel →
-    /// 500 ms grace → `JoinHandle::abort`). Implemented in Task 5.
+    /// grace period → `JoinHandle::abort`). The grace duration is
+    /// [`crate::config::HostConfig::force_disconnect_grace_ms`].
+    /// Branching lives in [`Host::remove_provider`]; see that method for the
+    /// 3-stage protocol.
     Force,
 }
 
