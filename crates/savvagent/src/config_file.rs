@@ -8,6 +8,25 @@ use savvagent_host::StartupConnectPolicy;
 use savvagent_protocol::ProviderId;
 use serde::{Deserialize, Serialize};
 
+/// Typed version of the `startup.policy` config key. Serialises to/from
+/// kebab-case strings (`"opt-in"`, `"all"`, `"none"`, `"last-used"`).
+/// An unrecognised string in the TOML will fail to deserialise; the
+/// `load_or_default` caller logs a warning and falls back to the default
+/// rather than silently choosing `OptIn`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartupPolicyKind {
+    /// Only providers in `startup_providers` are auto-connected.
+    #[default]
+    OptIn,
+    /// Every registered provider is auto-connected.
+    All,
+    /// No auto-connect; pool starts empty.
+    None,
+    /// Auto-connect the provider(s) from last session.
+    LastUsed,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ConfigFile {
     #[serde(default)]
@@ -18,9 +37,8 @@ pub struct ConfigFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartupSection {
-    /// "opt-in" | "all" | "last-used" | "none"
-    #[serde(default = "default_policy")]
-    pub policy: String,
+    #[serde(default)]
+    pub policy: StartupPolicyKind,
     #[serde(default)]
     pub startup_providers: Vec<String>,
     #[serde(default = "default_timeout")]
@@ -30,15 +48,11 @@ pub struct StartupSection {
 impl Default for StartupSection {
     fn default() -> Self {
         Self {
-            policy: default_policy(),
+            policy: StartupPolicyKind::default(),
             startup_providers: Vec::new(),
             connect_timeout_ms: default_timeout(),
         }
     }
-}
-
-fn default_policy() -> String {
-    "opt-in".into()
 }
 
 fn default_timeout() -> u64 {
@@ -59,11 +73,23 @@ impl ConfigFile {
             .join("config.toml")
     }
 
+    /// Load from `path`, falling back to [`Self::default`] on file-not-found
+    /// or parse error. Parse errors are logged at `warn` level.
     pub fn load_or_default(path: &Path) -> Self {
         let Ok(contents) = std::fs::read_to_string(path) else {
             return Self::default();
         };
-        toml::from_str(&contents).unwrap_or_default()
+        match toml::from_str::<ConfigFile>(&contents) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "config.toml parse failed; falling back to defaults"
+                );
+                Self::default()
+            }
+        }
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -82,11 +108,11 @@ impl ConfigFile {
             .iter()
             .filter_map(|s| ProviderId::new(s).ok())
             .collect();
-        match self.startup.policy.as_str() {
-            "all" => StartupConnectPolicy::All,
-            "none" => StartupConnectPolicy::None,
-            "last-used" => StartupConnectPolicy::LastUsed(ids),
-            _ => StartupConnectPolicy::OptIn(ids),
+        match self.startup.policy {
+            StartupPolicyKind::All => StartupConnectPolicy::All,
+            StartupPolicyKind::None => StartupConnectPolicy::None,
+            StartupPolicyKind::LastUsed => StartupConnectPolicy::LastUsed(ids),
+            StartupPolicyKind::OptIn => StartupConnectPolicy::OptIn(ids),
         }
     }
 }
@@ -101,7 +127,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         let cfg = ConfigFile::load_or_default(&path);
-        assert_eq!(cfg.startup.policy, "opt-in");
+        assert_eq!(cfg.startup.policy, StartupPolicyKind::OptIn);
         assert!(cfg.startup.startup_providers.is_empty());
         assert!(!cfg.migration.v1_done);
     }
@@ -111,14 +137,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         let mut cfg = ConfigFile::default();
-        cfg.startup.policy = "opt-in".into();
+        cfg.startup.policy = StartupPolicyKind::OptIn;
         cfg.startup.startup_providers = vec!["anthropic".into(), "gemini".into()];
         cfg.startup.connect_timeout_ms = 4000;
         cfg.migration.v1_done = true;
         cfg.save(&path).unwrap();
 
         let loaded = ConfigFile::load_or_default(&path);
-        assert_eq!(loaded.startup.policy, "opt-in");
+        assert_eq!(loaded.startup.policy, StartupPolicyKind::OptIn);
         assert_eq!(
             loaded.startup.startup_providers,
             vec!["anthropic", "gemini"]
@@ -130,18 +156,33 @@ mod tests {
     #[test]
     fn policy_string_maps_correctly() {
         let mut cfg = ConfigFile::default();
-        cfg.startup.policy = "all".into();
+        cfg.startup.policy = StartupPolicyKind::All;
         assert!(matches!(cfg.to_startup_policy(), StartupConnectPolicy::All));
-        cfg.startup.policy = "none".into();
+        cfg.startup.policy = StartupPolicyKind::None;
         assert!(matches!(
             cfg.to_startup_policy(),
             StartupConnectPolicy::None
         ));
-        cfg.startup.policy = "opt-in".into();
+        cfg.startup.policy = StartupPolicyKind::OptIn;
         cfg.startup.startup_providers = vec!["anthropic".into()];
         match cfg.to_startup_policy() {
             StartupConnectPolicy::OptIn(ids) => assert_eq!(ids.len(), 1),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn invalid_policy_string_falls_back_to_default() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[startup]\npolicy = \"invalid-typo\"\nconnect_timeout_ms = 5000\n",
+        )
+        .unwrap();
+        let cfg = ConfigFile::load_or_default(&path);
+        // Falls back entirely to default on parse error.
+        assert_eq!(cfg.startup.policy, StartupPolicyKind::OptIn);
+        assert_eq!(cfg.startup.connect_timeout_ms, default_timeout());
     }
 }
