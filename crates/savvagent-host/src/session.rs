@@ -84,8 +84,6 @@ pub enum TranscriptError {
 pub enum CancellationReason {
     /// The provider supplying this turn was force-disconnected mid-flight.
     ProviderDisconnected(ProviderId),
-    /// The user explicitly requested an abort.
-    UserAbort,
 }
 
 impl std::fmt::Display for CancellationReason {
@@ -94,7 +92,6 @@ impl std::fmt::Display for CancellationReason {
             CancellationReason::ProviderDisconnected(id) => {
                 write!(f, "provider {} disconnected", id.as_str())
             }
-            CancellationReason::UserAbort => write!(f, "user aborted"),
         }
     }
 }
