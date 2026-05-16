@@ -319,6 +319,12 @@ async fn bootstrap_pool_host(
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(plugin = $log_name, error = %e, "provider build failed at startup");
+                    deferred_notes.push(rust_i18n::t!(
+                        "notes.startup-build-failed",
+                        name = $log_name,
+                        err = e.to_string(),
+                        id = $spec_id
+                    ).to_string());
                 }
                 Err(_elapsed) => {
                     let ms = config_file.startup.connect_timeout_ms;
