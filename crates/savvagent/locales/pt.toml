@@ -331,8 +331,9 @@ row-selected = "✓ %{name}"
 row-unselected = "  %{name}"
 
 [migration]
-saved    = "Salvo startup_providers = [%{ids}] em ~/.savvagent/config.toml"
-fallback = "Nenhuma seleção confirmada; usando startup_providers = [%{ids}] como padrão"
+saved       = "Salvo startup_providers = [%{ids}] em ~/.savvagent/config.toml"
+fallback    = "Nenhuma seleção confirmada; usando startup_providers = [%{ids}] como padrão"
+save-failed = "Failed to save startup_providers to ~/.savvagent/config.toml: %{err}. The picker will re-open next launch."
 
 [errors]
 tool-bash-not-found  = "Nota: savvagent-tool-bash não encontrado — bash desabilitado. Execute `cargo build` ou defina SAVVAGENT_TOOL_BASH_BIN."

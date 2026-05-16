@@ -73,21 +73,35 @@ impl MigrationPickerPlugin {
     }
 
     /// Write `startup_providers` + `v1_done = true` to config.toml and return
-    /// a `PushNote` effect confirming the save.
+    /// a `PushNote` effect. On save failure, the note carries the error text
+    /// instead of falsely claiming success.
     fn write_and_mark(&self, startup_providers: Vec<String>) -> Effect {
-        let path = ConfigFile::default_path();
-        let mut cfg = ConfigFile::load_or_default(&path);
+        self.write_and_mark_at(&ConfigFile::default_path(), startup_providers)
+    }
+
+    /// Path-injectable variant used in tests to avoid mutating the real home dir.
+    pub(crate) fn write_and_mark_at(
+        &self,
+        path: &std::path::Path,
+        startup_providers: Vec<String>,
+    ) -> Effect {
+        let mut cfg = ConfigFile::load_or_default(path);
         let ids_str = startup_providers.join(", ");
         cfg.startup.startup_providers = startup_providers;
         cfg.migration.v1_done = true;
-        if let Err(e) = cfg.save(&path) {
-            tracing::warn!(error = %e, "migration: failed to write config.toml after confirm");
-        }
-        Effect::PushNote {
-            line: StyledLine::plain(
+        let line = match cfg.save(path) {
+            Ok(()) => StyledLine::plain(
                 rust_i18n::t!("migration.saved", ids = ids_str.as_str()).to_string(),
             ),
-        }
+            Err(e) => {
+                tracing::warn!(error = %e, "migration: failed to write config.toml after confirm");
+                StyledLine::plain(
+                    rust_i18n::t!("migration.save-failed", err = e.to_string().as_str())
+                        .to_string(),
+                )
+            }
+        };
+        Effect::PushNote { line }
     }
 }
 
@@ -157,18 +171,26 @@ impl Plugin for MigrationPickerPlugin {
             "_internal:migration-dismiss" => {
                 let fallback = dismissed_fallback(&self.detected_cache);
                 let ids_str = fallback.join(", ");
-                let note_text =
-                    rust_i18n::t!("migration.fallback", ids = ids_str.as_str()).to_string();
                 let path = ConfigFile::default_path();
                 let mut cfg = ConfigFile::load_or_default(&path);
                 cfg.startup.startup_providers = fallback;
                 cfg.migration.v1_done = true;
-                if let Err(e) = cfg.save(&path) {
-                    tracing::warn!(error = %e, "migration: failed to write config.toml after dismiss");
-                }
-                Ok(vec![Effect::PushNote {
-                    line: StyledLine::plain(note_text),
-                }])
+                let line = match cfg.save(&path) {
+                    Ok(()) => StyledLine::plain(
+                        rust_i18n::t!("migration.fallback", ids = ids_str.as_str()).to_string(),
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "migration: failed to write config.toml after dismiss"
+                        );
+                        StyledLine::plain(
+                            rust_i18n::t!("migration.save-failed", err = e.to_string().as_str())
+                                .to_string(),
+                        )
+                    }
+                };
+                Ok(vec![Effect::PushNote { line }])
             }
             _ => Ok(vec![]),
         }
@@ -293,5 +315,47 @@ mod tests {
             matches!(result, Err(PluginError::ScreenNotFound(ref id)) if id == "unknown"),
             "expected ScreenNotFound(\"unknown\"), got an Ok"
         );
+    }
+
+    /// Verify that `write_and_mark_at` surfaces an error note when the target
+    /// path cannot be written, instead of falsely claiming the save succeeded.
+    ///
+    /// The test uses a read-only directory as the parent so `cfg.save` will
+    /// fail with a permission error (UNIX only).
+    #[test]
+    #[cfg(unix)]
+    fn write_and_mark_save_failure_returns_error_note() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        // Make the directory unwriteable so creating config.toml inside fails.
+        let ro_dir = tmp.path().join("ro");
+        fs::create_dir(&ro_dir).unwrap();
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let cfg_path = ro_dir.join("config.toml");
+        let p = MigrationPickerPlugin::new();
+        let eff = p.write_and_mark_at(&cfg_path, vec!["anthropic".into(), "gemini".into()]);
+
+        // Restore permissions so TempDir can clean up.
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        match eff {
+            Effect::PushNote { line } => {
+                let text: String = line.spans.iter().map(|s| s.text.clone()).collect();
+                assert!(
+                    text.contains("Failed to save"),
+                    "expected save-failed message, got: {text}"
+                );
+                // Must NOT contain the success phrase.
+                assert!(
+                    !text.contains("Saved startup_providers"),
+                    "note falsely claims success: {text}"
+                );
+            }
+            other => panic!("expected PushNote, got {other:?}"),
+        }
     }
 }

@@ -331,8 +331,9 @@ row-selected = "✓ %{name}"
 row-unselected = "  %{name}"
 
 [migration]
-saved    = "startup_providers = [%{ids}] ~/.savvagent/config.toml में सहेजा गया"
-fallback = "कोई चयन पुष्टि नहीं; startup_providers = [%{ids}] को डिफ़ॉल्ट के रूप में उपयोग किया जा रहा है"
+saved       = "startup_providers = [%{ids}] ~/.savvagent/config.toml में सहेजा गया"
+fallback    = "कोई चयन पुष्टि नहीं; startup_providers = [%{ids}] को डिफ़ॉल्ट के रूप में उपयोग किया जा रहा है"
+save-failed = "Failed to save startup_providers to ~/.savvagent/config.toml: %{err}. The picker will re-open next launch."
 
 [errors]
 tool-bash-not-found  = "नोट: savvagent-tool-bash नहीं मिला — bash निष्क्रिय। `cargo build` चलाएं या SAVVAGENT_TOOL_BASH_BIN सेट करें।"
