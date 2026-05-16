@@ -1386,6 +1386,24 @@ async fn handle_use_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
             app.entries.clear();
             app.live_text.clear();
             app.update_metrics();
+            // Sync app.active_provider_id and app.model to the new active
+            // provider so every subsequent site that branches on
+            // app.active_provider_id sees the correct value.
+            let spec = PROVIDERS.iter().find(|s| s.id == provider);
+            if let Some(spec) = spec {
+                app.active_provider_id = Some(spec.id);
+                app.model = resolve_initial_model_for(spec);
+                refresh_cached_models(app, host_slot).await;
+            } else {
+                // Shouldn't happen — set_active_provider already verified the
+                // id exists in the pool — but defense-in-depth: log and skip
+                // the model refresh rather than panicking.
+                tracing::warn!(
+                    provider = provider,
+                    "handle_use_command: provider id not found in PROVIDERS; \
+                     active_provider_id and model not updated"
+                );
+            }
             // Notify provider plugins so they can flip their active
             // marker in render_slot without polling.
             if let Err(err) = crate::plugin::effects::dispatch_host_event(
