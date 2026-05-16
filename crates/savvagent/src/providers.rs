@@ -39,11 +39,17 @@ pub struct ProviderSpec {
     pub api_key_required: bool,
     /// Build an in-process handler bound to `api_key`. For keyless providers
     /// `api_key` is always an empty string.
+    ///
+    /// Used by the provider plugins (`perform_connect` delegates to each
+    /// plugin's `try_build_registration`). Retained here as the canonical
+    /// source of the fn pointer; the plugin wrappers call it indirectly.
+    #[allow(dead_code)]
     pub build: fn(api_key: &str) -> Result<Arc<dyn ProviderHandler>>,
     /// Optional connect-time readiness probe. Run after [`build`] and
     /// before swapping the host slot so reachability problems surface as
     /// "Connect failed" rather than a silent first-turn timeout. Returns
     /// `Ok(())` when the provider is reachable.
+    #[allow(dead_code)]
     pub health_check: Option<HealthCheckFn>,
 }
 

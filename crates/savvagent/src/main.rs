@@ -4,7 +4,7 @@
 //!
 //! 1. **In-process (default).** Each provider crate is linked as a library;
 //!    the TUI builds a [`ProviderHandler`](savvagent_mcp::ProviderHandler) and
-//!    wraps it in [`InProcessProviderClient`] — no MCP transport, no spawned
+//!    wraps it in `InProcessProviderClient` — no MCP transport, no spawned
 //!    binary. The TUI scans the OS keyring for a saved API key and
 //!    auto-connects to the first provider it finds; otherwise the user
 //!    runs `/connect`.
@@ -61,7 +61,6 @@ use savvagent_host::{
     ProviderRegistration, SandboxConfig, SandboxMode, ToolCallStatus, ToolEndpoint,
     TranscriptError, TurnEvent,
 };
-use savvagent_mcp::{InProcessProviderClient, ProviderClient};
 use tokio::sync::{RwLock, mpsc};
 
 /// Worker → main-loop messages.
@@ -433,43 +432,6 @@ async fn bootstrap_pool_host(
     }
 }
 
-/// Build an in-process host with an explicit `model` id —
-/// used by `/model <id>` to reconnect against the same provider with a
-/// different model.
-async fn build_in_process_host_with_model(
-    spec: &'static ProviderSpec,
-    api_key: &str,
-    project_root: &Path,
-    tool_bins: &ToolBins,
-    model: String,
-) -> Result<Arc<Host>> {
-    let handler = (spec.build)(api_key).with_context(|| format!("building {} handler", spec.id))?;
-    if let Some(check) = spec.health_check {
-        check()
-            .await
-            .with_context(|| format!("{} health check", spec.id))?;
-    }
-    let client: Box<dyn ProviderClient + Send + Sync> =
-        Box::new(InProcessProviderClient::new(handler));
-    // The endpoint variant is a placeholder when we hand the host a
-    // pre-built ProviderClient via `with_components`; pick a recognizable
-    // dummy URL so a stray log line says where it came from.
-    let config = tool_bins.apply(
-        HostConfig::new(
-            ProviderEndpoint::StreamableHttp {
-                url: format!("inproc://{}", spec.id),
-            },
-            model,
-        )
-        .with_project_root(project_root.to_path_buf())
-        .with_app_version(env!("CARGO_PKG_VERSION")),
-    );
-    let host = Host::with_components(config, client)
-        .await
-        .context("Host::with_components")?;
-    Ok(Arc::new(host))
-}
-
 async fn start_host_remote(
     url: String,
     model: String,
@@ -822,8 +784,8 @@ async fn handle_model_command(
     app: &mut App,
     rest: &str,
     host_slot: &HostSlot,
-    project_root: &Path,
-    tool_bins: &ToolBins,
+    _project_root: &Path,
+    _tool_bins: &ToolBins,
 ) {
     if rest.is_empty() {
         match app.active_provider_id {
@@ -851,27 +813,10 @@ async fn handle_model_command(
         app.push_note(rust_i18n::t!("notes.model-not-connected").to_string());
         return;
     };
-    let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) else {
+    if PROVIDERS.iter().all(|s| s.id != spec_id) {
         app.push_note(rust_i18n::t!("notes.model-unknown-provider", id = spec_id).to_string());
         return;
-    };
-    let key = if spec.api_key_required {
-        match creds::load(spec.id) {
-            Ok(Some(k)) => k,
-            Ok(None) => {
-                app.push_note(rust_i18n::t!("notes.model-no-saved-key").to_string());
-                return;
-            }
-            Err(e) => {
-                app.push_note(
-                    rust_i18n::t!("notes.keyring-error", err = format!("{e:#}")).to_string(),
-                );
-                return;
-            }
-        }
-    } else {
-        String::new()
-    };
+    }
 
     // Validate the requested id against the active provider's capability
     // metadata. When the pool has no capabilities registered for the active
@@ -893,16 +838,22 @@ async fn handle_model_command(
         }
     }
 
-    perform_model_change(
-        spec,
-        &key,
-        new_model,
-        host_slot,
-        project_root,
-        tool_bins,
-        app,
-    )
-    .await;
+    // Persist immediately for the direct /model <id> command path.
+    if let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) {
+        match models_pref::save_for_provider(spec.id, &new_model).await {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!(error = ?e, provider = spec.id, "models.toml save failed");
+                app.push_note(
+                    rust_i18n::t!("notes.model-pref-save-failed", err = format!("{e:#}"))
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    perform_model_change(new_model, host_slot, app).await;
+    refresh_cached_models(app, host_slot).await;
 }
 
 /// `/resume` with no args opens the transcript picker. With a path arg,
@@ -1057,8 +1008,8 @@ async fn refresh_cached_models(app: &mut App, host_slot: &HostSlot) {
 async fn apply_pending_model_change(
     app: &mut App,
     host_slot: &HostSlot,
-    project_root: &Path,
-    tool_bins: &ToolBins,
+    _project_root: &Path,
+    _tool_bins: &ToolBins,
 ) {
     let Some(pending) = app.pending_model_change.take() else {
         return;
@@ -1070,23 +1021,6 @@ async fn apply_pending_model_change(
     let Some(spec) = PROVIDERS.iter().find(|s| s.id == spec_id) else {
         app.push_note(rust_i18n::t!("notes.model-unknown-provider", id = spec_id).to_string());
         return;
-    };
-    let key = if spec.api_key_required {
-        match creds::load(spec.id) {
-            Ok(Some(k)) => k,
-            Ok(None) => {
-                app.push_note(rust_i18n::t!("notes.model-no-saved-key").to_string());
-                return;
-            }
-            Err(e) => {
-                app.push_note(
-                    rust_i18n::t!("notes.keyring-error", err = format!("{e:#}")).to_string(),
-                );
-                return;
-            }
-        }
-    } else {
-        String::new()
     };
 
     // Validate against the active provider's capability metadata. The picker
@@ -1111,16 +1045,7 @@ async fn apply_pending_model_change(
         }
     }
 
-    perform_model_change(
-        spec,
-        &key,
-        pending.id.clone(),
-        host_slot,
-        project_root,
-        tool_bins,
-        app,
-    )
-    .await;
+    perform_model_change(pending.id.clone(), host_slot, app).await;
 
     // Refresh the picker's catalog cache; if the new model came with a
     // larger advertised set than the previous one, the picker should
@@ -1160,54 +1085,19 @@ fn resolve_initial_model_for(spec: &ProviderSpec) -> String {
     spec.default_model.to_string()
 }
 
-/// Rebuild the host with `new_model` against the same provider + key, swap
-/// the host slot atomically, and clear conversation state (turn ids from
-/// the old session would dangle otherwise).
-async fn perform_model_change(
-    spec: &'static ProviderSpec,
-    api_key: &str,
-    new_model: String,
-    host_slot: &HostSlot,
-    project_root: &Path,
-    tool_bins: &ToolBins,
-    app: &mut App,
-) {
-    app.push_note(rust_i18n::t!("notes.model-switching-to", model = new_model.clone()).to_string());
-    let host = match build_in_process_host_with_model(
-        spec,
-        api_key,
-        project_root,
-        tool_bins,
-        new_model.clone(),
-    )
-    .await
-    {
-        Ok(h) => h,
-        Err(e) => {
-            app.push_note(
-                rust_i18n::t!("notes.model-switch-failed", err = format!("{e:#}")).to_string(),
-            );
-            return;
-        }
-    };
-
-    let old = {
-        let mut guard = host_slot.write().await;
-        guard.replace(host)
-    };
-    if let Some(old) = old {
-        tokio::spawn(async move { old.shutdown().await });
-    }
+/// Update the active model on the existing host without rebuilding it.
+///
+/// The pool is untouched — only the model field forwarded in future
+/// `CompleteRequest`s changes. History and tool state are preserved.
+/// Persistence to `~/.savvagent/models.toml` is the caller's responsibility
+/// (both call sites — `handle_model_command` and `apply_pending_model_change`
+/// — already handle that separately).
+async fn perform_model_change(new_model: String, host_slot: &HostSlot, app: &mut App) {
     if let Some(host) = current_host(host_slot).await {
-        host.clear_history().await;
+        host.set_model(new_model.clone()).await;
     }
-    app.entries.clear();
-    app.live_text.clear();
-    app.update_metrics();
     app.model = new_model;
     app.push_note(rust_i18n::t!("notes.model-is-now", model = app.model.clone()).to_string());
-    // Keep the picker cache aligned with the new host's advertised set.
-    refresh_cached_models(app, host_slot).await;
 }
 
 /// `/sandbox` (no args) shows current status.

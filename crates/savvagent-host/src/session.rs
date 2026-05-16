@@ -260,6 +260,11 @@ pub struct Host {
     pool: tokio::sync::RwLock<HashMap<savvagent_protocol::ProviderId, PoolEntry>>,
     /// The currently-active provider id. Turns are routed to this entry.
     active_provider: tokio::sync::RwLock<savvagent_protocol::ProviderId>,
+    /// The model id forwarded in every `CompleteRequest`. Initialized from
+    /// `config.model`; updated via [`Host::set_model`] when the user runs
+    /// `/model <id>`. A separate lock (not a mutable `config`) so that
+    /// concurrent readers of `config` remain unaffected.
+    current_model: tokio::sync::RwLock<String>,
     tools: Mutex<Option<ToolRegistry>>,
     state: Mutex<SessionState>,
     system_prompt: Option<String>,
@@ -389,10 +394,12 @@ impl Host {
             .policy
             .clone()
             .unwrap_or_else(|| PermissionPolicy::default_for(&config.project_root));
+        let initial_model = config.model.clone();
         let host = Self {
             config,
             pool: tokio::sync::RwLock::new(pool_map),
             active_provider: tokio::sync::RwLock::new(active_id),
+            current_model: tokio::sync::RwLock::new(initial_model),
             tools: Mutex::new(Some(tools)),
             state: Mutex::new(SessionState {
                 messages: Vec::new(),
@@ -451,10 +458,12 @@ impl Host {
         let mut pool_map: HashMap<savvagent_protocol::ProviderId, PoolEntry> = HashMap::new();
         pool_map.insert(default_id.clone(), entry);
 
+        let initial_model = config.model.clone();
         let host = Self {
             config,
             pool: tokio::sync::RwLock::new(pool_map),
             active_provider: tokio::sync::RwLock::new(default_id),
+            current_model: tokio::sync::RwLock::new(initial_model),
             tools: Mutex::new(Some(tools)),
             state: Mutex::new(SessionState {
                 messages: Vec::new(),
@@ -562,7 +571,7 @@ impl Host {
             }
 
             let req = CompleteRequest {
-                model: self.config.model.clone(),
+                model: self.current_model.read().await.clone(),
                 messages: messages.clone(),
                 system: self.system_prompt.clone(),
                 tools: tool_defs.clone(),
@@ -855,7 +864,7 @@ impl Host {
             .unwrap_or(0);
         let record = TranscriptFile {
             schema_version: TRANSCRIPT_SCHEMA_VERSION,
-            model: self.config.model.clone(),
+            model: self.current_model.read().await.clone(),
             saved_at,
             messages,
         };
@@ -914,7 +923,7 @@ impl Host {
                     .map_err(|e| TranscriptError::Malformed(e.to_string()))?;
                 TranscriptFile {
                     schema_version: TRANSCRIPT_SCHEMA_VERSION,
-                    model: self.config.model.clone(),
+                    model: self.current_model.read().await.clone(),
                     saved_at: 0,
                     messages,
                 }
@@ -1147,6 +1156,16 @@ impl Host {
         let active = self.active_provider.read().await.clone();
         let pool = self.pool.read().await;
         pool.get(&active).map(|entry| entry.capabilities().clone())
+    }
+
+    /// Update the model id forwarded in every subsequent `CompleteRequest`.
+    ///
+    /// This is the pool-safe alternative to rebuilding the host: the pool
+    /// itself is untouched; only the model field sent to the provider changes.
+    /// The caller is responsible for persisting the choice to
+    /// `~/.savvagent/models.toml` via `models_pref::save_for_provider`.
+    pub async fn set_model(&self, model: String) {
+        *self.current_model.write().await = model;
     }
 
     /// Whether `id` is currently registered (and connected) in the pool.
