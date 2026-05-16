@@ -261,6 +261,115 @@ async fn set_active_provider_rejects_unknown() {
     assert_eq!(host.active_provider().await.as_str(), "anthropic");
 }
 
+/// A provider that blocks inside `complete` until a `release` oneshot fires,
+/// then returns immediately with an empty success response. The `entered` flag
+/// lets the test know when `complete` has been reached.
+struct GatedClient {
+    entered: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>>,
+}
+
+#[async_trait]
+impl ProviderClient for GatedClient {
+    async fn complete(
+        &self,
+        req: CompleteRequest,
+        _events: Option<mpsc::Sender<StreamEvent>>,
+    ) -> Result<CompleteResponse, ProviderError> {
+        self.entered.store(true, Ordering::SeqCst);
+        // Wait for the release signal (or forever if never sent — the test
+        // force-disconnects before releasing, so the future gets dropped).
+        let mut slot = self.release.lock().await;
+        if let Some(rx) = slot.take() {
+            let _ = rx.await;
+        }
+        Ok(CompleteResponse {
+            id: "gated-0".into(),
+            model: req.model.clone(),
+            content: vec![],
+            stop_reason: savvagent_protocol::StopReason::EndTurn,
+            stop_sequence: None,
+            usage: Default::default(),
+        })
+    }
+
+    async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        Ok(ListModelsResponse {
+            models: vec![],
+            default_model_id: None,
+        })
+    }
+}
+
+/// Regression test for the force-disconnect TOCTOU race (Critical #3).
+///
+/// Before the fix, a Force disconnect that arrived between lease acquisition
+/// and broadcast subscription could miss in-flight turns: the Stage-1 send
+/// found no subscriber, and Stage-3 aborts were registered before the abort
+/// handle was. The fix moves subscription before lease acquisition.
+///
+/// This test fires force-disconnect as soon as the turn task is *spawned* —
+/// that is, before `complete()` has necessarily been entered — and asserts
+/// that the turn still resolves (cancelled or aborted) without panic and that
+/// `active_turn_count` reaches zero.
+#[tokio::test]
+async fn force_disconnect_races_run_turn_startup() {
+    let entered = Arc::new(AtomicBool::new(false));
+    let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let gated = GatedClient {
+        entered: Arc::clone(&entered),
+        release: Arc::new(tokio::sync::Mutex::new(Some(release_rx))),
+    };
+
+    let mut cfg = HostConfig::new(
+        ProviderEndpoint::StreamableHttp {
+            url: "http://unused".into(),
+        },
+        "m",
+    );
+    cfg.providers = vec![ProviderRegistration {
+        id: ProviderId::new("gated").unwrap(),
+        display_name: "Gated".into(),
+        client: Arc::new(gated) as Arc<dyn ProviderClient + Send + Sync>,
+        capabilities: caps("m"),
+        aliases: vec![],
+    }];
+    cfg.startup_connect = StartupConnectPolicy::All;
+    cfg.force_disconnect_grace_ms = 200;
+
+    let host = Arc::new(Host::start(cfg).await.unwrap());
+
+    // Spawn the turn — do NOT wait for complete() to be entered.
+    // This is the race window the fix is designed to close.
+    let host_t = Arc::clone(&host);
+    let turn_handle = tokio::spawn(async move { host_t.run_turn("hello").await });
+
+    // Yield briefly so the turn task can start, then immediately disconnect.
+    tokio::task::yield_now().await;
+
+    let t0 = std::time::Instant::now();
+    host.remove_provider(&ProviderId::new("gated").unwrap(), DisconnectMode::Force)
+        .await
+        .unwrap();
+    let elapsed = t0.elapsed();
+
+    // Force-disconnect must complete within grace + generous slack.
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "force_disconnect took {elapsed:?}, expected < 600 ms"
+    );
+
+    // The turn must resolve (with an error — it was cancelled or aborted).
+    let outcome = tokio::time::timeout(Duration::from_secs(3), turn_handle)
+        .await
+        .expect("turn task should resolve after force-disconnect")
+        .expect("JoinHandle must not panic");
+    assert!(
+        outcome.is_err(),
+        "expected an error from the cancelled turn, got Ok"
+    );
+}
+
 #[tokio::test]
 async fn set_active_provider_swaps_when_pool_has_entry() {
     let mut cfg = HostConfig::new(

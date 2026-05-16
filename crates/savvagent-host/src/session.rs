@@ -394,6 +394,17 @@ impl Host {
             .policy
             .clone()
             .unwrap_or_else(|| PermissionPolicy::default_for(&config.project_root));
+        // Pre-create one cancel broadcast sender per connected provider so
+        // run_turn_inner can subscribe before acquiring the lease, eliminating
+        // the TOCTOU window where a Force disconnect could miss the receiver.
+        let cancel_signal_map: HashMap<
+            savvagent_protocol::ProviderId,
+            broadcast::Sender<CancellationReason>,
+        > = pool_map
+            .keys()
+            .map(|id| (id.clone(), broadcast::channel(8).0))
+            .collect();
+
         let initial_model = config.model.clone();
         let host = Self {
             config,
@@ -411,7 +422,7 @@ impl Host {
             pending_bash_network: Arc::new(Mutex::new(HashMap::new())),
             current_turn_events: Arc::new(std::sync::Mutex::new(None)),
             next_request_id: Arc::new(AtomicU64::new(1)),
-            cancel_signal: tokio::sync::Mutex::new(HashMap::new()),
+            cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
         };
         host.wire_self_into_resolver().await;
@@ -458,6 +469,12 @@ impl Host {
         let mut pool_map: HashMap<savvagent_protocol::ProviderId, PoolEntry> = HashMap::new();
         pool_map.insert(default_id.clone(), entry);
 
+        // Pre-create the cancel broadcast sender for the single default
+        // provider, matching the invariant established in Host::start.
+        let mut cancel_signal_map: HashMap<ProviderId, broadcast::Sender<CancellationReason>> =
+            HashMap::new();
+        cancel_signal_map.insert(default_id.clone(), broadcast::channel(8).0);
+
         let initial_model = config.model.clone();
         let host = Self {
             config,
@@ -475,7 +492,7 @@ impl Host {
             pending_bash_network: Arc::new(Mutex::new(HashMap::new())),
             current_turn_events: Arc::new(std::sync::Mutex::new(None)),
             next_request_id: Arc::new(AtomicU64::new(1)),
-            cancel_signal: tokio::sync::Mutex::new(HashMap::new()),
+            cancel_signal: tokio::sync::Mutex::new(cancel_signal_map),
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
         };
         host.wire_self_into_resolver().await;
@@ -600,26 +617,51 @@ impl Host {
                 msg_count = messages.len(),
                 "dispatching provider.complete"
             );
-            // Acquire a lease and snapshot the active-provider id, then drop
-            // the pool guard before awaiting. The RwLock guard must never be
-            // held across an `.await` on the provider client.
-            let (lease, active_id): (ProviderLease, ProviderId) = {
-                let active = self.active_provider.read().await.clone();
-                let pool = self.pool.read().await;
-                let Some(entry) = pool.get(&active) else {
-                    return Err(HostError::NoActiveProvider);
-                };
-                (entry.lease(), active.clone())
-                // `pool` guard dropped here
+            // Subscribe to the cancel broadcast for the active provider BEFORE
+            // acquiring a lease. This closes the TOCTOU window where a
+            // concurrent remove_provider(Force) could send the cancel signal
+            // between "I have a lease" and "I'm listening for cancel".
+            //
+            // Order:
+            //   a. Snapshot active_id (brief read lock on active_provider).
+            //   b. Subscribe to cancel_signal[active_id] — the Sender was
+            //      pre-created by add_provider / Host::start.
+            //   c. Acquire the lease (brief pool read lock, then dropped).
+            //
+            // If Force runs after (b), the Receiver will observe the signal
+            // and cancel_rx.recv() will fire. If Force removes the pool entry
+            // between (b) and (c), pool.get returns None and we return
+            // NoActiveProvider — either path is correct.
+            let active_id: ProviderId = self.active_provider.read().await.clone();
+
+            let mut cancel_rx: broadcast::Receiver<CancellationReason> = {
+                let map = self.cancel_signal.lock().await;
+                match map.get(&active_id) {
+                    Some(tx) => tx.subscribe(),
+                    None => {
+                        // Should not happen: add_provider always pre-creates
+                        // the sender. Create a fresh one as a safety net so
+                        // the turn can proceed.
+                        tracing::warn!(
+                            provider = %active_id.as_str(),
+                            "cancel_signal entry missing at turn start; \
+                             creating fallback sender"
+                        );
+                        broadcast::channel(8).0.subscribe()
+                    }
+                }
             };
 
-            // Obtain (or create) the cancel-signal receiver for this provider.
-            let mut cancel_rx: broadcast::Receiver<CancellationReason> = {
-                let mut map = self.cancel_signal.lock().await;
-                let tx = map
-                    .entry(active_id.clone())
-                    .or_insert_with(|| broadcast::channel(8).0);
-                tx.subscribe()
+            // Acquire a lease and drop the pool guard before awaiting.
+            // The RwLock guard must never be held across an `.await` on
+            // the provider client.
+            let lease: ProviderLease = {
+                let pool = self.pool.read().await;
+                let Some(entry) = pool.get(&active_id) else {
+                    return Err(HostError::NoActiveProvider);
+                };
+                entry.lease()
+                // `pool` guard dropped here
             };
 
             // Spawn the provider call so we can race it against a cancel signal.
@@ -1189,6 +1231,17 @@ impl Host {
             reg.id.clone(),
             PoolEntry::new(reg.client, reg.capabilities, reg.display_name),
         );
+        // Pre-create the cancel broadcast sender so run_turn_inner can
+        // subscribe before acquiring a lease, closing the TOCTOU window.
+        // The pool write lock is still held here; release it first so the
+        // cancel_signal lock order stays consistent (cancel_signal is always
+        // locked after any pool lock drops).
+        drop(pool);
+        self.cancel_signal
+            .lock()
+            .await
+            .entry(reg.id)
+            .or_insert_with(|| broadcast::channel(8).0);
         Ok(())
     }
 
