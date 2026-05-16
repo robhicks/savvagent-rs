@@ -1293,6 +1293,13 @@ impl Host {
             }
         }
 
+        // Remove the cancel_signal entry for this provider. This must come
+        // after any Stage-1 send() (Force mode) so the broadcast has already
+        // been dispatched before we drop the Sender. Both Drain and Force
+        // paths converge here, so the map is cleaned up in both cases and
+        // does not grow unboundedly across connect/disconnect cycles.
+        self.cancel_signal.lock().await.remove(id);
+
         drop(entry);
         Ok(())
     }
