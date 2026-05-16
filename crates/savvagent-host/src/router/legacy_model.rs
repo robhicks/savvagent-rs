@@ -74,8 +74,8 @@ pub struct ProviderView<'a> {
 /// use savvagent_protocol::ProviderId;
 ///
 /// let id = ProviderId::new("anthropic").unwrap();
-/// let caps = ProviderCapabilities {
-///     models: vec![ModelCapabilities {
+/// let caps = ProviderCapabilities::new(
+///     vec![ModelCapabilities {
 ///         id: "claude-opus-4-7".into(),
 ///         display_name: "Claude Opus 4.7".into(),
 ///         supports_vision: true,
@@ -83,8 +83,9 @@ pub struct ProviderView<'a> {
 ///         context_window: 200_000,
 ///         cost_tier: CostTier::Premium,
 ///     }],
-///     default_model: "claude-opus-4-7".into(),
-/// };
+///     "claude-opus-4-7".into(),
+/// )
+/// .expect("valid caps");
 /// let views = vec![ProviderView { id: &id, capabilities: &caps }];
 ///
 /// let r = resolve_legacy_model("anthropic/claude-opus-4-7", &views);
@@ -181,8 +182,8 @@ mod tests {
     use crate::capabilities::{CostTier, ModelCapabilities, ProviderCapabilities};
 
     fn caps(models: &[&str]) -> ProviderCapabilities {
-        ProviderCapabilities {
-            models: models
+        ProviderCapabilities::new(
+            models
                 .iter()
                 .map(|id| ModelCapabilities {
                     id: id.to_string(),
@@ -193,8 +194,9 @@ mod tests {
                     cost_tier: CostTier::Standard,
                 })
                 .collect(),
-            default_model: models[0].into(),
-        }
+            models[0].into(),
+        )
+        .expect("valid test caps")
     }
 
     #[test]

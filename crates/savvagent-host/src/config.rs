@@ -336,8 +336,8 @@ mod registration_tests {
 
     #[test]
     fn provider_registration_constructs() {
-        let caps = ProviderCapabilities {
-            models: vec![ModelCapabilities {
+        let caps = ProviderCapabilities::new(
+            vec![ModelCapabilities {
                 id: "m".into(),
                 display_name: "M".into(),
                 supports_vision: false,
@@ -345,15 +345,15 @@ mod registration_tests {
                 context_window: 1000,
                 cost_tier: CostTier::Standard,
             }],
-            default_model: "m".into(),
-        };
-        let reg = ProviderRegistration {
-            id: ProviderId::new("stub").unwrap(),
-            display_name: "Stub".into(),
-            client: Arc::new(StubClient) as Arc<dyn ProviderClient + Send + Sync>,
-            capabilities: caps,
-            aliases: vec![],
-        };
+            "m".into(),
+        )
+        .expect("valid test caps");
+        let reg = ProviderRegistration::new(
+            ProviderId::new("stub").unwrap(),
+            "Stub",
+            Arc::new(StubClient) as Arc<dyn ProviderClient + Send + Sync>,
+            caps,
+        );
         assert_eq!(reg.id.as_str(), "stub");
         assert_eq!(reg.display_name, "Stub");
     }

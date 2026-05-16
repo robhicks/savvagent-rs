@@ -364,8 +364,8 @@ impl Host {
             };
             let id =
                 savvagent_protocol::ProviderId::new("default").expect("\"default\" is a valid id");
-            let caps = ProviderCapabilities {
-                models: vec![ModelCapabilities {
+            let caps = ProviderCapabilities::new(
+                vec![ModelCapabilities {
                     id: config.model.clone(),
                     display_name: config.model.clone(),
                     supports_vision: false,
@@ -373,8 +373,9 @@ impl Host {
                     context_window: 0,
                     cost_tier: CostTier::Standard,
                 }],
-                default_model: config.model.clone(),
-            };
+                config.model.clone(),
+            )
+            .expect("single-model caps with matching default are always valid");
             let entry = PoolEntry::new(provider_arc, caps, "Default".into());
             let mut map = HashMap::new();
             map.insert(id.clone(), entry);
@@ -456,8 +457,8 @@ impl Host {
         let provider_arc: Arc<dyn ProviderClient + Send + Sync> = Arc::from(provider);
         let default_id =
             savvagent_protocol::ProviderId::new("default").expect("\"default\" is a valid id");
-        let caps = ProviderCapabilities {
-            models: vec![ModelCapabilities {
+        let caps = ProviderCapabilities::new(
+            vec![ModelCapabilities {
                 id: config.model.clone(),
                 display_name: config.model.clone(),
                 supports_vision: false,
@@ -465,8 +466,9 @@ impl Host {
                 context_window: 0,
                 cost_tier: CostTier::Standard,
             }],
-            default_model: config.model.clone(),
-        };
+            config.model.clone(),
+        )
+        .expect("single-model caps with matching default are always valid");
         let entry = PoolEntry::new(provider_arc, caps, "Default".into());
         let mut pool_map: HashMap<savvagent_protocol::ProviderId, PoolEntry> = HashMap::new();
         pool_map.insert(default_id.clone(), entry);

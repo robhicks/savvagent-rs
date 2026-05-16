@@ -41,8 +41,8 @@ impl ProviderClient for EchoClient {
 }
 
 fn caps(model_id: &str) -> ProviderCapabilities {
-    ProviderCapabilities {
-        models: vec![ModelCapabilities {
+    ProviderCapabilities::new(
+        vec![ModelCapabilities {
             id: model_id.into(),
             display_name: model_id.into(),
             supports_vision: false,
@@ -50,18 +50,18 @@ fn caps(model_id: &str) -> ProviderCapabilities {
             context_window: 1000,
             cost_tier: CostTier::Standard,
         }],
-        default_model: model_id.into(),
-    }
+        model_id.into(),
+    )
+    .expect("valid test caps")
 }
 
 fn reg(id: &str, model: &str) -> ProviderRegistration {
-    ProviderRegistration {
-        id: ProviderId::new(id).unwrap(),
-        display_name: id.into(),
-        client: Arc::new(EchoClient) as Arc<dyn ProviderClient + Send + Sync>,
-        capabilities: caps(model),
-        aliases: vec![],
-    }
+    ProviderRegistration::new(
+        ProviderId::new(id).unwrap(),
+        id,
+        Arc::new(EchoClient) as Arc<dyn ProviderClient + Send + Sync>,
+        caps(model),
+    )
 }
 
 #[tokio::test]

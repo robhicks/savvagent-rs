@@ -93,8 +93,8 @@ impl ProviderAnthropicPlugin {
     /// supports. Matches the model list in [`crate::providers::PROVIDERS`]
     /// and what the `/model` picker exposes.
     pub(crate) fn capabilities() -> ProviderCapabilities {
-        ProviderCapabilities {
-            models: vec![
+        ProviderCapabilities::new(
+            vec![
                 ModelCapabilities {
                     id: "claude-opus-4-7".into(),
                     display_name: "Claude Opus 4.7".into(),
@@ -128,8 +128,9 @@ impl ProviderAnthropicPlugin {
                     cost_tier: CostTier::Standard,
                 },
             ],
-            default_model: "claude-haiku-4-5".into(),
-        }
+            "claude-haiku-4-5".into(),
+        )
+        .expect("static provider capabilities are valid")
     }
 
     /// Attempt to build a [`ProviderRegistration`] from the keyring and the

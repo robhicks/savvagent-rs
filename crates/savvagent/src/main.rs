@@ -439,7 +439,7 @@ async fn bootstrap_pool_host(
             let model = if let Some(m) = resolved_model {
                 m
             } else {
-                let base = reg.capabilities.default_model.clone();
+                let base = reg.capabilities.default_model_id().to_string();
                 let pref = models_pref::ModelsPref::load();
                 pref.get(reg.id.as_str())
                     .map(|s| s.to_string())
@@ -879,7 +879,7 @@ async fn handle_model_command(
     // provider (shouldn't happen in practice) we fall through optimistically.
     if let Some(host) = current_host(host_slot).await {
         if let Some(caps) = host.active_capabilities().await {
-            if !caps.models.is_empty() && caps.model(&new_model).is_none() {
+            if !caps.models().is_empty() && caps.model(&new_model).is_none() {
                 let active = host.active_provider().await;
                 app.push_note(
                     rust_i18n::t!(
@@ -1039,21 +1039,21 @@ async fn refresh_cached_models(app: &mut App, host_slot: &HostSlot) {
         app.cached_models = fallback;
         return;
     };
-    if caps.models.is_empty() {
+    if caps.models().is_empty() {
         tracing::debug!("active provider has no models in capabilities; using fallback");
         app.cached_models = fallback;
         return;
     }
     app.cached_models = caps
-        .models
-        .into_iter()
+        .models()
+        .iter()
         .map(|m| savvagent_plugin::ModelEntry {
             display_name: if m.display_name.is_empty() {
                 m.id.clone()
             } else {
-                m.display_name
+                m.display_name.clone()
             },
-            id: m.id,
+            id: m.id.clone(),
         })
         .collect();
 }
@@ -1086,7 +1086,7 @@ async fn apply_pending_model_change(
     // turn instead.
     if let Some(host) = current_host(host_slot).await {
         if let Some(caps) = host.active_capabilities().await {
-            if !caps.models.is_empty() && caps.model(&pending.id).is_none() {
+            if !caps.models().is_empty() && caps.model(&pending.id).is_none() {
                 let active = host.active_provider().await;
                 app.push_note(
                     rust_i18n::t!(

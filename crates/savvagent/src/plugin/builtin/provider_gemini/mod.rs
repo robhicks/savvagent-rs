@@ -53,8 +53,8 @@ impl ProviderGeminiPlugin {
 
     /// Capability metadata for all Gemini models the plugin supports.
     pub(crate) fn capabilities() -> ProviderCapabilities {
-        ProviderCapabilities {
-            models: vec![
+        ProviderCapabilities::new(
+            vec![
                 ModelCapabilities {
                     id: "gemini-2.5-pro".into(),
                     display_name: "Gemini 2.5 Pro".into(),
@@ -80,8 +80,9 @@ impl ProviderGeminiPlugin {
                     cost_tier: CostTier::Cheap,
                 },
             ],
-            default_model: "gemini-2.5-flash".into(),
-        }
+            "gemini-2.5-flash".into(),
+        )
+        .expect("static provider capabilities are valid")
     }
 
     /// Attempt to build a [`ProviderRegistration`] from the keyring and the

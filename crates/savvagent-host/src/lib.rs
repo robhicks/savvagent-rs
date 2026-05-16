@@ -34,7 +34,9 @@ pub mod sensitive_paths;
 mod session;
 mod tools;
 
-pub use capabilities::{CostTier, ModelAlias, ModelCapabilities, ProviderCapabilities};
+pub use capabilities::{
+    CapabilitiesError, CostTier, ModelAlias, ModelCapabilities, ProviderCapabilities,
+};
 pub use config::{
     HostConfig, ProviderEndpoint, ProviderRegistration, StartupConnectPolicy, ToolEndpoint,
 };

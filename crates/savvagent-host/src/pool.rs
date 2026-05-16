@@ -147,8 +147,8 @@ mod tests {
     }
 
     fn entry() -> PoolEntry {
-        let caps = ProviderCapabilities {
-            models: vec![ModelCapabilities {
+        let caps = ProviderCapabilities::new(
+            vec![ModelCapabilities {
                 id: "m".into(),
                 display_name: "M".into(),
                 supports_vision: false,
@@ -156,8 +156,9 @@ mod tests {
                 context_window: 1000,
                 cost_tier: CostTier::Standard,
             }],
-            default_model: "m".into(),
-        };
+            "m".into(),
+        )
+        .expect("valid test caps");
         PoolEntry::new(Arc::new(StubClient), caps, "Stub".into())
     }
 

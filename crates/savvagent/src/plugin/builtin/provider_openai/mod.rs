@@ -53,8 +53,8 @@ impl ProviderOpenAiPlugin {
 
     /// Capability metadata for all OpenAI models the plugin supports.
     pub(crate) fn capabilities() -> ProviderCapabilities {
-        ProviderCapabilities {
-            models: vec![
+        ProviderCapabilities::new(
+            vec![
                 ModelCapabilities {
                     id: "gpt-4o".into(),
                     display_name: "GPT-4o".into(),
@@ -88,8 +88,9 @@ impl ProviderOpenAiPlugin {
                     cost_tier: CostTier::Standard,
                 },
             ],
-            default_model: "gpt-4o-mini".into(),
-        }
+            "gpt-4o-mini".into(),
+        )
+        .expect("static provider capabilities are valid")
     }
 
     /// Attempt to build a [`ProviderRegistration`] from the keyring and the
