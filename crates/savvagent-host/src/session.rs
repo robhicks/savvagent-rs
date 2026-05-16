@@ -1267,17 +1267,24 @@ impl Host {
 
                         // Emit AbortedAfterGrace on the current turn's event
                         // channel so the TUI can surface it. The channel is
-                        // held behind a std::sync::Mutex; lock with unwrap
-                        // (it's never poisoned in normal operation).
-                        if let Some(tx) = self
-                            .current_turn_events
-                            .lock()
-                            .expect("current_turn_events poisoned")
-                            .as_ref()
-                        {
-                            let _ = tx.try_send(TurnEvent::AbortedAfterGrace {
-                                reason: reason.clone(),
-                            });
+                        // held behind a std::sync::Mutex. If the mutex is
+                        // poisoned (a prior panic held the lock) we skip the
+                        // emit and log a warning — the hard abort still
+                        // proceeds; only the event surface is lost.
+                        match self.current_turn_events.lock() {
+                            Ok(guard) => {
+                                if let Some(tx) = guard.as_ref() {
+                                    let _ = tx.try_send(TurnEvent::AbortedAfterGrace {
+                                        reason: reason.clone(),
+                                    });
+                                }
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    "current_turn_events mutex poisoned; \
+                                     skipping AbortedAfterGrace emit"
+                                );
+                            }
                         }
                         break;
                     }
@@ -1347,7 +1354,15 @@ impl<'a> CurrentTurnEventsGuard<'a> {
         slot: &'a std::sync::Mutex<Option<mpsc::Sender<TurnEvent>>>,
         events: &Option<mpsc::Sender<TurnEvent>>,
     ) -> Self {
-        *slot.lock().expect("current_turn_events poisoned") = events.clone();
+        match slot.lock() {
+            Ok(mut guard) => *guard = events.clone(),
+            Err(_) => {
+                tracing::warn!(
+                    "current_turn_events mutex poisoned; \
+                     skipping per-turn event channel install"
+                );
+            }
+        }
         Self { slot }
     }
 }
@@ -1430,11 +1445,16 @@ struct HostBashNetResolver {
 #[async_trait::async_trait]
 impl BashNetResolver for HostBashNetResolver {
     async fn resolve_policy(&self, context: BashNetContext<'_>) -> bool {
-        let events = self
-            .current_events
-            .lock()
-            .expect("current_turn_events poisoned")
-            .clone();
+        let events = match self.current_events.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                tracing::warn!(
+                    "current_turn_events mutex poisoned; \
+                     bash-net resolver returning None for events sender"
+                );
+                None
+            }
+        };
         let summary = format_bash_network_prompt_summary(context.command);
         match resolve_bash_network_with_state(
             &self.policy,
