@@ -80,6 +80,7 @@ pub enum TranscriptError {
 
 /// Reason a turn was cancelled before reaching `end_turn`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CancellationReason {
     /// The provider supplying this turn was force-disconnected mid-flight.
     ProviderDisconnected(ProviderId),
@@ -100,6 +101,7 @@ impl std::fmt::Display for CancellationReason {
 
 /// Top-level error surfaced from [`Host`] operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum HostError {
     /// Connecting to a provider or tool MCP server failed at startup.
     #[error("{0}")]

@@ -10,6 +10,7 @@ use crate::capabilities::ProviderCapabilities;
 
 /// What `resolve_legacy_model` decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LegacyModelResolution {
     /// Exact match found via `provider/model` form.
     Resolved {

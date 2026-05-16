@@ -374,6 +374,8 @@ async fn bootstrap_pool_host(
             StartupConnectPolicy::OptIn(allow) | StartupConnectPolicy::LastUsed(allow) => {
                 Some(allow.iter().cloned().collect())
             }
+            // Non-exhaustive: future variants default to no filter (same as All).
+            _ => None,
         };
         providers
             .iter()
@@ -423,6 +425,8 @@ async fn bootstrap_pool_host(
                 (None, None)
             }
             LegacyModelResolution::NoOverride => (None, None),
+            // Non-exhaustive: future variants fall through to no override.
+            _ => (None, None),
         };
 
     let effective_reg = resolved_reg.or(active_reg);

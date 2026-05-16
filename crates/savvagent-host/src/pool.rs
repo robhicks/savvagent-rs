@@ -17,6 +17,7 @@ use crate::capabilities::ProviderCapabilities;
 
 /// Errors returned by pool operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PoolError {
     /// Returned when attempting to register a provider that is already in the pool.
     #[error("provider {0} is already registered")]
@@ -28,6 +29,7 @@ pub enum PoolError {
 
 /// Controls how an active provider entry is removed from the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DisconnectMode {
     /// Wait for all outstanding [`ProviderLease`]s to drop before completing
     /// the disconnect. Implemented via `Arc` reference counting on the
@@ -98,6 +100,7 @@ impl PoolEntry {
 /// Dropping a lease decrements the entry's active-turns counter, which is the
 /// mechanism that lets drain-mode disconnect know when all in-flight turns
 /// have finished.
+#[must_use = "ProviderLease must be held for the duration of the turn"]
 pub struct ProviderLease {
     client: Arc<dyn ProviderClient + Send + Sync>,
     active_turns: Arc<AtomicUsize>,

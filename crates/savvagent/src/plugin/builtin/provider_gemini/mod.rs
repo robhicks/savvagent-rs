@@ -101,14 +101,13 @@ impl ProviderGeminiPlugin {
             .map_err(|e| format!("client build: {e}"))?;
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
-        Ok(Some(ProviderRegistration {
-            id: savvagent_protocol::ProviderId::new(PROVIDER_ID)
+        Ok(Some(ProviderRegistration::new(
+            savvagent_protocol::ProviderId::new(PROVIDER_ID)
                 .expect("PROVIDER_ID is a valid provider id"),
-            display_name: DISPLAY_NAME.into(),
+            DISPLAY_NAME,
             client,
-            capabilities: Self::capabilities(),
-            aliases: vec![],
-        }))
+            Self::capabilities(),
+        )))
     }
 
     fn try_connect_from_keyring(&mut self) -> Option<()> {

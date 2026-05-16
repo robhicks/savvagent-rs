@@ -54,6 +54,31 @@ pub struct ProviderRegistration {
     pub aliases: Vec<ModelAlias>,
 }
 
+impl ProviderRegistration {
+    /// Construct a registration with no aliases. Use [`Self::with_aliases`]
+    /// to attach model aliases afterwards.
+    pub fn new(
+        id: ProviderId,
+        display_name: impl Into<String>,
+        client: Arc<dyn ProviderClient + Send + Sync>,
+        capabilities: ProviderCapabilities,
+    ) -> Self {
+        Self {
+            id,
+            display_name: display_name.into(),
+            client,
+            capabilities,
+            aliases: Vec::new(),
+        }
+    }
+
+    /// Attach model aliases to this registration.
+    pub fn with_aliases(mut self, aliases: Vec<ModelAlias>) -> Self {
+        self.aliases = aliases;
+        self
+    }
+}
+
 impl std::fmt::Debug for ProviderRegistration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderRegistration")
@@ -67,6 +92,7 @@ impl std::fmt::Debug for ProviderRegistration {
 
 /// Which providers should auto-connect when `Host::start` runs.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum StartupConnectPolicy {
     /// Only providers in this allow-list are auto-connected.
     OptIn(Vec<ProviderId>),
