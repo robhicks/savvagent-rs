@@ -5,15 +5,17 @@
 //! deterministic default. Either way, set `v1_done = true` so the picker
 //! never reopens.
 
+use savvagent_protocol::ProviderId;
+
 use crate::config_file::ConfigFile;
 
 /// Output of `decide_migration` — what to write or prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationOutcome {
     /// Multiple keys exist; TUI should open the picker.
-    Picker { detected: Vec<String> },
+    Picker { detected: Vec<ProviderId> },
     /// Zero or one keys; write this list directly.
-    Direct { startup_providers: Vec<String> },
+    Direct { startup_providers: Vec<ProviderId> },
     /// Migration was already done.
     AlreadyDone,
 }
@@ -26,14 +28,14 @@ pub fn decide_migration(cfg: &ConfigFile) -> MigrationOutcome {
     if cfg.migration.v1_done {
         return MigrationOutcome::AlreadyDone;
     }
-    let detected: Vec<String> = KNOWN_PROVIDERS
+    let detected: Vec<ProviderId> = KNOWN_PROVIDERS
         .iter()
         .filter(|id| {
             crate::creds::load(id)
                 .map(|opt| opt.is_some())
                 .unwrap_or(false)
         })
-        .map(|s| s.to_string())
+        .filter_map(|s| ProviderId::new(*s).ok())
         .collect();
     match detected.len() {
         0 => MigrationOutcome::Direct {
@@ -48,16 +50,16 @@ pub fn decide_migration(cfg: &ConfigFile) -> MigrationOutcome {
 
 /// Fallback when the user dismisses the picker without confirming.
 /// Anthropic if present in `detected`; else first alphabetically.
-pub fn dismissed_fallback(detected: &[String]) -> Vec<String> {
-    if detected.iter().any(|s| s == "anthropic") {
-        return vec!["anthropic".into()];
+pub fn dismissed_fallback(detected: &[ProviderId]) -> Vec<ProviderId> {
+    if detected.iter().any(|id| id.as_str() == "anthropic") {
+        return vec![ProviderId::new("anthropic").expect("'anthropic' is a valid provider id")];
     }
     let mut sorted = detected.to_vec();
-    sorted.sort();
+    sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     sorted
         .into_iter()
         .next()
-        .map(|s| vec![s])
+        .map(|id| vec![id])
         .unwrap_or_default()
 }
 
@@ -65,6 +67,10 @@ pub fn dismissed_fallback(detected: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::config_file::ConfigFile;
+
+    fn pid(s: &str) -> ProviderId {
+        ProviderId::new(s).unwrap()
+    }
 
     #[test]
     fn already_done_short_circuits() {
@@ -75,19 +81,19 @@ mod tests {
 
     #[test]
     fn dismissed_fallback_prefers_anthropic() {
-        let detected = vec!["gemini".into(), "anthropic".into(), "openai".into()];
-        assert_eq!(dismissed_fallback(&detected), vec!["anthropic".to_string()]);
+        let detected = vec![pid("gemini"), pid("anthropic"), pid("openai")];
+        assert_eq!(dismissed_fallback(&detected), vec![pid("anthropic")]);
     }
 
     #[test]
     fn dismissed_fallback_alphabetical_when_no_anthropic() {
-        let detected = vec!["openai".into(), "gemini".into()];
-        assert_eq!(dismissed_fallback(&detected), vec!["gemini".to_string()]);
+        let detected = vec![pid("openai"), pid("gemini")];
+        assert_eq!(dismissed_fallback(&detected), vec![pid("gemini")]);
     }
 
     #[test]
     fn dismissed_fallback_empty_when_no_keys() {
-        let detected: Vec<String> = vec![];
+        let detected: Vec<ProviderId> = vec![];
         assert!(dismissed_fallback(&detected).is_empty());
     }
 }

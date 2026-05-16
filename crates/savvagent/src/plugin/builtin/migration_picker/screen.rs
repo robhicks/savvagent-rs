@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine, StyledSpan,
-    TextMods, ThemeColor,
+    Effect, KeyCodePortable, KeyEventPortable, PluginError, ProviderId, Region, Screen, StyledLine,
+    StyledSpan, TextMods, ThemeColor,
 };
 
 /// First-launch migration picker screen.
@@ -17,22 +17,24 @@ use savvagent_plugin::{
 pub struct MigrationPickerScreen {
     /// `(provider_id, selected)` rows. Starts all-selected so the user
     /// can confirm "all of them" with one Enter press.
-    rows: Vec<(String, bool)>,
+    rows: Vec<(ProviderId, bool)>,
     cursor: usize,
 }
 
 impl MigrationPickerScreen {
     /// Construct the picker with the given provider ids, all pre-selected.
-    pub fn new(detected: Vec<String>) -> Self {
+    pub fn new(detected: Vec<ProviderId>) -> Self {
         let rows = detected.into_iter().map(|id| (id, true)).collect();
         Self { rows, cursor: 0 }
     }
 
+    /// Returns the display string for each selected row. Converts to `String`
+    /// only at this render/emit boundary.
     fn selected_ids(&self) -> Vec<String> {
         self.rows
             .iter()
             .filter(|(_, sel)| *sel)
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| id.as_str().to_string())
             .collect()
     }
 }
@@ -125,6 +127,10 @@ mod tests {
     use super::*;
     use savvagent_plugin::KeyMods;
 
+    fn pid(s: &str) -> ProviderId {
+        ProviderId::new(s).unwrap()
+    }
+
     fn key(c: KeyCodePortable) -> KeyEventPortable {
         KeyEventPortable {
             code: c,
@@ -143,7 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn enter_emits_confirm_slash_with_selected_ids() {
-        let mut s = MigrationPickerScreen::new(vec!["anthropic".into(), "gemini".into()]);
+        let mut s = MigrationPickerScreen::new(vec![pid("anthropic"), pid("gemini")]);
         // Both selected by default.
         let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
         match &effs[0] {
@@ -152,6 +158,7 @@ mod tests {
                 match &children[1] {
                     Effect::RunSlash { name, args } => {
                         assert_eq!(name, "_internal:migration-confirm");
+                        // selected_ids() converts ProviderId to String at boundary.
                         assert_eq!(args, &vec!["anthropic".to_string(), "gemini".to_string()]);
                     }
                     _ => panic!("expected RunSlash, got {:?}", children[1]),
@@ -163,7 +170,7 @@ mod tests {
 
     #[tokio::test]
     async fn space_toggles_selection() {
-        let mut s = MigrationPickerScreen::new(vec!["anthropic".into(), "gemini".into()]);
+        let mut s = MigrationPickerScreen::new(vec![pid("anthropic"), pid("gemini")]);
         // Toggle the first row off.
         let _ = s.on_key(key(KeyCodePortable::Char(' '))).await.unwrap();
         let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
@@ -180,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn esc_emits_dismiss_slash() {
-        let mut s = MigrationPickerScreen::new(vec!["anthropic".into(), "gemini".into()]);
+        let mut s = MigrationPickerScreen::new(vec![pid("anthropic"), pid("gemini")]);
         let effs = s.on_key(key(KeyCodePortable::Esc)).await.unwrap();
         match &effs[0] {
             Effect::Stack(children) => {
@@ -198,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn down_then_space_toggles_second_row() {
-        let mut s = MigrationPickerScreen::new(vec!["anthropic".into(), "gemini".into()]);
+        let mut s = MigrationPickerScreen::new(vec![pid("anthropic"), pid("gemini")]);
         let _ = s.on_key(key(KeyCodePortable::Down)).await.unwrap();
         let _ = s.on_key(key(KeyCodePortable::Char(' '))).await.unwrap();
         // First still selected, second deselected.
@@ -208,7 +215,7 @@ mod tests {
 
     #[test]
     fn render_shows_title_and_rows() {
-        let s = MigrationPickerScreen::new(vec!["anthropic".into(), "gemini".into()]);
+        let s = MigrationPickerScreen::new(vec![pid("anthropic"), pid("gemini")]);
         let lines = s.render(region());
         let joined: String = lines
             .iter()

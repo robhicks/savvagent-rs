@@ -293,7 +293,7 @@ pub enum ScreenArgs {
     /// provider ids that have stored keyring credentials.
     MigrationPicker {
         /// Provider ids that have stored keyring credentials.
-        detected: Vec<String>,
+        detected: Vec<ProviderId>,
     },
 }
 
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(ScreenArgs::Changelog.screen_id(), Some("changelog"));
         assert_eq!(
             ScreenArgs::MigrationPicker {
-                detected: vec!["anthropic".into()]
+                detected: vec![ProviderId::new("anthropic").unwrap()]
             }
             .screen_id(),
             Some("migration.picker")

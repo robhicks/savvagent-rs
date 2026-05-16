@@ -19,7 +19,7 @@
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Effect, HookKind, HostEvent, Manifest, Plugin, PluginError, PluginId,
-    PluginKind, Screen, ScreenArgs, ScreenLayout, ScreenSpec, SlashSpec, StyledLine,
+    PluginKind, ProviderId, Screen, ScreenArgs, ScreenLayout, ScreenSpec, SlashSpec, StyledLine,
 };
 
 use crate::config_file::ConfigFile;
@@ -35,7 +35,7 @@ const PLUGIN_ID: &str = "internal:migration-picker";
 pub struct MigrationPickerPlugin {
     /// Detected provider list captured at `HostStarting` time so the slash
     /// handlers (which run later) can fall back to it.
-    detected_cache: Vec<String>,
+    detected_cache: Vec<ProviderId>,
 }
 
 impl MigrationPickerPlugin {
@@ -55,7 +55,10 @@ impl MigrationPickerPlugin {
             MigrationOutcome::AlreadyDone => vec![],
             MigrationOutcome::Direct { startup_providers } => {
                 let mut new_cfg = cfg;
-                new_cfg.startup.startup_providers = startup_providers;
+                new_cfg.startup.startup_providers = startup_providers
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect();
                 new_cfg.migration.v1_done = true;
                 if let Err(e) = new_cfg.save(&path) {
                     tracing::warn!(error = %e, "migration: failed to write config.toml");
@@ -75,7 +78,7 @@ impl MigrationPickerPlugin {
     /// Write `startup_providers` + `v1_done = true` to config.toml and return
     /// a `PushNote` effect. On save failure, the note carries the error text
     /// instead of falsely claiming success.
-    fn write_and_mark(&self, startup_providers: Vec<String>) -> Effect {
+    fn write_and_mark(&self, startup_providers: Vec<ProviderId>) -> Effect {
         self.write_and_mark_at(&ConfigFile::default_path(), startup_providers)
     }
 
@@ -83,11 +86,18 @@ impl MigrationPickerPlugin {
     pub(crate) fn write_and_mark_at(
         &self,
         path: &std::path::Path,
-        startup_providers: Vec<String>,
+        startup_providers: Vec<ProviderId>,
     ) -> Effect {
         let mut cfg = ConfigFile::load_or_default(path);
-        let ids_str = startup_providers.join(", ");
-        cfg.startup.startup_providers = startup_providers;
+        let ids_str = startup_providers
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        cfg.startup.startup_providers = startup_providers
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
         cfg.migration.v1_done = true;
         let line = match cfg.save(path) {
             Ok(()) => StyledLine::plain(
@@ -162,18 +172,38 @@ impl Plugin for MigrationPickerPlugin {
     ) -> Result<Vec<Effect>, PluginError> {
         match name {
             "_internal:migration-confirm" => {
-                let mut sel = args;
-                if sel.is_empty() {
-                    sel = dismissed_fallback(&self.detected_cache);
-                }
+                // Slash args are always Vec<String>; convert to ProviderId here
+                // at the boundary. Strings that fail ProviderId::new are dropped
+                // with a warning — the screen built the list from valid ids so
+                // failures here are programming errors.
+                let sel_ids: Vec<ProviderId> = args
+                    .iter()
+                    .filter_map(|s| match ProviderId::new(s.as_str()) {
+                        Ok(id) => Some(id),
+                        Err(_) => {
+                            tracing::warn!(arg = %s, "migration-confirm: dropping invalid provider id");
+                            None
+                        }
+                    })
+                    .collect();
+                let sel = if sel_ids.is_empty() {
+                    dismissed_fallback(&self.detected_cache)
+                } else {
+                    sel_ids
+                };
                 Ok(vec![self.write_and_mark(sel)])
             }
             "_internal:migration-dismiss" => {
                 let fallback = dismissed_fallback(&self.detected_cache);
-                let ids_str = fallback.join(", ");
+                let ids_str = fallback
+                    .iter()
+                    .map(|id| id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let path = ConfigFile::default_path();
                 let mut cfg = ConfigFile::load_or_default(&path);
-                cfg.startup.startup_providers = fallback;
+                cfg.startup.startup_providers =
+                    fallback.iter().map(|id| id.as_str().to_string()).collect();
                 cfg.migration.v1_done = true;
                 let line = match cfg.save(&path) {
                     Ok(()) => StyledLine::plain(
@@ -230,7 +260,10 @@ mod tests {
     async fn confirm_with_args_uses_provided_ids() {
         let mut p = MigrationPickerPlugin::new();
         // Pre-populate cache so dismissed_fallback has material to work with.
-        p.detected_cache = vec!["anthropic".into(), "gemini".into()];
+        p.detected_cache = vec![
+            ProviderId::new("anthropic").unwrap(),
+            ProviderId::new("gemini").unwrap(),
+        ];
         let effs = p
             .handle_slash(
                 "_internal:migration-confirm",
@@ -252,7 +285,10 @@ mod tests {
     #[tokio::test]
     async fn dismiss_uses_fallback() {
         let mut p = MigrationPickerPlugin::new();
-        p.detected_cache = vec!["gemini".into(), "anthropic".into()];
+        p.detected_cache = vec![
+            ProviderId::new("gemini").unwrap(),
+            ProviderId::new("anthropic").unwrap(),
+        ];
         let effs = p
             .handle_slash("_internal:migration-dismiss", vec![])
             .await
@@ -300,7 +336,7 @@ mod tests {
             .create_screen(
                 "migration.picker",
                 ScreenArgs::MigrationPicker {
-                    detected: vec!["anthropic".into()],
+                    detected: vec![ProviderId::new("anthropic").unwrap()],
                 },
             )
             .unwrap();
@@ -337,7 +373,13 @@ mod tests {
 
         let cfg_path = ro_dir.join("config.toml");
         let p = MigrationPickerPlugin::new();
-        let eff = p.write_and_mark_at(&cfg_path, vec!["anthropic".into(), "gemini".into()]);
+        let eff = p.write_and_mark_at(
+            &cfg_path,
+            vec![
+                ProviderId::new("anthropic").unwrap(),
+                ProviderId::new("gemini").unwrap(),
+            ],
+        );
 
         // Restore permissions so TempDir can clean up.
         fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o755)).unwrap();
