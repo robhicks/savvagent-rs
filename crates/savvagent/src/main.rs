@@ -72,6 +72,17 @@ enum WorkerMsg {
     /// error). The main loop uses this to clear `app.is_loading`, mirroring
     /// the `TurnComplete` path for model-driven turns.
     BashDone,
+    /// Sent when a `/disconnect` drain/force worker completes successfully.
+    DisconnectCompleted {
+        provider: String,
+        mode: String,
+    },
+    /// Sent when a `/disconnect` worker encounters an error from
+    /// `Host::remove_provider`.
+    DisconnectFailed {
+        provider: String,
+        err: String,
+    },
 }
 
 type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
@@ -603,7 +614,7 @@ async fn dispatch_slash_command(
             return;
         }
         "/disconnect" => {
-            handle_disconnect_command(app, rest, host_slot).await;
+            handle_disconnect_command(app, rest, host_slot, worker_tx).await;
             return;
         }
         "/use" => {
@@ -1214,7 +1225,12 @@ async fn handle_sandbox_command(app: &mut App, rest: &str, host_slot: &HostSlot)
 ///
 /// The actual `remove_provider` call is fire-and-forget via
 /// `tokio::spawn` so the TUI input stays responsive during a long drain.
-async fn handle_disconnect_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
+async fn handle_disconnect_command(
+    app: &mut App,
+    rest: &str,
+    host_slot: &HostSlot,
+    worker_tx: &mpsc::Sender<WorkerMsg>,
+) {
     let mut tokens = rest.split_whitespace();
     let Some(provider) = tokens.next() else {
         app.push_note(rust_i18n::t!("notes.disconnect-needs-provider").to_string());
@@ -1251,9 +1267,28 @@ async fn handle_disconnect_command(app: &mut App, rest: &str, host_slot: &HostSl
         .to_string(),
     );
     let host_clone = std::sync::Arc::clone(&host);
+    let provider_owned = provider.to_string();
+    let mode_label_owned = mode_label.to_string();
+    let tx = worker_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = host_clone.remove_provider(&pid, mode).await {
-            tracing::warn!(error = %e, "remove_provider failed in /disconnect handler");
+        match host_clone.remove_provider(&pid, mode).await {
+            Ok(()) => {
+                let _ = tx
+                    .send(WorkerMsg::DisconnectCompleted {
+                        provider: provider_owned,
+                        mode: mode_label_owned,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "remove_provider failed in /disconnect handler");
+                let _ = tx
+                    .send(WorkerMsg::DisconnectFailed {
+                        provider: provider_owned,
+                        err: e.to_string(),
+                    })
+                    .await;
+            }
         }
     });
 }
@@ -1920,6 +1955,18 @@ async fn run_app(
                 WorkerMsg::BashDone => {
                     app.is_loading = false;
                     app.update_metrics();
+                }
+                WorkerMsg::DisconnectCompleted { provider, mode } => {
+                    app.push_note(
+                        rust_i18n::t!("notes.disconnect-completed", name = provider, mode = mode)
+                            .to_string(),
+                    );
+                }
+                WorkerMsg::DisconnectFailed { provider, err } => {
+                    app.push_note(
+                        rust_i18n::t!("notes.disconnect-worker-failed", name = provider, err = err)
+                            .to_string(),
+                    );
                 }
             }
         }
