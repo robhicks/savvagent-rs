@@ -637,7 +637,7 @@ async fn dispatch_slash_command(
         // doesn't match, and control falls through to the plugin router so
         // the `internal:model` plugin can open the picker screen.
         "/model" if !rest.is_empty() || current_host(host_slot).await.is_none() => {
-            handle_model_command(app, rest, host_slot, project_root, tool_bins).await;
+            handle_model_command(app, rest, host_slot).await;
             return;
         }
         "/resume" => {
@@ -836,13 +836,7 @@ fn resolve_model_change(
 /// reconnects the active provider with the new id. When the pool has no
 /// models registered for the active provider the check is skipped and the
 /// provider rejects an invalid id at first turn instead.
-async fn handle_model_command(
-    app: &mut App,
-    rest: &str,
-    host_slot: &HostSlot,
-    _project_root: &Path,
-    _tool_bins: &ToolBins,
-) {
+async fn handle_model_command(app: &mut App, rest: &str, host_slot: &HostSlot) {
     if rest.is_empty() {
         match app.active_provider_id {
             Some(id) => app.push_note(
