@@ -20,6 +20,9 @@
 mod support;
 
 use savvagent_mcp::ProviderHandler;
+// Tasks 4-6 will consume the rest of these helpers; until they land,
+// `#[allow(unused_imports)]` keeps the import block in one place so the
+// follow-up commits only have to append `#[tokio::test]` functions.
 #[allow(unused_imports)]
 use support::{
     FakeState, anthropic_body_has_foreign_id, anthropic_success_response, build_request,

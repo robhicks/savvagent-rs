@@ -280,16 +280,19 @@ pub fn anthropic_body_has_foreign_id(body: &Value, foreign_id: &str) -> bool {
         };
         for block in content {
             let ty = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            // Match guards instead of nested `if let` keep `clippy::collapsible_match`
+            // happy under the workspace's `-D warnings` CI flag.
             match ty {
-                "tool_use" => {
-                    if block.get("id").and_then(|v| v.as_str()) == Some(foreign_id) {
-                        saw_tool_use = true;
-                    }
+                "tool_use"
+                    if block.get("id").and_then(|v| v.as_str()) == Some(foreign_id) =>
+                {
+                    saw_tool_use = true;
                 }
-                "tool_result" => {
-                    if block.get("tool_use_id").and_then(|v| v.as_str()) == Some(foreign_id) {
-                        saw_tool_result = true;
-                    }
+                "tool_result"
+                    if block.get("tool_use_id").and_then(|v| v.as_str())
+                        == Some(foreign_id) =>
+                {
+                    saw_tool_result = true;
                 }
                 _ => {}
             }
