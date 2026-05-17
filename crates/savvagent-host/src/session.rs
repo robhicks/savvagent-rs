@@ -167,6 +167,17 @@ pub struct TurnOutcome {
 /// these to render incremental output.
 #[derive(Debug, Clone)]
 pub enum TurnEvent {
+    /// The router picked a `(provider, model)` for this turn. Emitted
+    /// once, before any `IterationStarted`, so the TUI can render a
+    /// per-turn routing badge above the assistant's response.
+    RouteSelected {
+        /// The chosen provider for this turn.
+        provider_id: savvagent_protocol::ProviderId,
+        /// The chosen model for this turn.
+        model_id: String,
+        /// Why the router picked it (rendered as "Override" / "Default" today).
+        reason: crate::router::RoutingReason,
+    },
     /// One iteration of the loop began. `iteration` is 1-based.
     IterationStarted {
         /// 1-based iteration index.
@@ -338,6 +349,7 @@ impl Host {
                         PoolEntry::new(
                             Arc::clone(&reg.client),
                             reg.capabilities.clone(),
+                            reg.aliases.clone(),
                             reg.display_name.clone(),
                         ),
                     );
@@ -373,7 +385,7 @@ impl Host {
                 config.model.clone(),
             )
             .expect("single-model caps with matching default are always valid");
-            let entry = PoolEntry::new(provider_arc, caps, "Default".into());
+            let entry = PoolEntry::new(provider_arc, caps, Vec::new(), "Default".into());
             let mut map = HashMap::new();
             map.insert(id.clone(), entry);
             (map, id)
@@ -466,7 +478,7 @@ impl Host {
             config.model.clone(),
         )
         .expect("single-model caps with matching default are always valid");
-        let entry = PoolEntry::new(provider_arc, caps, "Default".into());
+        let entry = PoolEntry::new(provider_arc, caps, Vec::new(), "Default".into());
         let mut pool_map: HashMap<savvagent_protocol::ProviderId, PoolEntry> = HashMap::new();
         pool_map.insert(default_id.clone(), entry);
 
@@ -560,10 +572,63 @@ impl Host {
             let s = self.state.lock().await;
             s.messages.clone()
         };
+
+        // Parse the `@`-prefix against the currently-connected pool.
+        // Aliases are flattened across every connected provider so
+        // `@opus` works even if the active provider is Gemini.
+        let parsed = {
+            let pool = self.pool.read().await;
+            let views: Vec<crate::router::ProviderView<'_>> = pool
+                .iter()
+                .map(|(id, entry)| crate::router::ProviderView {
+                    id,
+                    capabilities: entry.capabilities(),
+                })
+                .collect();
+            let aliases: Vec<crate::capabilities::ModelAlias> = pool
+                .values()
+                .flat_map(|entry| entry.aliases().to_vec())
+                .collect();
+            crate::router::prefix::parse_at_prefix(&user_input, &views, &aliases)
+            // Pool read guard dropped at end of this block.
+        };
+
         messages.push(Message {
             role: Role::User,
-            content: vec![ContentBlock::Text { text: user_input }],
+            content: vec![ContentBlock::Text { text: parsed.body }],
         });
+
+        // Run the router. The decision pins the provider + model for the
+        // entire turn, including every tool-use iteration.
+        //
+        // Snapshot active_id/active_model BEFORE taking the pool guard so
+        // we never hold the pool RwLock across an `.await`, and so this
+        // path matches the lock acquisition order used elsewhere
+        // (active_provider -> pool).
+        let active_id: ProviderId = self.active_provider.read().await.clone();
+        let active_model: String = self.current_model.read().await.clone();
+        let decision = {
+            let pool = self.pool.read().await;
+            let views: Vec<crate::router::ProviderView<'_>> = pool
+                .iter()
+                .map(|(id, entry)| crate::router::ProviderView {
+                    id,
+                    capabilities: entry.capabilities(),
+                })
+                .collect();
+            crate::router::Router::pick(parsed.override_, &views, &active_id, &active_model)
+            // pool guard dropped at end of this block
+        };
+
+        if let Some(tx) = &events {
+            let _ = tx
+                .send(TurnEvent::RouteSelected {
+                    provider_id: decision.provider_id.clone(),
+                    model_id: decision.model_id.clone(),
+                    reason: decision.reason.clone(),
+                })
+                .await;
+        }
 
         let tool_defs = {
             let guard = self.tools.lock().await;
@@ -588,9 +653,18 @@ impl Host {
                     .await;
             }
 
+            // History sent to the provider has the receiver's own prefix
+            // stripped from every tool_use_id. Foreign-prefixed ids pass
+            // through verbatim — the Phase 2 gate proved each translator
+            // accepts them. See router::namespace docs for the contract.
+            let req_messages = crate::router::namespace::strip_own_prefix_in_history(
+                &messages,
+                &decision.provider_id,
+            );
+
             let req = CompleteRequest {
-                model: self.current_model.read().await.clone(),
-                messages: messages.clone(),
+                model: decision.model_id.clone(),
+                messages: req_messages,
                 system: self.system_prompt.clone(),
                 tools: tool_defs.clone(),
                 temperature: None,
@@ -633,7 +707,7 @@ impl Host {
             // and cancel_rx.recv() will fire. If Force removes the pool entry
             // between (b) and (c), pool.get returns None and we return
             // NoActiveProvider — either path is correct.
-            let active_id: ProviderId = self.active_provider.read().await.clone();
+            let active_id: ProviderId = decision.provider_id.clone();
 
             let mut cancel_rx: broadcast::Receiver<CancellationReason> = {
                 let map = self.cancel_signal.lock().await;
@@ -737,16 +811,21 @@ impl Host {
                 "provider.complete returned"
             );
 
-            // Append the assistant turn verbatim — the provider's content
-            // blocks (including tool_use ids) round-trip back unchanged.
-            messages.push(Message {
-                role: Role::Assistant,
-                content: resp.content.clone(),
-            });
+            // Namespace every ToolUse.id in the returned assistant
+            // content. Future turns that route to a different provider
+            // see `<this-provider>:<id>` in history; the receiving
+            // provider's adapter accepts that as an opaque string
+            // (Phase 2 gate), and `strip_own_prefix_in_history` strips
+            // the prefix back off if the *next* turn lands on the same
+            // provider.
+            let namespaced_content = crate::router::namespace::namespace_assistant_content(
+                resp.content,
+                &decision.provider_id,
+            );
 
             let mut tool_uses: Vec<(String, String, Value)> = Vec::new();
             let mut text_buf = String::new();
-            for block in &resp.content {
+            for block in &namespaced_content {
                 match block {
                     ContentBlock::Text { text } => {
                         if !text_buf.is_empty() {
@@ -760,6 +839,11 @@ impl Host {
                     _ => {}
                 }
             }
+
+            messages.push(Message {
+                role: Role::Assistant,
+                content: namespaced_content,
+            });
 
             // Tool-use blocks drive continuation. Providers disagree on how
             // they signal tool use through `stop_reason` (Anthropic emits
@@ -1201,6 +1285,18 @@ impl Host {
         pool.get(&active).map(|entry| entry.capabilities().clone())
     }
 
+    /// Snapshot every connected provider's `(id, capabilities)`. Used by
+    /// the TUI's `/model` picker to show models across the whole pool,
+    /// not just the active provider's catalog.
+    pub async fn pool_snapshot(
+        &self,
+    ) -> Vec<(savvagent_protocol::ProviderId, ProviderCapabilities)> {
+        let pool = self.pool.read().await;
+        pool.iter()
+            .map(|(id, entry)| (id.clone(), entry.capabilities().clone()))
+            .collect()
+    }
+
     /// Update the model id forwarded in every subsequent `CompleteRequest`.
     ///
     /// This is the pool-safe alternative to rebuilding the host: the pool
@@ -1230,7 +1326,7 @@ impl Host {
         }
         pool.insert(
             reg.id.clone(),
-            PoolEntry::new(reg.client, reg.capabilities, reg.display_name),
+            PoolEntry::new(reg.client, reg.capabilities, reg.aliases, reg.display_name),
         );
         // Pre-create the cancel broadcast sender so run_turn_inner can
         // subscribe before acquiring a lease, closing the TOCTOU window.
@@ -1358,8 +1454,14 @@ impl Host {
         Ok(())
     }
 
-    /// Switch the active provider. Clears conversation history first so the
-    /// new provider starts on a clean session.
+    /// Switch the active provider. The active provider is the default the
+    /// router falls through to when no `@`-prefix override applies.
+    ///
+    /// Phase 3+: conversation history is **preserved** across this switch.
+    /// The next turn's `tool_use_id`s will be prefixed with the new active
+    /// provider's id; older history blocks keep their original prefixes,
+    /// which the receiving provider's translator accepts as opaque strings
+    /// (Phase 2 cross-vendor gate).
     ///
     /// Returns [`PoolError::NotRegistered`] if `id` is not in the pool.
     pub async fn set_active_provider(&self, id: &ProviderId) -> Result<(), PoolError> {
@@ -1370,9 +1472,6 @@ impl Host {
                 return Err(PoolError::NotRegistered(id.clone()));
             }
         }
-        // Order matters: clear history first (so the new provider sees a
-        // clean session), then swap active.
-        self.clear_history().await;
         *self.active_provider.write().await = id.clone();
         Ok(())
     }
