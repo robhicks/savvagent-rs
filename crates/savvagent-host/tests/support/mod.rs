@@ -125,10 +125,7 @@ impl FakeState {
     }
 }
 
-async fn capture_and_respond(
-    state: State<FakeState>,
-    Json(body): Json<Value>,
-) -> Response {
+async fn capture_and_respond(state: State<FakeState>, Json(body): Json<Value>) -> Response {
     *state.0.last_body.lock().unwrap() = Some(body);
     (StatusCode::OK, Json(state.0.response.clone())).into_response()
 }
@@ -283,14 +280,11 @@ pub fn anthropic_body_has_foreign_id(body: &Value, foreign_id: &str) -> bool {
             // Match guards instead of nested `if let` keep `clippy::collapsible_match`
             // happy under the workspace's `-D warnings` CI flag.
             match ty {
-                "tool_use"
-                    if block.get("id").and_then(|v| v.as_str()) == Some(foreign_id) =>
-                {
+                "tool_use" if block.get("id").and_then(|v| v.as_str()) == Some(foreign_id) => {
                     saw_tool_use = true;
                 }
                 "tool_result"
-                    if block.get("tool_use_id").and_then(|v| v.as_str())
-                        == Some(foreign_id) =>
+                    if block.get("tool_use_id").and_then(|v| v.as_str()) == Some(foreign_id) =>
                 {
                     saw_tool_result = true;
                 }

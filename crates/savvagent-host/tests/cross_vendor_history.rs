@@ -27,8 +27,8 @@ use savvagent_mcp::ProviderHandler;
 use support::{
     FakeState, anthropic_body_has_foreign_id, anthropic_success_response, build_request,
     gemini_body_has_resolved_function_name, gemini_success_response, history_with_foreign_id,
-    openai_body_has_foreign_id, openai_success_response, spawn_fake_anthropic,
-    spawn_fake_gemini, spawn_fake_openai,
+    openai_body_has_foreign_id, openai_success_response, spawn_fake_anthropic, spawn_fake_gemini,
+    spawn_fake_openai,
 };
 
 // ===========================================================================
@@ -82,10 +82,14 @@ async fn anthropic_to_gemini() {
     // ToolUse.name (`list_dir`) via the per-request id_to_name lookup.
     // A regression dropping that lookup would surface `"unknown_tool"`
     // on the wire instead, and this assertion would fail.
-    provider
+    let resp = provider
         .complete(req, None)
         .await
         .expect("gemini accepts anthropic-prefixed tool_use_id in history");
+    assert!(matches!(
+        resp.stop_reason,
+        savvagent_protocol::StopReason::EndTurn
+    ));
 
     let body = state
         .captured_body()
@@ -111,10 +115,14 @@ async fn anthropic_to_openai() {
     let history = history_with_foreign_id("anthropic");
     let req = build_request("gpt-test", history);
 
-    provider
+    let resp = provider
         .complete(req, None)
         .await
         .expect("openai accepts anthropic-prefixed tool_use_id");
+    assert!(matches!(
+        resp.stop_reason,
+        savvagent_protocol::StopReason::EndTurn
+    ));
 
     let body = state
         .captured_body()
