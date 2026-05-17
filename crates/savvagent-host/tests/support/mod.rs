@@ -8,9 +8,11 @@
 //! The pattern mirrors `crates/provider-anthropic/tests/integration.rs`
 //! and its siblings.
 
+// TODO(phase-2): drop this allow once Tasks 3-7 land their `mod support;`
+// declarations — those will reference every public item below.
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::{
     Json, Router,
@@ -21,7 +23,6 @@ use axum::{
 };
 use savvagent_protocol::{CompleteRequest, ContentBlock, Message, Role};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
 
 /// Build an SPP `Vec<Message>` that contains an assistant `ToolUse` block
 /// and a matching user `ToolResult` block, with the `tool_use_id` prefixed
@@ -114,8 +115,13 @@ impl FakeState {
 
     /// Read the captured body of the most recent request the fake received.
     /// Returns `None` if no request has been served yet.
+    ///
+    /// Async-signatured for forward-compat (an `async fn` cannot be
+    /// downgraded to a sync one without an API break) even though the
+    /// implementation no longer awaits — `std::sync::Mutex` is fine here
+    /// because the critical section is a single field clone.
     pub async fn captured_body(&self) -> Option<Value> {
-        self.last_body.lock().await.clone()
+        self.last_body.lock().unwrap().clone()
     }
 }
 
@@ -123,14 +129,23 @@ async fn capture_and_respond(
     state: State<FakeState>,
     Json(body): Json<Value>,
 ) -> Response {
-    *state.0.last_body.lock().await = Some(body);
+    *state.0.last_body.lock().unwrap() = Some(body);
     (StatusCode::OK, Json(state.0.response.clone())).into_response()
 }
 
-/// Spin a fake Anthropic backend on `127.0.0.1:0`. Returns `(base_url, state)`.
-/// The handler captures the request body into `state.last_body` and replies
-/// with `state.response`.
-pub async fn spawn_fake_anthropic(state: FakeState) -> (String, FakeState) {
+/// Spin a fake Anthropic backend on `127.0.0.1:0`. Returns the base URL
+/// the caller passes to `provider_for_tests`. The handler captures the
+/// request body into `state.last_body` (shared via the `Arc<Mutex<_>>`
+/// inside `FakeState`) and replies with `state.response`. Callers keep
+/// their own `state` binding to read the captured body after the call:
+///
+/// ```ignore
+/// let state = FakeState::new(anthropic_success_response());
+/// let base = spawn_fake_anthropic(&state).await;
+/// // ... drive the provider against `base` ...
+/// let body = state.captured_body().await.expect("...");
+/// ```
+pub async fn spawn_fake_anthropic(state: &FakeState) -> String {
     let app = Router::new()
         .route("/v1/messages", post(capture_and_respond))
         .with_state(state.clone());
@@ -139,16 +154,18 @@ pub async fn spawn_fake_anthropic(state: FakeState) -> (String, FakeState) {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{addr}"), state)
+    format!("http://{addr}")
 }
 
 /// Spin a fake Gemini backend on `127.0.0.1:0`. Gemini's request path is
-/// `/v1beta/models/{model}:generateContent`; the route uses a wildcard
-/// segment so any model id matches without per-test customization.
-pub async fn spawn_fake_gemini(state: FakeState) -> (String, FakeState) {
+/// `/v1beta/models/{model}:{action}` — both `generateContent` and
+/// `streamGenerateContent` collapse into one route-table entry whose
+/// captured segment is the whole `<model>:<action>` tail. Same parameter
+/// name as `crates/provider-gemini/tests/integration.rs` for symmetry.
+pub async fn spawn_fake_gemini(state: &FakeState) -> String {
     let app = Router::new()
         .route(
-            "/v1beta/models/{rest}",
+            "/v1beta/models/{model_with_action}",
             post(capture_and_respond),
         )
         .with_state(state.clone());
@@ -157,11 +174,12 @@ pub async fn spawn_fake_gemini(state: FakeState) -> (String, FakeState) {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{addr}"), state)
+    format!("http://{addr}")
 }
 
-/// Spin a fake OpenAI backend on `127.0.0.1:0`.
-pub async fn spawn_fake_openai(state: FakeState) -> (String, FakeState) {
+/// Spin a fake OpenAI backend on `127.0.0.1:0`. See `spawn_fake_anthropic`
+/// for the calling pattern.
+pub async fn spawn_fake_openai(state: &FakeState) -> String {
     let app = Router::new()
         .route("/v1/chat/completions", post(capture_and_respond))
         .with_state(state.clone());
@@ -170,7 +188,7 @@ pub async fn spawn_fake_openai(state: FakeState) -> (String, FakeState) {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://{addr}"), state)
+    format!("http://{addr}")
 }
 
 /// Canned success response from a fake Anthropic backend: a single
