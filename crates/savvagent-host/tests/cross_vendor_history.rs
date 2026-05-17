@@ -63,3 +63,65 @@ async fn anthropic_to_anthropic_control() {
         "anthropic body must carry {foreign_id} in BOTH tool_use.id and tool_result.tool_use_id; body was {body:#?}"
     );
 }
+
+// ===========================================================================
+// Gemini receiver pairs
+// ===========================================================================
+
+#[tokio::test]
+async fn anthropic_to_gemini() {
+    let state = FakeState::new(gemini_success_response());
+    let base = spawn_fake_gemini(&state).await;
+    let provider = provider_gemini::provider_for_tests(base);
+
+    let history = history_with_foreign_id("anthropic");
+    let req = build_request("gemini-test", history);
+
+    // Gemini's API has no id field; the round-trip contract is that the
+    // translator resolves the foreign tool_use_id back to the matching
+    // ToolUse.name (`list_dir`) via the per-request id_to_name lookup.
+    // A regression dropping that lookup would surface `"unknown_tool"`
+    // on the wire instead, and this assertion would fail.
+    provider
+        .complete(req, None)
+        .await
+        .expect("gemini accepts anthropic-prefixed tool_use_id in history");
+
+    let body = state
+        .captured_body()
+        .await
+        .expect("fake gemini received a request");
+    assert!(
+        gemini_body_has_resolved_function_name(&body, "list_dir"),
+        "gemini translator must resolve the foreign tool_use_id back to `list_dir` via id_to_name; body was {body:#?}"
+    );
+}
+
+// ===========================================================================
+// OpenAI receiver pairs
+// ===========================================================================
+
+#[tokio::test]
+async fn anthropic_to_openai() {
+    let state = FakeState::new(openai_success_response());
+    let base = spawn_fake_openai(&state).await;
+    let provider = provider_openai::provider_for_tests(base);
+
+    let foreign_id = "anthropic:toolu_abc_123";
+    let history = history_with_foreign_id("anthropic");
+    let req = build_request("gpt-test", history);
+
+    provider
+        .complete(req, None)
+        .await
+        .expect("openai accepts anthropic-prefixed tool_use_id");
+
+    let body = state
+        .captured_body()
+        .await
+        .expect("fake openai received a request");
+    assert!(
+        openai_body_has_foreign_id(&body, foreign_id),
+        "openai body must carry {foreign_id} in BOTH assistant.tool_calls[].id and tool-role.tool_call_id; body was {body:#?}"
+    );
+}
