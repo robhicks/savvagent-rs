@@ -20,10 +20,6 @@
 mod support;
 
 use savvagent_mcp::ProviderHandler;
-// Tasks 4-6 will consume the rest of these helpers; until they land,
-// `#[allow(unused_imports)]` keeps the import block in one place so the
-// follow-up commits only have to append `#[tokio::test]` functions.
-#[allow(unused_imports)]
 use support::{
     FakeState, anthropic_body_has_foreign_id, anthropic_success_response, build_request,
     gemini_body_has_resolved_function_name, gemini_success_response, history_with_foreign_id,
@@ -135,11 +131,6 @@ async fn anthropic_to_gemini() {
     let history = history_with_foreign_id("anthropic");
     let req = build_request("gemini-test", history);
 
-    // Gemini's API has no id field; the round-trip contract is that the
-    // translator resolves the foreign tool_use_id back to the matching
-    // ToolUse.name (`list_dir`) via the per-request id_to_name lookup.
-    // A regression dropping that lookup would surface `"unknown_tool"`
-    // on the wire instead, and this assertion would fail.
     let resp = provider
         .complete(req, None)
         .await
@@ -314,8 +305,8 @@ async fn openai_to_openai_control() {
 // the operator has no credentials for.
 // ===========================================================================
 
-fn live_request_for(model: &str, sender: &str) -> savvagent_protocol::CompleteRequest {
-    build_request(model, history_with_foreign_id(sender))
+fn live_request_for(model: &str) -> savvagent_protocol::CompleteRequest {
+    build_request(model, history_with_foreign_id("anthropic"))
 }
 
 #[tokio::test]
@@ -329,7 +320,7 @@ async fn anthropic_to_anthropic_live() {
         .api_key(key)
         .build()
         .expect("anthropic provider build ok");
-    let req = live_request_for("claude-haiku-4-5", "anthropic");
+    let req = live_request_for("claude-haiku-4-5");
     provider
         .complete(req, None)
         .await
@@ -348,7 +339,7 @@ async fn anthropic_to_gemini_live() {
         .api_key(key)
         .build()
         .expect("gemini provider build ok");
-    let req = live_request_for("gemini-2.0-flash", "anthropic");
+    let req = live_request_for("gemini-2.0-flash");
     provider
         .complete(req, None)
         .await
@@ -366,7 +357,7 @@ async fn anthropic_to_openai_live() {
         .api_key(key)
         .build()
         .expect("openai provider build ok");
-    let req = live_request_for("gpt-4o-mini", "anthropic");
+    let req = live_request_for("gpt-4o-mini");
     provider
         .complete(req, None)
         .await

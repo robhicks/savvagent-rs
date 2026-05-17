@@ -15,7 +15,7 @@ boundary changes and PATCH captures fixes).
   validates that every `(sender_provider, receiver_provider)` pair across
   the three shipping vendors (Anthropic, Gemini, OpenAI) accepts SPP
   history whose `tool_use_id` is prefixed with the originating provider
-  (e.g. `"anthropic:toulu_xyz"`). Nine pair tests run in PR CI against
+  (e.g. `"anthropic:toolu_xyz"`). Nine pair tests run in PR CI against
   axum-backed mock vendor servers via the dedicated `cross-vendor-gate`
   job with `--no-fail-fast`, so any regression surfaces every failing
   pair. `#[ignore]`-marked live-vendor twins are runnable manually via

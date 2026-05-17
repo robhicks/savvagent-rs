@@ -8,10 +8,6 @@
 //! The pattern mirrors `crates/provider-anthropic/tests/integration.rs`
 //! and its siblings.
 
-// TODO(phase-2): drop this allow once Tasks 3-7 land their `mod support;`
-// declarations — those will reference every public item below.
-#![allow(dead_code)]
-
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -101,8 +97,8 @@ pub fn build_request(model: &str, history: Vec<Message>) -> CompleteRequest {
 /// through to the wire) plus the canned response to return.
 #[derive(Clone)]
 pub struct FakeState {
-    pub last_body: Arc<Mutex<Option<Value>>>,
-    pub response: Value,
+    last_body: Arc<Mutex<Option<Value>>>,
+    response: Value,
 }
 
 impl FakeState {
