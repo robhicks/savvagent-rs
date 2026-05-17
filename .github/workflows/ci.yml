@@ -85,7 +85,7 @@ jobs:
       - name: Install Linux system deps
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - name: cross-vendor matrix
-        run: cargo test -p savvagent-host --test cross_vendor_history -- --no-fail-fast
+        run: cargo test -p savvagent-host --test cross_vendor_history --no-fail-fast
 
   # Validate the dist config still parses on every PR. The release workflow
   # also does this, but having it here keeps the failure mode obvious when a
