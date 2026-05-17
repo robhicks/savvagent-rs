@@ -309,11 +309,40 @@ fn live_request_for(model: &str) -> savvagent_protocol::CompleteRequest {
     build_request(model, history_with_foreign_id("anthropic"))
 }
 
+/// Look up a live-vendor API key. Returns `Some(key)` if the primary or
+/// (optional) fallback env var is set; returns `None` only when
+/// `SAVVAGENT_ALLOW_MISSING_LIVE_KEYS=1` explicitly opts into the silent
+/// skip. Panics otherwise — without that opt-out, a CI run that
+/// invokes `cargo test … -- --ignored` without exporting the right
+/// secrets would silently report PASS, masking a misconfiguration. The
+/// opt-out exists so a developer running `cargo test -- --ignored`
+/// locally with only one vendor's key still gets through the others
+/// without editing the test file.
+fn require_live_key(primary: &str, fallback: Option<&str>) -> Option<String> {
+    if let Ok(key) = std::env::var(primary) {
+        return Some(key);
+    }
+    if let Some(fb) = fallback {
+        if let Ok(key) = std::env::var(fb) {
+            return Some(key);
+        }
+    }
+    if std::env::var("SAVVAGENT_ALLOW_MISSING_LIVE_KEYS").is_ok() {
+        eprintln!("{primary} not set; SAVVAGENT_ALLOW_MISSING_LIVE_KEYS active — skipping");
+        return None;
+    }
+    let fallback_note = fallback.map(|f| format!(" (or {f})")).unwrap_or_default();
+    panic!(
+        "{primary}{fallback_note} not set, and SAVVAGENT_ALLOW_MISSING_LIVE_KEYS \
+         is unset. Export the key, or set SAVVAGENT_ALLOW_MISSING_LIVE_KEYS=1 \
+         to allow silent skip (local-dev convenience)."
+    );
+}
+
 #[tokio::test]
-#[ignore = "requires ANTHROPIC_API_KEY; run with cargo test … -- --ignored"]
+#[ignore = "requires ANTHROPIC_API_KEY (or SAVVAGENT_ALLOW_MISSING_LIVE_KEYS=1 to skip silently); run with cargo test … -- --ignored"]
 async fn anthropic_to_anthropic_live() {
-    let Ok(key) = std::env::var("ANTHROPIC_API_KEY") else {
-        eprintln!("ANTHROPIC_API_KEY not set; skipping live anthropic gate test");
+    let Some(key) = require_live_key("ANTHROPIC_API_KEY", None) else {
         return;
     };
     let provider = provider_anthropic::AnthropicProvider::builder()
@@ -328,11 +357,9 @@ async fn anthropic_to_anthropic_live() {
 }
 
 #[tokio::test]
-#[ignore = "requires GEMINI_API_KEY (or GOOGLE_API_KEY); run with cargo test … -- --ignored"]
+#[ignore = "requires GEMINI_API_KEY (or GOOGLE_API_KEY, or SAVVAGENT_ALLOW_MISSING_LIVE_KEYS=1 to skip silently); run with cargo test … -- --ignored"]
 async fn anthropic_to_gemini_live() {
-    let Ok(key) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
-    else {
-        eprintln!("GEMINI_API_KEY not set; skipping live gemini gate test");
+    let Some(key) = require_live_key("GEMINI_API_KEY", Some("GOOGLE_API_KEY")) else {
         return;
     };
     let provider = provider_gemini::GeminiProvider::builder()
@@ -347,10 +374,9 @@ async fn anthropic_to_gemini_live() {
 }
 
 #[tokio::test]
-#[ignore = "requires OPENAI_API_KEY; run with cargo test … -- --ignored"]
+#[ignore = "requires OPENAI_API_KEY (or SAVVAGENT_ALLOW_MISSING_LIVE_KEYS=1 to skip silently); run with cargo test … -- --ignored"]
 async fn anthropic_to_openai_live() {
-    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
-        eprintln!("OPENAI_API_KEY not set; skipping live openai gate test");
+    let Some(key) = require_live_key("OPENAI_API_KEY", None) else {
         return;
     };
     let provider = provider_openai::OpenAiProvider::builder()

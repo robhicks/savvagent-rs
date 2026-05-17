@@ -145,7 +145,9 @@ pub async fn spawn_fake_anthropic(state: &FakeState) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("fake vendor server died: {e}");
+        }
     });
     format!("http://{addr}")
 }
@@ -165,7 +167,9 @@ pub async fn spawn_fake_gemini(state: &FakeState) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("fake vendor server died: {e}");
+        }
     });
     format!("http://{addr}")
 }
@@ -179,7 +183,9 @@ pub async fn spawn_fake_openai(state: &FakeState) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("fake vendor server died: {e}");
+        }
     });
     format!("http://{addr}")
 }
