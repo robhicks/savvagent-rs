@@ -93,6 +93,35 @@ async fn gemini_to_anthropic() {
     );
 }
 
+#[tokio::test]
+async fn openai_to_anthropic() {
+    let state = FakeState::new(anthropic_success_response());
+    let base = spawn_fake_anthropic(&state).await;
+    let provider = provider_anthropic::provider_for_tests(base);
+
+    let foreign_id = "openai:toolu_abc_123";
+    let history = history_with_foreign_id("openai");
+    let req = build_request("claude-test", history);
+
+    let resp = provider
+        .complete(req, None)
+        .await
+        .expect("anthropic accepts openai-prefixed tool_use_id");
+    assert!(matches!(
+        resp.stop_reason,
+        savvagent_protocol::StopReason::EndTurn
+    ));
+
+    let body = state
+        .captured_body()
+        .await
+        .expect("fake anthropic received a request");
+    assert!(
+        anthropic_body_has_foreign_id(&body, foreign_id),
+        "anthropic body must carry {foreign_id} in BOTH tool_use.id and tool_result.tool_use_id; body was {body:#?}"
+    );
+}
+
 // ===========================================================================
 // Gemini receiver pairs
 // ===========================================================================
@@ -158,6 +187,34 @@ async fn gemini_to_gemini_control() {
     );
 }
 
+#[tokio::test]
+async fn openai_to_gemini() {
+    let state = FakeState::new(gemini_success_response());
+    let base = spawn_fake_gemini(&state).await;
+    let provider = provider_gemini::provider_for_tests(base);
+
+    let history = history_with_foreign_id("openai");
+    let req = build_request("gemini-test", history);
+
+    let resp = provider
+        .complete(req, None)
+        .await
+        .expect("gemini accepts openai-prefixed tool_use_id in history");
+    assert!(matches!(
+        resp.stop_reason,
+        savvagent_protocol::StopReason::EndTurn
+    ));
+
+    let body = state
+        .captured_body()
+        .await
+        .expect("fake gemini received a request");
+    assert!(
+        gemini_body_has_resolved_function_name(&body, "list_dir"),
+        "gemini translator must resolve the foreign tool_use_id back to `list_dir` via id_to_name; body was {body:#?}"
+    );
+}
+
 // ===========================================================================
 // OpenAI receiver pairs
 // ===========================================================================
@@ -205,6 +262,35 @@ async fn gemini_to_openai() {
         .complete(req, None)
         .await
         .expect("openai accepts gemini-prefixed tool_use_id");
+    assert!(matches!(
+        resp.stop_reason,
+        savvagent_protocol::StopReason::EndTurn
+    ));
+
+    let body = state
+        .captured_body()
+        .await
+        .expect("fake openai received a request");
+    assert!(
+        openai_body_has_foreign_id(&body, foreign_id),
+        "openai body must carry {foreign_id} in BOTH assistant.tool_calls[].id and tool-role.tool_call_id; body was {body:#?}"
+    );
+}
+
+#[tokio::test]
+async fn openai_to_openai_control() {
+    let state = FakeState::new(openai_success_response());
+    let base = spawn_fake_openai(&state).await;
+    let provider = provider_openai::provider_for_tests(base);
+
+    let foreign_id = "openai:toolu_abc_123";
+    let history = history_with_foreign_id("openai");
+    let req = build_request("gpt-test", history);
+
+    let resp = provider
+        .complete(req, None)
+        .await
+        .expect("openai accepts openai-prefixed tool_use_id");
     assert!(matches!(
         resp.stop_reason,
         savvagent_protocol::StopReason::EndTurn
