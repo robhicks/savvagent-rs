@@ -305,3 +305,70 @@ async fn openai_to_openai_control() {
         "openai body must carry {foreign_id} in BOTH assistant.tool_calls[].id and tool-role.tool_call_id; body was {body:#?}"
     );
 }
+
+// ===========================================================================
+// Live-vendor twins (#[ignore]; run via `cargo test … -- --ignored`).
+// One per receiver, sender-side coverage stays in the mocked matrix above.
+// Each test reads its API key from env and skips with a clear message
+// when the key is absent so `--ignored` does not fail loudly for vendors
+// the operator has no credentials for.
+// ===========================================================================
+
+fn live_request_for(model: &str, sender: &str) -> savvagent_protocol::CompleteRequest {
+    build_request(model, history_with_foreign_id(sender))
+}
+
+#[tokio::test]
+#[ignore = "requires ANTHROPIC_API_KEY; run with cargo test … -- --ignored"]
+async fn anthropic_to_anthropic_live() {
+    let Ok(key) = std::env::var("ANTHROPIC_API_KEY") else {
+        eprintln!("ANTHROPIC_API_KEY not set; skipping live anthropic gate test");
+        return;
+    };
+    let provider = provider_anthropic::AnthropicProvider::builder()
+        .api_key(key)
+        .build()
+        .expect("anthropic provider build ok");
+    let req = live_request_for("claude-haiku-4-5", "anthropic");
+    provider
+        .complete(req, None)
+        .await
+        .expect("live anthropic accepts anthropic-prefixed tool_use_id");
+}
+
+#[tokio::test]
+#[ignore = "requires GEMINI_API_KEY (or GOOGLE_API_KEY); run with cargo test … -- --ignored"]
+async fn anthropic_to_gemini_live() {
+    let Ok(key) = std::env::var("GEMINI_API_KEY").or_else(|_| std::env::var("GOOGLE_API_KEY"))
+    else {
+        eprintln!("GEMINI_API_KEY not set; skipping live gemini gate test");
+        return;
+    };
+    let provider = provider_gemini::GeminiProvider::builder()
+        .api_key(key)
+        .build()
+        .expect("gemini provider build ok");
+    let req = live_request_for("gemini-2.0-flash", "anthropic");
+    provider
+        .complete(req, None)
+        .await
+        .expect("live gemini accepts anthropic-prefixed tool_use_id");
+}
+
+#[tokio::test]
+#[ignore = "requires OPENAI_API_KEY; run with cargo test … -- --ignored"]
+async fn anthropic_to_openai_live() {
+    let Ok(key) = std::env::var("OPENAI_API_KEY") else {
+        eprintln!("OPENAI_API_KEY not set; skipping live openai gate test");
+        return;
+    };
+    let provider = provider_openai::OpenAiProvider::builder()
+        .api_key(key)
+        .build()
+        .expect("openai provider build ok");
+    let req = live_request_for("gpt-4o-mini", "anthropic");
+    provider
+        .complete(req, None)
+        .await
+        .expect("live openai accepts anthropic-prefixed tool_use_id");
+}
