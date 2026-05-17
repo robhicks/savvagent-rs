@@ -63,6 +63,30 @@ jobs:
       - name: test
         run: cargo test --workspace --no-fail-fast
 
+  # Cross-vendor `tool_use_id` compatibility gate. Each (sender, receiver)
+  # pair across the three shipping vendors gets its own #[tokio::test] in
+  # `crates/savvagent-host/tests/cross_vendor_history.rs`; `--no-fail-fast`
+  # ensures every failing pair appears in the job log instead of stopping
+  # at the first. See docs/superpowers/specs/2026-05-15-multi-provider-pool-and-auto-routing-design.md
+  # ("Phase 2 gate") for the contract this job enforces.
+  #
+  # Live-vendor twins are #[ignore]-marked and run manually via
+  # `cargo test -p savvagent-host --test cross_vendor_history -- --ignored`
+  # with the appropriate *_API_KEY env vars set; this PR-CI job covers only
+  # the offline mocked matrix.
+  cross-vendor-gate:
+    name: cross-vendor compatibility gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux system deps
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: cross-vendor matrix
+        run: cargo test -p savvagent-host --test cross_vendor_history -- --no-fail-fast
+
   # Validate the dist config still parses on every PR. The release workflow
   # also does this, but having it here keeps the failure mode obvious when a
   # contributor tweaks the [workspace.metadata.dist] block.
