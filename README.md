@@ -227,6 +227,20 @@ cargo run -p savvagent-host --example headless -- "list my Cargo.toml"
 `clippy-all`, `test`, `doc`, `run`); pick whichever matches what you're
 iterating on.
 
+### Cross-vendor compatibility gate
+
+`crates/savvagent-host/tests/cross_vendor_history.rs` exercises every
+sender/receiver pair across the shipping providers to ensure foreign
+`tool_use_id`s round-trip through each vendor's translator. PR CI runs
+the offline (mocked) matrix as a dedicated `cross-vendor-gate` job. Live
+variants are `#[ignore]`-marked; run them manually with the appropriate
+`*_API_KEY` env vars:
+
+```bash
+ANTHROPIC_API_KEY=sk-… GEMINI_API_KEY=AIza… OPENAI_API_KEY=sk-… \
+    cargo test -p savvagent-host --test cross_vendor_history -- --ignored
+```
+
 ### Running the TUI in watch mode
 
 There is no built-in watch mode for the TUI itself — bacon's `run` job

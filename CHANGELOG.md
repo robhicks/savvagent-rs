@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: `0.MINOR.PATCH`, where MINOR captures features + breaking
 boundary changes and PATCH captures fixes).
 
+## 0.16.0 - 2026-05-16
+
+### CI
+
+- **Cross-vendor `tool_use_id` compatibility gate.** New
+  `crates/savvagent-host/tests/cross_vendor_history.rs` integration test
+  validates that every `(sender_provider, receiver_provider)` pair across
+  the three shipping vendors (Anthropic, Gemini, OpenAI) accepts SPP
+  history whose `tool_use_id` is prefixed with the originating provider
+  (e.g. `"anthropic:toulu_xyz"`). Nine pair tests run in PR CI against
+  axum-backed mock vendor servers via the dedicated `cross-vendor-gate`
+  job with `--no-fail-fast`, so any regression surfaces every failing
+  pair. `#[ignore]`-marked live-vendor twins are runnable manually via
+  `cargo test -p savvagent-host --test cross_vendor_history -- --ignored`
+  with `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` set.
+
+### Internal
+
+- Phase 2 of the multi-provider-pool roadmap (see
+  `docs/superpowers/specs/2026-05-15-multi-provider-pool-and-auto-routing-design.md`).
+  No user-visible runtime behavior changes; this release establishes the
+  release-gate Phase 3 (cross-provider routing with `@provider:model`
+  overrides) depends on. A live-vendor nightly workflow is intentionally
+  deferred to a follow-up.
+
 ## v0.15.0 — Multi-provider connection pool (2026-05-15)
 
 ### Added
