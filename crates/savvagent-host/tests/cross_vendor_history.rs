@@ -1,0 +1,62 @@
+//! Cross-vendor `tool_use_id` compatibility matrix.
+//!
+//! For every `(sender_provider, receiver_provider)` pair across the three
+//! shipping vendors (Anthropic, Gemini, OpenAI), build a synthetic SPP
+//! history whose `tool_use_id` is prefixed with `sender_provider` (the
+//! shape Phase 3 will introduce via host-side namespacing) and submit a
+//! `CompleteRequest` carrying it to `receiver_provider`. The test asserts
+//! (a) the call returns `Ok` and (b) the outgoing request body satisfies
+//! a vendor-specific structural assertion:
+//!
+//! - Anthropic / OpenAI: foreign id appears in BOTH canonical fields
+//!   (round-trip preservation; see `*_body_has_foreign_id` inspectors).
+//! - Gemini: API has no id field, so the receiver-side contract under
+//!   test is that the translator's `id_to_name` lookup resolved the
+//!   foreign id to the matching tool name (`list_dir`).
+//!
+//! Tests use the axum fake-vendor servers in `support/mod.rs`; live-vendor
+//! twins are marked `#[ignore]` so PR CI does not need credentials.
+
+mod support;
+
+use savvagent_mcp::ProviderHandler;
+#[allow(unused_imports)]
+use support::{
+    FakeState, anthropic_body_has_foreign_id, anthropic_success_response, build_request,
+    gemini_body_has_resolved_function_name, gemini_success_response, history_with_foreign_id,
+    openai_body_has_foreign_id, openai_success_response, spawn_fake_anthropic,
+    spawn_fake_gemini, spawn_fake_openai,
+};
+
+// ===========================================================================
+// Anthropic receiver pairs
+// ===========================================================================
+
+#[tokio::test]
+async fn anthropic_to_anthropic_control() {
+    let state = FakeState::new(anthropic_success_response());
+    let base = spawn_fake_anthropic(&state).await;
+    let provider = provider_anthropic::provider_for_tests(base);
+
+    let foreign_id = "anthropic:toolu_abc_123";
+    let history = history_with_foreign_id("anthropic");
+    let req = build_request("claude-test", history);
+
+    let resp = provider
+        .complete(req, None)
+        .await
+        .expect("anthropic accepts anthropic-prefixed tool_use_id");
+    assert!(matches!(
+        resp.stop_reason,
+        savvagent_protocol::StopReason::EndTurn
+    ));
+
+    let body = state
+        .captured_body()
+        .await
+        .expect("fake anthropic received a request");
+    assert!(
+        anthropic_body_has_foreign_id(&body, foreign_id),
+        "anthropic body must carry {foreign_id} in BOTH tool_use.id and tool_result.tool_use_id; body was {body:#?}"
+    );
+}
