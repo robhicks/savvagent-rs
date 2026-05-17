@@ -28,6 +28,17 @@ tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true }
 
+# Cross-vendor compatibility gate (tests/cross_vendor_history.rs).
+# Only deps that are NOT already in [dependencies] go here: Cargo makes
+# runtime deps available to tests automatically, so re-declaring
+# `serde_json` or `futures` (both in the host's [dependencies]) would be
+# redundant. `axum` is dev-only and needs the `json` feature for its
+# `Json<_>` extractor used by the fake-vendor handlers in Task 2.
+provider-anthropic.workspace = true
+provider-gemini.workspace = true
+provider-openai.workspace = true
+axum = { workspace = true, features = ["json"] }
+
 [[example]]
 name = "headless"
 path = "examples/headless.rs"
