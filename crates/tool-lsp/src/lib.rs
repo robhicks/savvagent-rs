@@ -20,6 +20,9 @@ pub use language::{LanguageId, extension_of, workspace_root_for};
 mod session;
 pub use session::LspSession;
 
+mod pool;
+pub use pool::{IDLE_TIMEOUT, LspPool};
+
 use rmcp::{
     ServerHandler, ServiceExt,
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
