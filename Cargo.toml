@@ -13,6 +13,7 @@ members = [
     "crates/tool-bash",
     "crates/tool-fs",
     "crates/tool-grep",
+    "crates/tool-lsp",
     "crates/savvagent-host/tests/fixtures/resource-tool",
 ]
 default-members = ["crates/savvagent"]
@@ -37,6 +38,7 @@ provider-openai = { path = "crates/provider-openai", version = "0.15.0" }
 tool-bash = { path = "crates/tool-bash", version = "0.15.0" }
 tool-fs = { path = "crates/tool-fs", version = "0.15.0" }
 tool-grep = { path = "crates/tool-grep", version = "0.15.0" }
+tool-lsp = { path = "crates/tool-lsp", version = "0.15.0" }
 
 # Async runtime + utilities
 tokio = { version = "1.52", features = ["full"] }
@@ -86,6 +88,11 @@ self_update = { version = "=0.42.0", default-features = false, features = [
     "compression-flate2",
     "rustls",
 ] }
+
+# LSP wire types used by tool-lsp. We hand-roll the JSON-RPC client
+# inside tool-lsp::session for full control over framing, but reuse
+# lsp-types for the message bodies.
+lsp-types = "0.97"
 
 # Code search / walker (shared by tool-grep and the rewritten tool-fs glob)
 grep-matcher = "0.1"
