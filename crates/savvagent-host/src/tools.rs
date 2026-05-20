@@ -28,9 +28,9 @@ use std::sync::{Arc, RwLock};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rmcp::{
-    RoleClient, ServiceExt,
-    model::CallToolRequestParams,
-    service::{RunningService, ServiceError},
+    ClientHandler, RoleClient, ServiceExt,
+    model::{CallToolRequestParams, ResourceUpdatedNotificationParam},
+    service::{NotificationContext, RunningService, ServiceError},
     transport::TokioChildProcess,
 };
 use savvagent_protocol::ToolDef;
@@ -147,6 +147,107 @@ pub trait BashNetResolver: Send + Sync + 'static {
 /// an `RwLock` in [`LazyBash`] so the host can swap in the real resolver
 /// after construction (see [`crate::session::Host::wire_self_into_resolver`]).
 pub(crate) type BashNetResolverHandle = Arc<dyn BashNetResolver>;
+
+/// Resource notification observed by a [`ResourceCapturingHandler`].
+///
+/// Currently only `Updated` carries a URI. `ListChanged` notifications
+/// don't include URIs in the MCP wire format — the receiver is expected
+/// to call `resources/list` to discover the new set. We don't need that
+/// today (tools we own publish updates eagerly), but the variant exists
+/// so the channel surface is forward-compatible.
+//
+// NOTE: `dead_code` is allowed temporarily; Task 4 wires the handler into
+// `ToolRegistry::connect` and the variants will start being consumed.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) enum ResourceEvent {
+    /// `notifications/resources/updated` from `owner` for `uri`.
+    Updated {
+        /// Tool server label (matches `ToolServer.label`).
+        owner: String,
+        /// URI as published by the tool.
+        uri: String,
+    },
+    /// `notifications/resources/list_changed` from `owner`.
+    ListChanged {
+        /// Tool server label.
+        owner: String,
+    },
+}
+
+/// rmcp [`ClientHandler`] impl installed on every `ToolServer` so that
+/// server-initiated `notifications/resources/*` notifications flow into
+/// the host's resource pump instead of being silently dropped (which is
+/// what the default `impl ClientHandler for ()` does).
+///
+/// Each handler is bound to one tool's `label` at construction time so
+/// the pump knows which server published each event.
+//
+// NOTE: `dead_code` is allowed temporarily; Task 4 wires the handler into
+// `ToolRegistry::connect`.
+#[allow(dead_code)]
+pub(crate) struct ResourceCapturingHandler {
+    label: String,
+    tx: tokio::sync::mpsc::Sender<ResourceEvent>,
+}
+
+#[allow(dead_code)]
+impl ResourceCapturingHandler {
+    pub(crate) fn new(label: String, tx: tokio::sync::mpsc::Sender<ResourceEvent>) -> Self {
+        Self { label, tx }
+    }
+
+    /// Test-only helper: forwards an `updated` notification through the
+    /// same code path the rmcp service uses, without needing to
+    /// synthesize a `NotificationContext` (whose fields are private).
+    #[cfg(test)]
+    pub(crate) async fn forward_updated_for_test(&self, params: ResourceUpdatedNotificationParam) {
+        self.send_updated(params.uri.to_string()).await;
+    }
+
+    async fn send_updated(&self, uri: String) {
+        let event = ResourceEvent::Updated {
+            owner: self.label.clone(),
+            uri,
+        };
+        if let Err(err) = self.tx.send(event).await {
+            // Receiver dropped — host is shutting down or the pump panicked.
+            // Either way, drop the event silently; we don't want to apply
+            // backpressure to the tool subprocess (which would stall a
+            // language server's reanalysis).
+            tracing::warn!(
+                owner = %self.label,
+                "resource pump receiver dropped; dropping notification: {err}"
+            );
+        }
+    }
+
+    async fn send_list_changed(&self) {
+        let event = ResourceEvent::ListChanged {
+            owner: self.label.clone(),
+        };
+        if let Err(err) = self.tx.send(event).await {
+            tracing::warn!(
+                owner = %self.label,
+                "resource pump receiver dropped; dropping list_changed: {err}"
+            );
+        }
+    }
+}
+
+impl ClientHandler for ResourceCapturingHandler {
+    async fn on_resource_updated(
+        &self,
+        params: ResourceUpdatedNotificationParam,
+        _context: NotificationContext<rmcp::RoleClient>,
+    ) {
+        self.send_updated(params.uri.to_string()).await;
+    }
+
+    async fn on_resource_list_changed(&self, _context: NotificationContext<rmcp::RoleClient>) {
+        self.send_list_changed().await;
+    }
+}
 
 /// Aggregate view of all connected tool servers.
 pub(crate) struct ToolRegistry {
@@ -972,6 +1073,61 @@ mod lazy_bash_tests {
             lazy_bash: None,
         };
         assert!(!registry.bash_available());
+    }
+}
+
+#[cfg(test)]
+mod resource_handler_tests {
+    use super::*;
+    use rmcp::model::ResourceUpdatedNotificationParam;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn handler_forwards_resource_updated_on_channel() {
+        let (tx, mut rx) = mpsc::channel::<ResourceEvent>(8);
+        let handler = ResourceCapturingHandler::new("tool-lsp".to_string(), tx);
+
+        // We can't easily build a real NotificationContext (Peer is
+        // private), so we exercise the path the rmcp service layer
+        // takes: it deconstructs the notification into params and a
+        // context, then calls on_resource_updated. We test the helper
+        // that actually forwards.
+        handler
+            .forward_updated_for_test(ResourceUpdatedNotificationParam {
+                uri: "lsp://diagnostics/foo.rs".into(),
+            })
+            .await;
+
+        let evt = rx.recv().await.expect("event must arrive");
+        assert!(matches!(evt, ResourceEvent::Updated { .. }));
+        if let ResourceEvent::Updated { owner, uri } = evt {
+            assert_eq!(owner, "tool-lsp");
+            assert_eq!(uri, "lsp://diagnostics/foo.rs");
+        }
+    }
+
+    #[tokio::test]
+    async fn handler_forward_failure_is_silent() {
+        // Receiver dropped → mpsc::Sender::send returns Err. The handler
+        // must not panic; it just logs and drops the event. We assert
+        // by calling forward and observing no panic.
+        let (tx, rx) = mpsc::channel::<ResourceEvent>(1);
+        drop(rx);
+        let handler = ResourceCapturingHandler::new("dead-tool".to_string(), tx);
+        handler
+            .forward_updated_for_test(ResourceUpdatedNotificationParam {
+                uri: "lsp://x".into(),
+            })
+            .await;
+        // If we got here we passed.
+    }
+
+    // Keep this import group local so the test module compiles regardless
+    // of whether the parent file imports rmcp::Arc.
+    fn _ensure_send_sync<T: Send + Sync>() {}
+    #[test]
+    fn handler_is_send_sync() {
+        _ensure_send_sync::<ResourceCapturingHandler>();
     }
 }
 
