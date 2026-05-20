@@ -2332,7 +2332,8 @@ fn translate_turn_event_to_host_event(
         | TurnEvent::BashNetworkRequested { .. }
         | TurnEvent::ToolCallDenied { .. }
         | TurnEvent::Cancelled { .. }
-        | TurnEvent::AbortedAfterGrace { .. } => None,
+        | TurnEvent::AbortedAfterGrace { .. }
+        | TurnEvent::ResourceUpdated { .. } => None,
     }
 }
 
