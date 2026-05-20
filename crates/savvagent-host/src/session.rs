@@ -465,8 +465,20 @@ impl Host {
         // any) or falls back to `false`. `wire_self_into_resolver` swaps
         // in the real one below.
         let resolver = bootstrap_bash_net_resolver();
-        let tools =
-            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
+        // Resource channel: bounded at 64. If a tool publishes faster than
+        // the pump drains, oldest-first warnings fire; we never block the
+        // subprocess.
+        let (resource_tx, resource_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::ResourceEvent>(64);
+        let _resource_rx = resource_rx; // pump task wired in next task
+        let tools = ToolRegistry::connect(
+            &config.tools,
+            &config.project_root,
+            &sandbox,
+            resolver,
+            resource_tx,
+        )
+        .await?;
         let system_prompt = build_layered_system_prompt(&config, &tools);
         let policy = config
             .policy
@@ -540,8 +552,20 @@ impl Host {
     ) -> Result<Self, HostError> {
         let sandbox = config.sandbox.clone().unwrap_or_else(SandboxConfig::load);
         let resolver = bootstrap_bash_net_resolver();
-        let tools =
-            ToolRegistry::connect(&config.tools, &config.project_root, &sandbox, resolver).await?;
+        // Resource channel: bounded at 64. If a tool publishes faster than
+        // the pump drains, oldest-first warnings fire; we never block the
+        // subprocess.
+        let (resource_tx, resource_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::ResourceEvent>(64);
+        let _resource_rx = resource_rx; // pump task wired in next task
+        let tools = ToolRegistry::connect(
+            &config.tools,
+            &config.project_root,
+            &sandbox,
+            resolver,
+            resource_tx,
+        )
+        .await?;
         let system_prompt = build_layered_system_prompt(&config, &tools);
         let policy = config
             .policy
@@ -2883,10 +2907,17 @@ mod policy_tests {
 
         let sandbox = crate::sandbox::SandboxConfig::default();
         let resolver = bootstrap_bash_net_resolver();
-        let tools =
-            crate::tools::ToolRegistry::connect(&[], &config.project_root, &sandbox, resolver)
-                .await
-                .unwrap();
+        let (resource_tx, _resource_rx) =
+            tokio::sync::mpsc::channel::<crate::tools::ResourceEvent>(64);
+        let tools = crate::tools::ToolRegistry::connect(
+            &[],
+            &config.project_root,
+            &sandbox,
+            resolver,
+            resource_tx,
+        )
+        .await
+        .unwrap();
 
         let prompt = super::build_layered_system_prompt(&config, &tools)
             .expect("default + override + body must produce Some");

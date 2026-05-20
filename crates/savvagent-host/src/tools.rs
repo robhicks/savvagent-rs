@@ -156,21 +156,25 @@ pub(crate) type BashNetResolverHandle = Arc<dyn BashNetResolver>;
 /// today (tools we own publish updates eagerly), but the variant exists
 /// so the channel surface is forward-compatible.
 //
-// NOTE: `dead_code` is allowed temporarily; Task 4 wires the handler into
-// `ToolRegistry::connect` and the variants will start being consumed.
+// NOTE: variant fields carry `dead_code` allows until the pump task
+// (Task 5) destructures them in non-test code. The handler in this
+// file constructs the variants today; the consumer that reads
+// `owner`/`uri` lands next.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) enum ResourceEvent {
     /// `notifications/resources/updated` from `owner` for `uri`.
     Updated {
         /// Tool server label (matches `ToolServer.label`).
+        #[allow(dead_code)]
         owner: String,
         /// URI as published by the tool.
+        #[allow(dead_code)]
         uri: String,
     },
     /// `notifications/resources/list_changed` from `owner`.
     ListChanged {
         /// Tool server label.
+        #[allow(dead_code)]
         owner: String,
     },
 }
@@ -182,16 +186,11 @@ pub(crate) enum ResourceEvent {
 ///
 /// Each handler is bound to one tool's `label` at construction time so
 /// the pump knows which server published each event.
-//
-// NOTE: `dead_code` is allowed temporarily; Task 4 wires the handler into
-// `ToolRegistry::connect`.
-#[allow(dead_code)]
 pub(crate) struct ResourceCapturingHandler {
     label: String,
     tx: tokio::sync::mpsc::Sender<ResourceEvent>,
 }
 
-#[allow(dead_code)]
 impl ResourceCapturingHandler {
     pub(crate) fn new(label: String, tx: tokio::sync::mpsc::Sender<ResourceEvent>) -> Self {
         Self { label, tx }
@@ -267,7 +266,7 @@ pub(crate) struct ToolRegistry {
 
 struct ToolServer {
     label: String,
-    service: RunningService<RoleClient, ()>,
+    service: RunningService<RoleClient, ResourceCapturingHandler>,
 }
 
 /// Lazy-spawn slot for `tool-bash`. The server is spawned on demand by
@@ -368,6 +367,7 @@ impl ToolRegistry {
         project_root: &Path,
         sandbox: &SandboxConfig,
         bash_net_resolver: BashNetResolverHandle,
+        resource_tx: tokio::sync::mpsc::Sender<ResourceEvent>,
     ) -> Result<Self> {
         let mut eager_servers = Vec::new();
         let mut routes: HashMap<String, usize> = HashMap::new();
@@ -394,7 +394,9 @@ impl ToolRegistry {
                         let label = command.display().to_string();
                         let transport = TokioChildProcess::new(probe_cmd)
                             .with_context(|| format!("spawn tool-bash probe: {label}"))?;
-                        let service = ()
+                        let handler =
+                            ResourceCapturingHandler::new(label.clone(), resource_tx.clone());
+                        let service = handler
                             .serve(transport)
                             .await
                             .with_context(|| format!("init MCP session with {label}"))?;
@@ -458,7 +460,9 @@ impl ToolRegistry {
 
                         let transport = TokioChildProcess::new(cmd)
                             .with_context(|| format!("spawn tool server: {label}"))?;
-                        let service = ()
+                        let handler =
+                            ResourceCapturingHandler::new(label.clone(), resource_tx.clone());
+                        let service = handler
                             .serve(transport)
                             .await
                             .with_context(|| format!("init MCP session with {label}"))?;
