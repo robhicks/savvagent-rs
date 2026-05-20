@@ -141,6 +141,24 @@ impl LspServer {
         .map(Json)
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
+
+    /// Get hover information for the symbol at the given position.
+    #[tool(description = "Get hover information for the symbol at the given position.")]
+    pub async fn lsp_hover(
+        &self,
+        Parameters(input): Parameters<tools::hover::LspHoverInput>,
+    ) -> Result<Json<tools::hover::LspHoverOutput>, ErrorData> {
+        tools::hover::dispatch(
+            input,
+            &self.config,
+            &self.pool,
+            &self.root,
+            Arc::clone(&self.on_diagnostics),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
 }
 
 #[tool_handler]
