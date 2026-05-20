@@ -27,7 +27,7 @@ mod convert;
 pub use convert::{DiagnosticOut, FileEditOut, LocationOut, PositionOut, RangeOut, TextEditOut};
 
 mod resources;
-mod tools;
+pub mod tools;
 
 use std::sync::Arc;
 
