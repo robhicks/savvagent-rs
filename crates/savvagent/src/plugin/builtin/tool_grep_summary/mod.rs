@@ -1,7 +1,5 @@
 //! `internal:tool-grep-summary` — renders summaries for `tool-grep`'s `search`.
 
-#![allow(dead_code)] // not yet wired into register_builtins; removed when Task 11 lands.
-
 use std::collections::HashSet;
 
 use async_trait::async_trait;

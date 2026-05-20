@@ -5,10 +5,6 @@
 //! structs from the `tool-fs` crate so summaries break at build time if a
 //! tool's schema changes upstream.
 
-// Not yet wired into register_builtins (Task 11). Suppress dead-code lint
-// until registration lands.
-#![allow(dead_code)]
-
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Manifest, Plugin, PluginId, PluginKind, StyledSpan, TextMods, ThemeColor,

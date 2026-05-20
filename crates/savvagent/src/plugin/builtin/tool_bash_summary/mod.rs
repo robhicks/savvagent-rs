@@ -1,7 +1,5 @@
 //! `internal:tool-bash-summary` — renders summaries for `tool-bash`'s `run`.
 
-#![allow(dead_code)] // not yet wired into register_builtins; removed when Task 11 lands.
-
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Manifest, Plugin, PluginId, PluginKind, StyledSpan, TextMods, ThemeColor,
