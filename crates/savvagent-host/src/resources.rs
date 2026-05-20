@@ -5,10 +5,10 @@
 //! caching them would force us to invalidate on every server update and gain
 //! nothing — tools are local children, the read round-trip is cheap.
 //!
-//! The `dirty_since_last_iteration` set tracks URIs that received an
-//! `updated` notification since the host last drained the set at the
-//! tool-use-loop boundary. [`Host`] reads + clears the set inside the loop
-//! and uses it to inject `[resource updated: <uri>]` user-text blocks.
+//! The `dirty` set tracks URIs that received an `updated` notification
+//! since the host last drained the set at the tool-use-loop boundary.
+//! [`Host`] reads + clears the set inside the loop and uses it to inject
+//! `[resource updated: <uri>]` user-text blocks.
 
 use std::collections::{HashMap, HashSet};
 
@@ -51,8 +51,8 @@ impl ResourceCache {
         self.entries.get(uri).map(|s| s.owner.as_str())
     }
 
-    /// Drain the dirty set, returning each URI in insertion order. Sorts
-    /// for stability — same set of URIs always produces the same drain
+    /// Drain the dirty set, returning each URI in sorted order for
+    /// stability — same set of URIs always produces the same drain
     /// sequence, so injected conversation blocks land in a deterministic
     /// order across hosts.
     pub fn drain_dirty(&mut self) -> Vec<String> {
