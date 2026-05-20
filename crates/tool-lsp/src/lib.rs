@@ -17,6 +17,9 @@ pub use config::{LanguageEntry, LspConfig};
 mod language;
 pub use language::{LanguageId, extension_of, workspace_root_for};
 
+mod session;
+pub use session::LspSession;
+
 use rmcp::{
     ServerHandler, ServiceExt,
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
