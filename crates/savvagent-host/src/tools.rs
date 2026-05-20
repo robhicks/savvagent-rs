@@ -45,6 +45,11 @@ use crate::sandbox::{SandboxConfig, SandboxWrapper, apply_sandbox};
 /// detection scheme used in `sandbox.rs::net_allowed_for`.
 const TOOL_BASH_MARKER: &str = "tool-bash";
 
+/// Name of the host-built-in tool that reads MCP resources by URI.
+/// Always present in `ToolRegistry::defs`, regardless of whether any
+/// connected tool publishes resources today.
+pub(crate) const READ_RESOURCE_TOOL_NAME: &str = "read_resource";
+
 /// Per-call override of `tool-bash`'s network access.
 ///
 /// | Variant      | Meaning                                                 |
@@ -491,6 +496,22 @@ impl ToolRegistry {
             defs.len()
         );
 
+        // Synthetic built-in: read_resource. Always present; the dispatch
+        // path in Host::dispatch_tool routes it without consulting
+        // `routes` (which only knows about real, wire-spoken tools).
+        defs.push(ToolDef {
+            name: READ_RESOURCE_TOOL_NAME.to_string(),
+            description: "Fetch the contents of an MCP resource by URI. \
+                URIs are surfaced via `[resource updated: <uri>]` notes in the \
+                conversation. Returns the resource body as text or JSON."
+                .to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "uri": { "type": "string" } },
+                "required": ["uri"]
+            }),
+        });
+
         Ok(Self {
             eager_servers,
             routes,
@@ -580,6 +601,36 @@ impl ToolRegistry {
                 && let Err(e) = active.service.cancel().await
             {
                 tracing::warn!("error closing lazy tool-bash {}: {e}", active.label);
+            }
+        }
+    }
+
+    /// Dispatch the synthetic `read_resource` tool. Looks up the owning
+    /// tool server in `eager_servers` (resources can't come from bash —
+    /// bash is request/response only — so we don't consult the lazy slot).
+    pub(crate) async fn dispatch_read_resource(&self, uri: &str, owner: &str) -> ToolCallOutcome {
+        let server = self.eager_servers.iter().find(|s| s.label == owner);
+        let Some(server) = server else {
+            return ToolCallOutcome::error(format!(
+                "unknown resource owner: {owner}; no tool advertises this URI ({uri})"
+            ));
+        };
+        // rmcp's RunningService exposes read_resource via peer().
+        // `ReadResourceRequestParams` is `#[non_exhaustive]` outside its
+        // defining crate — use the `::new` constructor.
+        let req = rmcp::model::ReadResourceRequestParams::new(uri.to_string());
+        match server.service.peer().read_resource(req).await {
+            Ok(result) => {
+                // result.contents is Vec<ResourceContents>. Serialize the
+                // whole envelope as JSON — the model gets text or blobs
+                // as the tool publishes them.
+                let body = serde_json::to_string(&result.contents)
+                    .unwrap_or_else(|_| "<unrenderable resource contents>".into());
+                ToolCallOutcome::success(body)
+            }
+            Err(err) => {
+                tracing::error!(uri, owner, error = ?err, "read_resource RPC failed");
+                ToolCallOutcome::error(format!("read_resource failed for {uri} on {owner}: {err}"))
             }
         }
     }
@@ -832,13 +883,13 @@ pub(crate) struct ToolCallOutcome {
 }
 
 impl ToolCallOutcome {
-    fn success(payload: String) -> Self {
+    pub(crate) fn success(payload: String) -> Self {
         Self {
             is_error: false,
             payload,
         }
     }
-    fn error(payload: String) -> Self {
+    pub(crate) fn error(payload: String) -> Self {
         Self {
             is_error: true,
             payload,

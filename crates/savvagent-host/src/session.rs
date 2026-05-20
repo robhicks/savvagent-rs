@@ -1190,7 +1190,38 @@ impl Host {
                                 })
                                 .await;
                         }
-                        let outcome = {
+                        let outcome = if name == crate::tools::READ_RESOURCE_TOOL_NAME {
+                            // Synthetic read_resource: parse uri, look up owner via
+                            // resource cache, dispatch via the registry helper.
+                            let uri = input
+                                .as_object()
+                                .and_then(|m| m.get("uri"))
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string);
+                            match uri {
+                                None => crate::tools::ToolCallOutcome::error(
+                                    "read_resource requires `uri: string`".to_string(),
+                                ),
+                                Some(uri) => {
+                                    let owner = {
+                                        let guard = self.resources.lock().await;
+                                        guard.owner(&uri).map(str::to_string)
+                                    };
+                                    match owner {
+                                        None => crate::tools::ToolCallOutcome::error(format!(
+                                            "unknown resource: {uri}; \
+                                             no tool advertises ownership"
+                                        )),
+                                        Some(owner) => {
+                                            let guard = self.tools.lock().await;
+                                            let registry =
+                                                guard.as_ref().expect("tools registry present");
+                                            registry.dispatch_read_resource(&uri, &owner).await
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
                             let guard = self.tools.lock().await;
                             let registry = guard.as_ref().expect("tools registry present");
                             registry
@@ -3011,8 +3042,11 @@ mod policy_tests {
         assert!(prompt.contains("PROJECT_BODY"));
         // Default-section content reflects the embedder version label.
         assert!(prompt.contains("Savvagent version: 7.7.7"));
-        // Bash isn't wired in this fixture; the no-tools branch fires.
-        assert!(prompt.contains("No tools are currently connected"));
+        // Bash isn't wired in this fixture, but the registry always
+        // advertises the synthetic `read_resource` tool, so the affordances
+        // section renders the populated branch rather than the no-tools one.
+        assert!(prompt.contains("The host has wired the following tools"));
+        assert!(prompt.contains("`read_resource`"));
     }
 
     #[test]
