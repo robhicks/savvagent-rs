@@ -155,26 +155,18 @@ pub(crate) type BashNetResolverHandle = Arc<dyn BashNetResolver>;
 /// to call `resources/list` to discover the new set. We don't need that
 /// today (tools we own publish updates eagerly), but the variant exists
 /// so the channel surface is forward-compatible.
-//
-// NOTE: variant fields carry `dead_code` allows until the pump task
-// (Task 5) destructures them in non-test code. The handler in this
-// file constructs the variants today; the consumer that reads
-// `owner`/`uri` lands next.
 #[derive(Debug, Clone)]
 pub(crate) enum ResourceEvent {
     /// `notifications/resources/updated` from `owner` for `uri`.
     Updated {
         /// Tool server label (matches `ToolServer.label`).
-        #[allow(dead_code)]
         owner: String,
         /// URI as published by the tool.
-        #[allow(dead_code)]
         uri: String,
     },
     /// `notifications/resources/list_changed` from `owner`.
     ListChanged {
         /// Tool server label.
-        #[allow(dead_code)]
         owner: String,
     },
 }

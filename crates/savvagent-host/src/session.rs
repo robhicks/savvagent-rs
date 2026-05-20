@@ -354,6 +354,10 @@ pub struct Host {
     /// Plain `std::sync::Mutex` because access is one-shot at startup —
     /// no async required and no contention with the turn loop.
     startup_notes: std::sync::Mutex<Vec<String>>,
+    /// Resource cache populated by the resource_pump task. Read at each
+    /// tool-use-loop iteration boundary to inject `[resource updated: …]`
+    /// user-text blocks into the conversation.
+    resources: Arc<tokio::sync::Mutex<crate::resources::ResourceCache>>,
 }
 
 struct SessionState {
@@ -470,7 +474,6 @@ impl Host {
         // subprocess.
         let (resource_tx, resource_rx) =
             tokio::sync::mpsc::channel::<crate::tools::ResourceEvent>(64);
-        let _resource_rx = resource_rx; // pump task wired in next task
         let tools = ToolRegistry::connect(
             &config.tools,
             &config.project_root,
@@ -534,8 +537,21 @@ impl Host {
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
             routing_rules: tokio::sync::RwLock::new(routing_rules),
             startup_notes: std::sync::Mutex::new(startup_notes),
+            resources: Arc::new(tokio::sync::Mutex::new(
+                crate::resources::ResourceCache::default(),
+            )),
         };
         host.wire_self_into_resolver().await;
+        // Spawn the resource pump. It owns the receiver, the cache handle,
+        // and a clone of the current_turn_events slot. When a turn is
+        // live the pump emits TurnEvent::ResourceUpdated; when no turn is
+        // live (between turns) it still updates the cache so the next
+        // turn sees the updates at its iteration boundary.
+        let cache = Arc::clone(&host.resources);
+        let events_slot = Arc::clone(&host.current_turn_events);
+        tokio::spawn(async move {
+            resource_pump(resource_rx, cache, events_slot).await;
+        });
         Ok(host)
     }
 
@@ -557,7 +573,6 @@ impl Host {
         // subprocess.
         let (resource_tx, resource_rx) =
             tokio::sync::mpsc::channel::<crate::tools::ResourceEvent>(64);
-        let _resource_rx = resource_rx; // pump task wired in next task
         let tools = ToolRegistry::connect(
             &config.tools,
             &config.project_root,
@@ -637,8 +652,20 @@ impl Host {
             turn_handles: tokio::sync::Mutex::new(HashMap::new()),
             routing_rules: tokio::sync::RwLock::new(routing_rules),
             startup_notes: std::sync::Mutex::new(startup_notes),
+            resources: Arc::new(tokio::sync::Mutex::new(
+                crate::resources::ResourceCache::default(),
+            )),
         };
         host.wire_self_into_resolver().await;
+        // Spawn the resource pump. Mirrors the spawn in `Host::start`.
+        // Tests / advanced embedders that construct hosts via
+        // `with_components` rely on this too — otherwise the receiver
+        // would park and never drain.
+        let cache = Arc::clone(&host.resources);
+        let events_slot = Arc::clone(&host.current_turn_events);
+        tokio::spawn(async move {
+            resource_pump(resource_rx, cache, events_slot).await;
+        });
         Ok(host)
     }
 
@@ -2032,6 +2059,55 @@ async fn forward_text_deltas(mut rx: mpsc::Receiver<StreamEvent>, out: mpsc::Sen
             }
         }
     }
+}
+
+/// Drain resource events from `rx` into `cache`. When a turn is live
+/// (i.e. `events_slot` holds a `Some`), also emit a
+/// [`TurnEvent::ResourceUpdated`] so the TUI can render a banner. The
+/// cache mutation always happens regardless of whether a turn is live —
+/// the next iteration boundary will surface the URI via conversation
+/// injection in either case.
+async fn resource_pump(
+    mut rx: mpsc::Receiver<crate::tools::ResourceEvent>,
+    cache: Arc<tokio::sync::Mutex<crate::resources::ResourceCache>>,
+    events_slot: Arc<std::sync::Mutex<Option<mpsc::Sender<TurnEvent>>>>,
+) {
+    while let Some(event) = rx.recv().await {
+        match event {
+            crate::tools::ResourceEvent::Updated { owner, uri } => {
+                {
+                    let mut guard = cache.lock().await;
+                    guard.mark_updated(uri.clone(), owner.clone());
+                    // guard dropped here
+                }
+                // Snapshot the events sender under the std::sync::Mutex,
+                // then drop the guard before awaiting on the send. Same
+                // discipline as current_turn_events use everywhere else
+                // in this file.
+                let maybe_tx = {
+                    let guard = events_slot.lock().expect("events slot poisoned");
+                    guard.clone()
+                };
+                if let Some(tx) = maybe_tx {
+                    let summary = uri.clone();
+                    let _ = tx
+                        .send(TurnEvent::ResourceUpdated {
+                            uri,
+                            owner,
+                            summary,
+                        })
+                        .await;
+                }
+            }
+            crate::tools::ResourceEvent::ListChanged { owner } => {
+                tracing::debug!(
+                    owner = %owner,
+                    "resources/list_changed received; ignored (host pulls on `updated`)"
+                );
+            }
+        }
+    }
+    tracing::debug!("resource_pump channel closed; pump exiting");
 }
 
 #[cfg(test)]
