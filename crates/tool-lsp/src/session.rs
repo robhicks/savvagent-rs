@@ -304,10 +304,6 @@ pub fn path_to_uri(p: &std::path::Path) -> Result<Uri> {
 }
 
 /// Convert an LSP `file://` URI back to a filesystem path.
-///
-/// Consumed by tool modules in later tasks (T8–T14); annotated here
-/// so the binary crate's `-D dead_code` is satisfied until then.
-#[allow(dead_code)]
 pub fn uri_to_path(uri: &Uri) -> Result<PathBuf> {
     let url: url::Url = uri.as_str().parse()?;
     url.to_file_path()
