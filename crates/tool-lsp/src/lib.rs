@@ -123,6 +123,24 @@ impl LspServer {
         .map(Json)
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
+
+    /// Find all references to the symbol at the given position.
+    #[tool(description = "Find all references to the symbol at the given position.")]
+    pub async fn lsp_references(
+        &self,
+        Parameters(input): Parameters<tools::references::LspReferencesInput>,
+    ) -> Result<Json<tools::references::LspReferencesOutput>, ErrorData> {
+        tools::references::dispatch(
+            input,
+            &self.config,
+            &self.pool,
+            &self.root,
+            Arc::clone(&self.on_diagnostics),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
 }
 
 #[tool_handler]

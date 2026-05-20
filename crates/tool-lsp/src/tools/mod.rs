@@ -3,6 +3,7 @@
 //! them via rmcp's `tool_router`.
 
 pub mod definition;
-// References, hover, document_symbols, workspace_symbols, rename,
-// code_actions are added in subsequent tasks. Keep this file as the
-// single registration point.
+pub mod references;
+// Hover, document_symbols, workspace_symbols, rename, code_actions are
+// added in subsequent tasks. Keep this file as the single registration
+// point.
