@@ -937,6 +937,27 @@ impl Host {
             }
             iterations += 1;
 
+            // Drain resource updates that arrived since the previous
+            // iteration (or since turn start) and inject one synthetic
+            // user-text block per URI. The model sees them as a fresh
+            // user turn between iterations and can call `read_resource`
+            // to fetch contents.
+            let dirty: Vec<String> = {
+                let mut guard = self.resources.lock().await;
+                guard.drain_dirty()
+            };
+            if !dirty.is_empty() {
+                let text = dirty
+                    .iter()
+                    .map(|uri| format!("[resource updated: {uri}]"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                messages.push(Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text { text }],
+                });
+            }
+
             if let Some(tx) = &events {
                 let _ = tx
                     .send(TurnEvent::IterationStarted {
@@ -3371,5 +3392,90 @@ mod transcript_tests {
             .find(|m| matches!(m.role, Role::User))
             .expect("at least one user message");
         assert_eq!(user_msg.content, blocks);
+    }
+
+    /// Provider stub that records every `CompleteRequest` it observes
+    /// and returns an immediate `end_turn`. Used to inspect the
+    /// `messages` slice that the iteration-boundary injection assembles
+    /// before it dispatches to the provider.
+    #[derive(Default)]
+    struct RecordingProvider {
+        captured: Arc<std::sync::Mutex<Vec<CompleteRequest>>>,
+    }
+
+    impl RecordingProvider {
+        fn new() -> (Self, Arc<std::sync::Mutex<Vec<CompleteRequest>>>) {
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    captured: captured.clone(),
+                },
+                captured,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl ProviderClient for RecordingProvider {
+        async fn complete(
+            &self,
+            req: CompleteRequest,
+            _events: Option<mpsc::Sender<StreamEvent>>,
+        ) -> Result<CompleteResponse, ProviderError> {
+            self.captured.lock().unwrap().push(req.clone());
+            Ok(CompleteResponse {
+                id: "rec".into(),
+                model: req.model,
+                content: vec![ContentBlock::Text { text: "ok".into() }],
+                stop_reason: StopReason::EndTurn,
+                stop_sequence: None,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn iteration_boundary_injects_resource_updated_block_into_history() {
+        // Pre-populate the resource cache as if the pump task had
+        // observed an update arriving between turns, then run a turn
+        // and inspect the first `CompleteRequest` the provider saw.
+        let dir = tempdir().unwrap();
+        let (provider, captured) = RecordingProvider::new();
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(provider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+
+        {
+            let mut cache = host.resources.lock().await;
+            cache.mark_updated("lsp://diagnostics/foo.rs", "fixture-tool");
+        }
+
+        let (tx, mut rx) = mpsc::channel::<TurnEvent>(64);
+        let _outcome = host.run_turn_streaming("hi", tx).await.unwrap();
+        while rx.recv().await.is_some() {} // drain events
+
+        let captured = captured.lock().unwrap();
+        let last_req = captured
+            .last()
+            .cloned()
+            .expect("at least one CompleteRequest recorded");
+        let has_injection = last_req.messages.iter().any(|m| {
+            matches!(m.role, Role::User)
+                && m.content.iter().any(|b| match b {
+                    ContentBlock::Text { text } => {
+                        text.contains("[resource updated: lsp://diagnostics/foo.rs]")
+                    }
+                    _ => false,
+                })
+        });
+        assert!(
+            has_injection,
+            "first iteration's CompleteRequest must include the injected \
+             [resource updated: …] user-text block; messages were: {:#?}",
+            last_req.messages
+        );
     }
 }
