@@ -11,6 +11,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod config;
+pub use config::{LanguageEntry, LspConfig};
+
 use rmcp::{
     ServerHandler, ServiceExt,
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
