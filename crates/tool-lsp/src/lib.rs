@@ -26,9 +26,19 @@ pub use pool::{IDLE_TIMEOUT, LspPool};
 mod convert;
 pub use convert::{DiagnosticOut, FileEditOut, LocationOut, PositionOut, RangeOut, TextEditOut};
 
+mod resources;
+mod tools;
+
+use std::sync::Arc;
+
 use rmcp::{
-    ServerHandler, ServiceExt,
+    ErrorData, ServerHandler, ServiceExt,
+    handler::server::{
+        router::tool::ToolRouter,
+        wrapper::{Json, Parameters},
+    },
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+    tool, tool_handler, tool_router,
     transport::stdio,
 };
 
@@ -44,17 +54,78 @@ pub async fn run() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let server = LspServer;
+    let server = LspServer::new()?;
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
 
-/// rmcp `ServerHandler` for tool-lsp. Currently advertises zero tools;
-/// the tool surface is added incrementally in later tasks.
-#[derive(Clone, Default)]
-pub struct LspServer;
+/// rmcp `ServerHandler` for tool-lsp. Owns the shared configuration,
+/// session pool, root, diagnostics callback, and the macro-generated
+/// tool router that dispatches to per-tool modules in `tools/`.
+pub struct LspServer {
+    #[allow(dead_code)] // Read by tool dispatch handlers.
+    config: Arc<config::LspConfig>,
+    #[allow(dead_code)] // Read by tool dispatch handlers.
+    pool: Arc<pool::LspPool>,
+    #[allow(dead_code)] // Read by tool dispatch handlers.
+    root: Arc<std::path::PathBuf>,
+    /// Callback that fires after every publishDiagnostics arrives.
+    /// Set by `resources::diagnostics` to publish MCP resource updates;
+    /// stubbed to no-op until that module lands.
+    #[allow(dead_code)] // Wired in Task 15.
+    on_diagnostics: Arc<dyn Fn(&str) + Send + Sync>,
+    #[allow(dead_code)] // Read by the `#[tool_handler]` macro expansion.
+    tool_router: ToolRouter<Self>,
+}
 
+impl LspServer {
+    /// Construct a new server: loads global + per-repo `lsp.toml`,
+    /// pins the SAVVAGENT_TOOL_LSP_ROOT (defaulting to the process CWD),
+    /// and initializes an empty session pool.
+    pub fn new() -> anyhow::Result<Self> {
+        let home = std::env::var("HOME").map(std::path::PathBuf::from).ok();
+        let global = home
+            .map(|h| h.join(".savvagent/lsp.toml"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/dev/null"));
+        let cwd = std::env::current_dir()?;
+        let repo = cwd.join(".savvagent/lsp.toml");
+        let config = config::LspConfig::load(&global, Some(&repo))?;
+        let root = std::env::var("SAVVAGENT_TOOL_LSP_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or(cwd);
+        Ok(Self {
+            config: Arc::new(config),
+            pool: Arc::new(pool::LspPool::default()),
+            root: Arc::new(root),
+            on_diagnostics: Arc::new(|_| {}),
+            tool_router: Self::tool_router(),
+        })
+    }
+}
+
+#[tool_router]
+impl LspServer {
+    /// Jump to the definition of the symbol at the given position.
+    #[tool(description = "Jump to the definition of the symbol at the given position.")]
+    pub async fn lsp_definition(
+        &self,
+        Parameters(input): Parameters<tools::definition::LspDefinitionInput>,
+    ) -> Result<Json<tools::definition::LspDefinitionOutput>, ErrorData> {
+        tools::definition::dispatch(
+            input,
+            &self.config,
+            &self.pool,
+            &self.root,
+            Arc::clone(&self.on_diagnostics),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
+}
+
+#[tool_handler]
 impl ServerHandler for LspServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
