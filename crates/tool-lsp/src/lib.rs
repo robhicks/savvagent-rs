@@ -159,6 +159,24 @@ impl LspServer {
         .map(Json)
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
+
+    /// List the symbols defined in a single document, with nesting.
+    #[tool(description = "List the symbols defined in a single document, with nesting.")]
+    pub async fn lsp_document_symbols(
+        &self,
+        Parameters(input): Parameters<tools::document_symbols::LspDocumentSymbolsInput>,
+    ) -> Result<Json<tools::document_symbols::LspDocumentSymbolsOutput>, ErrorData> {
+        tools::document_symbols::dispatch(
+            input,
+            &self.config,
+            &self.pool,
+            &self.root,
+            Arc::clone(&self.on_diagnostics),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
 }
 
 #[tool_handler]
