@@ -52,11 +52,7 @@ impl Plugin for ToolGrepSummaryPlugin {
         }
     }
 
-    fn summarize_tool_call(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-    ) -> Option<Vec<StyledSpan>> {
+    fn summarize_tool_call(&self, name: &str, args: &serde_json::Value) -> Option<Vec<StyledSpan>> {
         if name != "search" {
             return None;
         }
@@ -78,11 +74,7 @@ impl Plugin for ToolGrepSummaryPlugin {
         Some(spans)
     }
 
-    fn summarize_tool_result(
-        &self,
-        name: &str,
-        result_text: &str,
-    ) -> Option<Vec<StyledSpan>> {
+    fn summarize_tool_result(&self, name: &str, result_text: &str) -> Option<Vec<StyledSpan>> {
         if name != "search" {
             return None;
         }
@@ -179,13 +171,19 @@ mod tests {
     #[test]
     fn returns_none_for_unknown_tool() {
         let p = ToolGrepSummaryPlugin::new();
-        assert!(p.summarize_tool_call("read_file", &serde_json::json!({})).is_none());
+        assert!(
+            p.summarize_tool_call("read_file", &serde_json::json!({}))
+                .is_none()
+        );
     }
 
     #[test]
     fn returns_none_on_args_parse_failure() {
         let p = ToolGrepSummaryPlugin::new();
         // `pattern` is required.
-        assert!(p.summarize_tool_call("search", &serde_json::json!({})).is_none());
+        assert!(
+            p.summarize_tool_call("search", &serde_json::json!({}))
+                .is_none()
+        );
     }
 }

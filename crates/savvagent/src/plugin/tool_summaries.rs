@@ -42,11 +42,7 @@ impl<'a> ToolSummaryRouter<'a> {
     /// Look up the owning plugin for `name` and call `summarize_tool_result`.
     /// Returns `None` if no plugin claims the name or the plugin returns
     /// `None` (e.g. parse failure on `result_text`).
-    pub async fn summarize_result(
-        &self,
-        name: &str,
-        result_text: &str,
-    ) -> Option<Vec<StyledSpan>> {
+    pub async fn summarize_result(&self, name: &str, result_text: &str) -> Option<Vec<StyledSpan>> {
         let pid = self.indexes.tool_summaries.get(name)?;
         let handle = self.registry.get(pid)?;
         let plugin = handle.lock().await;

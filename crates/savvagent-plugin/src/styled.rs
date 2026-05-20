@@ -301,10 +301,7 @@ mod tests {
     fn json_spans_renders_flat_object_in_key_value_order() {
         let spans = json_spans(&json!({"path": "src/main.rs", "size": 42}));
         // Order in serde_json::Map is insertion order, which is what `json!` preserves.
-        assert_eq!(
-            join_text(&spans),
-            r#"{"path": "src/main.rs", "size": 42}"#
-        );
+        assert_eq!(join_text(&spans), r#"{"path": "src/main.rs", "size": 42}"#);
     }
 
     #[test]
@@ -327,19 +324,21 @@ mod tests {
         let spans = json_spans(&json!({"k": "v"}));
         // First span is `{` (muted), then `"` (muted), then `k` (accent), …
         // Collect (text, fg) pairs and assert against a small expected slice.
-        let pairs: Vec<(String, Option<ThemeColor>)> = spans
-            .iter()
-            .map(|s| (s.text.clone(), s.fg))
-            .collect();
+        let pairs: Vec<(String, Option<ThemeColor>)> =
+            spans.iter().map(|s| (s.text.clone(), s.fg)).collect();
         assert_eq!(pairs[0], ("{".to_string(), Some(ThemeColor::Muted)));
         // `"k"` is emitted as three muted-quote / accent-key spans.
         // We assert the key body is Accent and the surrounding quotes are Muted.
         assert!(
-            pairs.iter().any(|(t, c)| t == "k" && *c == Some(ThemeColor::Accent)),
+            pairs
+                .iter()
+                .any(|(t, c)| t == "k" && *c == Some(ThemeColor::Accent)),
             "expected an Accent-coloured span containing the key 'k'; got {pairs:?}"
         );
         assert!(
-            pairs.iter().any(|(t, c)| t == "v" && *c == Some(ThemeColor::Success)),
+            pairs
+                .iter()
+                .any(|(t, c)| t == "v" && *c == Some(ThemeColor::Success)),
             "expected a Success-coloured span containing the string value 'v'; got {pairs:?}"
         );
     }

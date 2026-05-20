@@ -374,9 +374,7 @@ mod tool_summary_index_tests {
     use super::*;
     use crate::plugin::registry::PluginRegistry;
     use async_trait::async_trait;
-    use savvagent_plugin::{
-        Contributions, Manifest, Plugin, PluginKind, ToolSummarySpec,
-    };
+    use savvagent_plugin::{Contributions, Manifest, Plugin, PluginKind, ToolSummarySpec};
 
     struct ClaimsTool {
         id: String,

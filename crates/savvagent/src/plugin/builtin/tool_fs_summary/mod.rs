@@ -10,7 +10,10 @@ use savvagent_plugin::{
     Contributions, Manifest, Plugin, PluginId, PluginKind, StyledSpan, TextMods, ThemeColor,
     ToolSummarySpec, styled::pretty_bytes,
 };
-use tool_fs::{GlobInput, GlobOutput, ListDirInput, ListDirOutput, ReadFileInput, ReadFileOutput, WriteFileInput, WriteFileOutput};
+use tool_fs::{
+    GlobInput, GlobOutput, ListDirInput, ListDirOutput, ReadFileInput, ReadFileOutput,
+    WriteFileInput, WriteFileOutput,
+};
 
 /// Plugin renders summaries for the `tool-fs` tool names.
 pub struct ToolFsSummaryPlugin;
@@ -42,10 +45,18 @@ impl Plugin for ToolFsSummaryPlugin {
     fn manifest(&self) -> Manifest {
         let mut contributions = Contributions::default();
         contributions.tool_summaries = vec![
-            ToolSummarySpec { tool_name: "read_file".into() },
-            ToolSummarySpec { tool_name: "write_file".into() },
-            ToolSummarySpec { tool_name: "list_dir".into() },
-            ToolSummarySpec { tool_name: "glob".into() },
+            ToolSummarySpec {
+                tool_name: "read_file".into(),
+            },
+            ToolSummarySpec {
+                tool_name: "write_file".into(),
+            },
+            ToolSummarySpec {
+                tool_name: "list_dir".into(),
+            },
+            ToolSummarySpec {
+                tool_name: "glob".into(),
+            },
         ];
         Manifest {
             id: PluginId::new("internal:tool-fs-summary").expect("valid built-in id"),
@@ -57,11 +68,7 @@ impl Plugin for ToolFsSummaryPlugin {
         }
     }
 
-    fn summarize_tool_call(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-    ) -> Option<Vec<StyledSpan>> {
+    fn summarize_tool_call(&self, name: &str, args: &serde_json::Value) -> Option<Vec<StyledSpan>> {
         match name {
             "read_file" => {
                 let input: ReadFileInput = serde_json::from_value(args.clone()).ok()?;
@@ -70,7 +77,10 @@ impl Plugin for ToolFsSummaryPlugin {
                     span(input.path, ThemeColor::Success),
                 ];
                 if let Some(max) = input.max_bytes {
-                    out.push(span(format!(" (max {})", pretty_bytes(max)), ThemeColor::Muted));
+                    out.push(span(
+                        format!(" (max {})", pretty_bytes(max)),
+                        ThemeColor::Muted,
+                    ));
                 }
                 Some(out)
             }
@@ -115,11 +125,7 @@ impl Plugin for ToolFsSummaryPlugin {
         }
     }
 
-    fn summarize_tool_result(
-        &self,
-        name: &str,
-        result_text: &str,
-    ) -> Option<Vec<StyledSpan>> {
+    fn summarize_tool_result(&self, name: &str, result_text: &str) -> Option<Vec<StyledSpan>> {
         match name {
             "read_file" => {
                 let out: ReadFileOutput = serde_json::from_str(result_text).ok()?;
@@ -287,7 +293,10 @@ mod tests {
     #[test]
     fn returns_none_for_unknown_tool() {
         let p = ToolFsSummaryPlugin::new();
-        assert!(p.summarize_tool_call("unknown", &serde_json::json!({})).is_none());
+        assert!(
+            p.summarize_tool_call("unknown", &serde_json::json!({}))
+                .is_none()
+        );
         assert!(p.summarize_tool_result("unknown", "{}").is_none());
     }
 

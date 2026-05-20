@@ -20,7 +20,6 @@ pub mod slots;
 /// Tool-summary routing: resolves a tool name to its owning plugin and
 /// dispatches `Plugin::summarize_tool_call` / `summarize_tool_result`,
 /// falling back to the host's JSON highlighter at the call site.
-#[allow(dead_code)]
 pub mod tool_summaries;
 
 /// Slash command routing: resolves bare command names to their owning plugin

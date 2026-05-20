@@ -200,8 +200,12 @@ mod tests {
             kind: PluginKind::Core,
             contributions: Contributions {
                 tool_summaries: vec![
-                    ToolSummarySpec { tool_name: "read_file".into() },
-                    ToolSummarySpec { tool_name: "write_file".into() },
+                    ToolSummarySpec {
+                        tool_name: "read_file".into(),
+                    },
+                    ToolSummarySpec {
+                        tool_name: "write_file".into(),
+                    },
                 ],
                 ..Contributions::default()
             },

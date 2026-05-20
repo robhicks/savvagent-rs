@@ -834,9 +834,7 @@ impl App {
                     t.len()
                 }
                 Entry::Tool {
-                    args,
-                    result_text,
-                    ..
+                    args, result_text, ..
                 } => {
                     // Approximate the JSON args by their compact serialization.
                     let args_len = serde_json::to_string(args).map(|s| s.len()).unwrap_or(0);
@@ -1557,10 +1555,7 @@ impl App {
                 Entry::User(t) => format!("user: {t}"),
                 Entry::Assistant(t) => format!("assistant: {t}"),
                 Entry::Tool {
-                    name,
-                    args,
-                    status,
-                    ..
+                    name, args, status, ..
                 } => {
                     let status_label = match status {
                         Some(ToolCallStatus::Ok) => "ok",

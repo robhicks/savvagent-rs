@@ -41,7 +41,8 @@ fn truncate_command(cmd: &str) -> String {
     // First line only — multi-line scripts are summarized by their first line.
     let first = cmd.lines().next().unwrap_or("");
     let count = first.chars().count();
-    if count <= COMMAND_MAX_CHARS && first.len() == cmd.len() {
+    let is_multiline = cmd.contains('\n');
+    if count <= COMMAND_MAX_CHARS && !is_multiline {
         first.to_string()
     } else {
         let mut t: String = first.chars().take(COMMAND_MAX_CHARS).collect();
@@ -54,7 +55,9 @@ fn truncate_command(cmd: &str) -> String {
 impl Plugin for ToolBashSummaryPlugin {
     fn manifest(&self) -> Manifest {
         let mut contributions = Contributions::default();
-        contributions.tool_summaries = vec![ToolSummarySpec { tool_name: "run".into() }];
+        contributions.tool_summaries = vec![ToolSummarySpec {
+            tool_name: "run".into(),
+        }];
         Manifest {
             id: PluginId::new("internal:tool-bash-summary").expect("valid built-in id"),
             name: "tool-bash summaries".into(),
@@ -65,11 +68,7 @@ impl Plugin for ToolBashSummaryPlugin {
         }
     }
 
-    fn summarize_tool_call(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-    ) -> Option<Vec<StyledSpan>> {
+    fn summarize_tool_call(&self, name: &str, args: &serde_json::Value) -> Option<Vec<StyledSpan>> {
         if name != "run" {
             return None;
         }
@@ -80,11 +79,7 @@ impl Plugin for ToolBashSummaryPlugin {
         ])
     }
 
-    fn summarize_tool_result(
-        &self,
-        name: &str,
-        result_text: &str,
-    ) -> Option<Vec<StyledSpan>> {
+    fn summarize_tool_result(&self, name: &str, result_text: &str) -> Option<Vec<StyledSpan>> {
         if name != "run" {
             return None;
         }
@@ -146,7 +141,10 @@ mod tests {
     fn run_call_keeps_only_first_line_of_multiline_command() {
         let p = ToolBashSummaryPlugin::new();
         let spans = p
-            .summarize_tool_call("run", &serde_json::json!({"command": "set -e\necho hi\nexit 0"}))
+            .summarize_tool_call(
+                "run",
+                &serde_json::json!({"command": "set -e\necho hi\nexit 0"}),
+            )
             .unwrap();
         assert_eq!(join(&spans), "bash $ set -e…");
     }
@@ -191,13 +189,30 @@ mod tests {
     #[test]
     fn returns_none_for_unknown_tool() {
         let p = ToolBashSummaryPlugin::new();
-        assert!(p.summarize_tool_call("read_file", &serde_json::json!({})).is_none());
+        assert!(
+            p.summarize_tool_call("read_file", &serde_json::json!({}))
+                .is_none()
+        );
     }
 
     #[test]
     fn returns_none_on_args_parse_failure() {
         let p = ToolBashSummaryPlugin::new();
         // `command` is required.
-        assert!(p.summarize_tool_call("run", &serde_json::json!({})).is_none());
+        assert!(
+            p.summarize_tool_call("run", &serde_json::json!({}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn run_call_handles_trailing_newline() {
+        let p = ToolBashSummaryPlugin::new();
+        let spans = p
+            .summarize_tool_call("run", &serde_json::json!({"command": "ls -la\n"}))
+            .unwrap();
+        // `\n` is treated as a multi-line marker, so the result IS truncated
+        // with `…` to signal the trailing content was elided.
+        assert_eq!(join(&spans), "bash $ ls -la…");
     }
 }

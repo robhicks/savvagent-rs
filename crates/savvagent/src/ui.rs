@@ -93,8 +93,7 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
     // The registry and index read-locks (`reg_guard`/`idx_guard`) remain
     // held across the entire loop; write-lock waiters (e.g. `/connect`)
     // will block until the loop completes.
-    let tool_router =
-        crate::plugin::tool_summaries::ToolSummaryRouter::new(&idx_guard, &reg_guard);
+    let tool_router = crate::plugin::tool_summaries::ToolSummaryRouter::new(&idx_guard, &reg_guard);
     let mut tool_entries: Vec<ToolEntryRender> = Vec::new();
     for entry in &app.entries {
         let crate::app::Entry::Tool {
@@ -661,9 +660,8 @@ fn render_log(
                     palette.base_style().fg(badge_color),
                 )];
                 for s in render.arg_spans {
-                    arg_line_spans.push(
-                        crate::plugin::convert::styled_span_to_ratatui(s, &palette),
-                    );
+                    arg_line_spans
+                        .push(crate::plugin::convert::styled_span_to_ratatui(s, &palette));
                 }
                 lines.push(Line::from(arg_line_spans));
 
@@ -674,9 +672,8 @@ fn render_log(
                         palette.base_style().fg(palette.muted),
                     )];
                     for s in result_spans {
-                        result_line_spans.push(
-                            crate::plugin::convert::styled_span_to_ratatui(s, &palette),
-                        );
+                        result_line_spans
+                            .push(crate::plugin::convert::styled_span_to_ratatui(s, &palette));
                     }
                     lines.push(Line::from(result_line_spans));
                 }
