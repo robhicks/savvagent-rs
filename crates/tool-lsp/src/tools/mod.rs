@@ -6,6 +6,7 @@ pub mod definition;
 pub mod document_symbols;
 pub mod hover;
 pub mod references;
+pub mod rename;
 pub mod workspace_symbols;
-// rename, code_actions are added in subsequent tasks.
+// code_actions is added in a subsequent task.
 // Keep this file as the single registration point.

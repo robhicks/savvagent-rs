@@ -195,6 +195,28 @@ impl LspServer {
         .map(Json)
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
+
+    /// Compute the edits needed to rename a symbol. Does NOT apply them —
+    /// the caller drives the resulting `FileEditOut`s through
+    /// `tool-fs::write_file`.
+    #[tool(
+        description = "Compute the edits required to rename the symbol at the given position. Does NOT apply the edits — the caller must do that via tool-fs::write_file."
+    )]
+    pub async fn lsp_rename(
+        &self,
+        Parameters(input): Parameters<tools::rename::LspRenameInput>,
+    ) -> Result<Json<tools::rename::LspRenameOutput>, ErrorData> {
+        tools::rename::dispatch(
+            input,
+            &self.config,
+            &self.pool,
+            &self.root,
+            Arc::clone(&self.on_diagnostics),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
 }
 
 #[tool_handler]
