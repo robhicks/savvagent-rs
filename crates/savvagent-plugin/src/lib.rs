@@ -40,7 +40,7 @@ pub use effect::{BoundAction, Effect};
 pub mod manifest;
 pub use manifest::{
     Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind, ProviderSpec, ScreenLayout,
-    ScreenSpec, SlashSpec, SlotSpec,
+    ScreenSpec, SlashSpec, SlotSpec, ToolSummarySpec,
 };
 
 /// The [`Plugin`] trait — the WIT-portable entry point each plugin implements.
