@@ -23,6 +23,9 @@ pub use session::LspSession;
 mod pool;
 pub use pool::{IDLE_TIMEOUT, LspPool};
 
+mod convert;
+pub use convert::{DiagnosticOut, FileEditOut, LocationOut, PositionOut, RangeOut, TextEditOut};
+
 use rmcp::{
     ServerHandler, ServiceExt,
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
