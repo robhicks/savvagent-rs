@@ -1,6 +1,9 @@
 use anyhow::Result;
 use crossterm::{
-    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -10,7 +13,7 @@ use std::io::{self, Stdout};
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 pub fn init() -> Result<Tui> {
-    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     enable_raw_mode()?;
     // Opt into the Kitty keyboard protocol (DISAMBIGUATE_ESCAPE_CODES)
     // so terminals that support it report Shift+Enter, Ctrl+Enter, and
@@ -35,7 +38,7 @@ pub fn restore() -> Result<()> {
     // Pop is the symmetric pair to the push in `init`. Best-effort:
     // terminals that ignored the push will also ignore this.
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     disable_raw_mode()?;
     Ok(())
 }
