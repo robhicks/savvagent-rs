@@ -15,6 +15,7 @@ members = [
     "crates/tool-grep",
     "crates/tool-lsp",
     "crates/savvagent-host/tests/fixtures/resource-tool",
+    "crates/tool-lsp/tests/fixtures/fake-lsp",
 ]
 default-members = ["crates/savvagent"]
 
