@@ -552,10 +552,14 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
             }
             Entry::Tool {
                 name,
-                arguments,
+                args,
                 status,
-                result_preview,
+                result_text,
             } => {
+                // Bridge: serialize Value to string for existing render logic.
+                // Task 7 will rewrite this section entirely.
+                let arguments_string = serde_json::to_string(args).unwrap_or_default();
+                let result_preview_str = result_text.as_deref();
                 let badge = match status {
                     None => "…",
                     Some(ToolCallStatus::Ok) => "✓",
@@ -569,14 +573,14 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {badge} "), palette.base_style().fg(color)),
                     Span::styled(
-                        format!("{name}({arguments})"),
+                        format!("{name}({arguments_string})"),
                         palette
                             .base_style()
                             .fg(palette.warning)
                             .add_modifier(Modifier::DIM),
                     ),
                 ]));
-                if let Some(preview) = result_preview {
+                if let Some(preview) = result_preview_str {
                     lines.push(Line::from(Span::styled(
                         format!("    → {preview}"),
                         palette.base_style().fg(palette.muted),
