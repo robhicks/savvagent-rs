@@ -60,10 +60,6 @@ pub struct LocationOut {
 /// is used to relativize the path; if the URI sits outside the root we
 /// return an absolute path so the model doesn't see misleading
 /// `../../../etc/passwd` segments.
-///
-/// Consumed by tool modules in later tasks (T8–T14); annotated here
-/// so the workspace `-D warnings` is satisfied until then.
-#[allow(dead_code)]
 pub fn location_to_out(loc: Location, workspace_root: &Path) -> Result<LocationOut> {
     let path = uri_to_path(&loc.uri)?;
     let display = match path.strip_prefix(workspace_root) {
@@ -119,10 +115,6 @@ impl From<Diagnostic> for DiagnosticOut {
 ///
 /// Returns an error for any document operation (create/rename/delete file)
 /// or for version-tagged text edits, which v1 doesn't support.
-///
-/// Consumed by tool modules in later tasks (T13–T14); annotated here
-/// so the workspace `-D warnings` is satisfied until then.
-#[allow(dead_code)]
 pub fn restrict_workspace_edit(
     we: WorkspaceEdit,
     workspace_root: &Path,
@@ -185,7 +177,6 @@ pub fn restrict_workspace_edit(
     Ok(Vec::new())
 }
 
-#[allow(dead_code)]
 fn create_rename_delete_err() -> anyhow::Error {
     anyhow!(
         "WorkspaceEdit includes file rename/create/delete which is not \
@@ -194,7 +185,6 @@ fn create_rename_delete_err() -> anyhow::Error {
     )
 }
 
-#[allow(dead_code)]
 fn annot_err() -> anyhow::Error {
     anyhow!(
         "WorkspaceEdit includes annotated/versioned edits which are not \

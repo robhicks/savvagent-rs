@@ -217,6 +217,27 @@ impl LspServer {
         .map(Json)
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
+
+    /// List code actions available for a range. Actions return edit
+    /// descriptors; the caller applies them via `tool-fs::write_file`.
+    #[tool(
+        description = "List code actions (quickfixes, refactors) available for a range. Actions return edit descriptors; the caller applies them via tool-fs::write_file."
+    )]
+    pub async fn lsp_code_actions(
+        &self,
+        Parameters(input): Parameters<tools::code_actions::LspCodeActionsInput>,
+    ) -> Result<Json<tools::code_actions::LspCodeActionsOutput>, ErrorData> {
+        tools::code_actions::dispatch(
+            input,
+            &self.config,
+            &self.pool,
+            &self.root,
+            Arc::clone(&self.on_diagnostics),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
 }
 
 #[tool_handler]
