@@ -66,6 +66,13 @@ impl ResourceCache {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// Whether the cache has ever observed any URI. Paired with [`Self::len`]
+    /// to satisfy clippy's `len_without_is_empty` lint under `-D warnings`.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 #[cfg(test)]

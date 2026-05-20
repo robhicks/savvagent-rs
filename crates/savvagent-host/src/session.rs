@@ -2918,7 +2918,11 @@ mod policy_tests {
             summary: "3 errors, 1 warning".into(),
         };
         match ev {
-            TurnEvent::ResourceUpdated { uri, owner, summary } => {
+            TurnEvent::ResourceUpdated {
+                uri,
+                owner,
+                summary,
+            } => {
                 assert_eq!(uri, "lsp://diagnostics/src/foo.rs");
                 assert_eq!(owner, "tool-lsp");
                 assert_eq!(summary, "3 errors, 1 warning");
