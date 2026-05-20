@@ -5,10 +5,13 @@
 //! `savvagent` crate (NOT in `savvagent-plugin`) precisely because it
 //! traffics in `Box<dyn ProviderClient>`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use savvagent_host::{CostTier, ModelCapabilities, ProviderCapabilities};
 use savvagent_mcp::ProviderClient;
 use savvagent_plugin::Plugin;
+use savvagent_protocol::ListModelsResponse;
 use tokio::sync::Mutex;
 
 /// Provider plugins implement this in addition to [`Plugin`]. The runtime
@@ -64,6 +67,229 @@ impl ProviderEntry {
             as_provider,
             as_plugin,
         }
+    }
+}
+
+/// Build a [`ProviderCapabilities`] from a live `list_models` response, reusing
+/// hand-curated metadata (vision/audio support, context window, cost tier) for
+/// any model whose id matches one in `static_fallback`. Models discovered only
+/// at runtime get conservative defaults: `supports_vision=false`,
+/// `supports_audio=false`, `context_window` from the response when present
+/// else `0`, and `cost_tier = Standard`.
+///
+/// The default model preference cascade is:
+/// 1. `resp.default_model_id`, if present in the dynamic list.
+/// 2. The `static_fallback` default, if still present in the dynamic list.
+/// 3. The first dynamic model.
+///
+/// Returns `None` when the dynamic list is empty (caller should fall back to
+/// the static catalog).
+pub(crate) fn caps_from_list_models(
+    resp: ListModelsResponse,
+    static_fallback: &ProviderCapabilities,
+) -> Option<ProviderCapabilities> {
+    if resp.models.is_empty() {
+        return None;
+    }
+
+    let static_lookup: HashMap<&str, &ModelCapabilities> = static_fallback
+        .models()
+        .iter()
+        .map(|m| (m.id.as_str(), m))
+        .collect();
+
+    let models: Vec<ModelCapabilities> = resp
+        .models
+        .into_iter()
+        .map(|m| {
+            if let Some(known) = static_lookup.get(m.id.as_str()) {
+                (*known).clone()
+            } else {
+                ModelCapabilities {
+                    id: m.id.clone(),
+                    display_name: m.display_name.unwrap_or_else(|| m.id.clone()),
+                    supports_vision: false,
+                    supports_audio: false,
+                    context_window: m.context_window.unwrap_or(0) as usize,
+                    cost_tier: CostTier::Standard,
+                }
+            }
+        })
+        .collect();
+
+    let chosen_default = resp
+        .default_model_id
+        .filter(|id| models.iter().any(|m| &m.id == id))
+        .or_else(|| {
+            let sd = static_fallback.default_model_id().to_string();
+            models.iter().any(|m| m.id == sd).then_some(sd)
+        })
+        .unwrap_or_else(|| models[0].id.clone());
+
+    ProviderCapabilities::new(models, chosen_default).ok()
+}
+
+/// Call `client.list_models()`, fall back to `static_fallback` on any error or
+/// empty response. Emits a `tracing::warn` with the provider name and reason
+/// when falling back so a user staring at the TUI can correlate a stale `/model`
+/// picker with a network/credential issue.
+pub(crate) async fn build_dynamic_caps(
+    client: &(dyn ProviderClient + Send + Sync),
+    static_fallback: ProviderCapabilities,
+    provider_log_name: &str,
+) -> ProviderCapabilities {
+    match client.list_models().await {
+        Ok(resp) => match caps_from_list_models(resp, &static_fallback) {
+            Some(dynamic) => dynamic,
+            None => {
+                tracing::warn!(
+                    provider = provider_log_name,
+                    "list_models returned empty list; falling back to static catalog"
+                );
+                static_fallback
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                provider = provider_log_name,
+                error = %e,
+                "list_models failed; falling back to static catalog"
+            );
+            static_fallback
+        }
+    }
+}
+
+#[cfg(test)]
+mod caps_helpers_tests {
+    use super::*;
+    use savvagent_host::{CostTier, ModelCapabilities};
+    use savvagent_protocol::{ListModelsResponse, ModelInfo};
+
+    fn static_caps() -> ProviderCapabilities {
+        ProviderCapabilities::new(
+            vec![
+                ModelCapabilities {
+                    id: "known-flash".into(),
+                    display_name: "Known Flash".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 1_000_000,
+                    cost_tier: CostTier::Cheap,
+                },
+                ModelCapabilities {
+                    id: "known-pro".into(),
+                    display_name: "Known Pro".into(),
+                    supports_vision: true,
+                    supports_audio: false,
+                    context_window: 1_000_000,
+                    cost_tier: CostTier::Premium,
+                },
+            ],
+            "known-flash".into(),
+        )
+        .expect("static caps must build")
+    }
+
+    #[test]
+    fn known_models_reuse_static_metadata() {
+        let resp = ListModelsResponse {
+            models: vec![ModelInfo {
+                id: "known-pro".into(),
+                display_name: Some("Server-provided name".into()),
+                context_window: None,
+            }],
+            default_model_id: None,
+        };
+        let caps = caps_from_list_models(resp, &static_caps()).expect("must build");
+        let m = caps.model("known-pro").expect("present");
+        // Static metadata wins over the server-provided display_name
+        // because we trust the curated record.
+        assert_eq!(m.display_name, "Known Pro");
+        assert!(m.supports_vision);
+        assert!(matches!(m.cost_tier, CostTier::Premium));
+        assert_eq!(m.context_window, 1_000_000);
+    }
+
+    #[test]
+    fn unknown_models_get_conservative_defaults() {
+        let resp = ListModelsResponse {
+            models: vec![ModelInfo {
+                id: "brand-new".into(),
+                display_name: Some("Brand New".into()),
+                context_window: Some(8_192),
+            }],
+            default_model_id: None,
+        };
+        let caps = caps_from_list_models(resp, &static_caps()).expect("must build");
+        let m = caps.model("brand-new").expect("present");
+        assert_eq!(m.display_name, "Brand New");
+        assert!(!m.supports_vision);
+        assert!(!m.supports_audio);
+        assert_eq!(m.context_window, 8_192);
+        assert!(matches!(m.cost_tier, CostTier::Standard));
+    }
+
+    #[test]
+    fn default_prefers_response_then_static_then_first() {
+        // 1. response-supplied default wins.
+        let resp = ListModelsResponse {
+            models: vec![
+                ModelInfo {
+                    id: "known-pro".into(),
+                    display_name: None,
+                    context_window: None,
+                },
+                ModelInfo {
+                    id: "known-flash".into(),
+                    display_name: None,
+                    context_window: None,
+                },
+            ],
+            default_model_id: Some("known-pro".into()),
+        };
+        let caps = caps_from_list_models(resp, &static_caps()).expect("must build");
+        assert_eq!(caps.default_model_id(), "known-pro");
+
+        // 2. response default missing → static default still present → static wins.
+        let resp = ListModelsResponse {
+            models: vec![
+                ModelInfo {
+                    id: "known-pro".into(),
+                    display_name: None,
+                    context_window: None,
+                },
+                ModelInfo {
+                    id: "known-flash".into(),
+                    display_name: None,
+                    context_window: None,
+                },
+            ],
+            default_model_id: None,
+        };
+        let caps = caps_from_list_models(resp, &static_caps()).expect("must build");
+        assert_eq!(caps.default_model_id(), "known-flash");
+
+        // 3. neither in list → first wins.
+        let resp = ListModelsResponse {
+            models: vec![ModelInfo {
+                id: "brand-new".into(),
+                display_name: None,
+                context_window: None,
+            }],
+            default_model_id: Some("not-in-list".into()),
+        };
+        let caps = caps_from_list_models(resp, &static_caps()).expect("must build");
+        assert_eq!(caps.default_model_id(), "brand-new");
+    }
+
+    #[test]
+    fn empty_response_returns_none() {
+        let resp = ListModelsResponse {
+            models: vec![],
+            default_model_id: None,
+        };
+        assert!(caps_from_list_models(resp, &static_caps()).is_none());
     }
 }
 

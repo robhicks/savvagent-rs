@@ -23,7 +23,7 @@ use savvagent_plugin::{
     TextMods, ThemeColor,
 };
 
-use super::provider_common::BuiltinProviderPlugin;
+use super::provider_common::{BuiltinProviderPlugin, build_dynamic_caps};
 
 /// Provider plugin id (used by `apply_effects` to look up the right shim
 /// when a [`Effect::RegisterProvider`] arrives).
@@ -156,13 +156,17 @@ impl ProviderAnthropicPlugin {
             .map_err(|e| format!("client build: {e}"))?;
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
+        // Prefer the live catalog from the provider's /v1/models endpoint;
+        // fall back to the curated static list on any error so a network
+        // hiccup or revoked key doesn't block startup.
+        let caps = build_dynamic_caps(client.as_ref(), Self::capabilities(), DISPLAY_NAME).await;
         Ok(Some(
             ProviderRegistration::new(
                 savvagent_protocol::ProviderId::new(PROVIDER_ID)
                     .expect("PROVIDER_ID is a valid provider id"),
                 DISPLAY_NAME,
                 client,
-                Self::capabilities(),
+                caps,
             )
             .with_aliases(vec![
                 ModelAlias {

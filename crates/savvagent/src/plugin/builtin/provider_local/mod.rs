@@ -17,7 +17,7 @@ use savvagent_plugin::{
     TextMods, ThemeColor,
 };
 
-use super::provider_common::BuiltinProviderPlugin;
+use super::provider_common::{BuiltinProviderPlugin, build_dynamic_caps};
 
 const PLUGIN_ID: &str = "internal:provider-local";
 const PROVIDER_ID: &str = "local";
@@ -102,12 +102,17 @@ impl ProviderLocalPlugin {
         };
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
+        // Prefer the live /api/tags catalog so the picker shows the
+        // models the user has actually pulled. Falls back to the
+        // single-entry placeholder when Ollama isn't reachable or has
+        // no models pulled yet.
+        let caps = build_dynamic_caps(client.as_ref(), Self::capabilities(), DISPLAY_NAME).await;
         Ok(Some(ProviderRegistration::new(
             savvagent_protocol::ProviderId::new(PROVIDER_ID)
                 .expect("PROVIDER_ID is a valid provider id"),
             DISPLAY_NAME,
             client,
-            Self::capabilities(),
+            caps,
         )))
     }
 

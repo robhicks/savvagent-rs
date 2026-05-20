@@ -14,7 +14,7 @@ use savvagent_plugin::{
     TextMods, ThemeColor,
 };
 
-use super::provider_common::BuiltinProviderPlugin;
+use super::provider_common::{BuiltinProviderPlugin, build_dynamic_caps};
 
 const PLUGIN_ID: &str = "internal:provider-gemini";
 const PROVIDER_ID: &str = "gemini";
@@ -104,13 +104,17 @@ impl ProviderGeminiPlugin {
             .map_err(|e| format!("client build: {e}"))?;
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
+        // Prefer the live /v1beta/models catalog over the curated static list
+        // so deprecated ids (like the old gemini-2.0-flash) drop out
+        // automatically. Falls back to the static list on any error.
+        let caps = build_dynamic_caps(client.as_ref(), Self::capabilities(), DISPLAY_NAME).await;
         Ok(Some(
             ProviderRegistration::new(
                 savvagent_protocol::ProviderId::new(PROVIDER_ID)
                     .expect("PROVIDER_ID is a valid provider id"),
                 DISPLAY_NAME,
                 client,
-                Self::capabilities(),
+                caps,
             )
             .with_aliases(vec![
                 ModelAlias {
