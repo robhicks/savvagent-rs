@@ -3699,6 +3699,7 @@ dependencies = [
  "tool-bash",
  "tool-fs",
  "tool-grep",
+ "tool-lsp",
  "tracing",
  "tracing-subscriber",
  "tui-markdown",
