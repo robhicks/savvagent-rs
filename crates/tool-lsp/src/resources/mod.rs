@@ -1,2 +1,3 @@
-//! Resource publishers. Currently empty; diagnostics publisher lands
-//! in Task 15.
+//! Resource publishers.
+
+pub mod diagnostics;

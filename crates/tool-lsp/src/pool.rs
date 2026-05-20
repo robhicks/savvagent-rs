@@ -107,6 +107,20 @@ impl LspPool {
         }
     }
 
+    /// Snapshot every active session for resource readers to walk.
+    ///
+    /// Used by `resources/diagnostics::read` to fan a `resources/read`
+    /// out across every cached language server in O(n) without holding
+    /// the pool lock across the read.
+    pub async fn snapshot_sessions(&self) -> Vec<Arc<LspSession>> {
+        self.sessions
+            .lock()
+            .await
+            .values()
+            .map(|e| Arc::clone(&e.session))
+            .collect()
+    }
+
     /// Shut down every session (called from `run()` on stdin EOF).
     pub async fn shutdown_all(&self) {
         let mut guard = self.sessions.lock().await;

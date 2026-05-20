@@ -32,15 +32,21 @@ mod tools;
 use std::sync::Arc;
 
 use rmcp::{
-    ErrorData, ServerHandler, ServiceExt,
+    ErrorData, RoleServer, ServerHandler, ServiceExt,
     handler::server::{
         router::tool::ToolRouter,
         wrapper::{Json, Parameters},
     },
-    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+    model::{
+        Implementation, InitializeRequestParams, InitializeResult, ProtocolVersion,
+        ReadResourceRequestParams, ReadResourceResult, ResourceUpdatedNotificationParam,
+        ServerCapabilities, ServerInfo,
+    },
+    service::{Peer, RequestContext},
     tool, tool_handler, tool_router,
     transport::stdio,
 };
+use tokio::sync::OnceCell;
 
 /// Entrypoint used by the `savvagent-tool-lsp` shim binary. Reads the
 /// configured `lsp.toml` files, starts an rmcp stdio server, and serves
@@ -71,10 +77,15 @@ pub struct LspServer {
     #[allow(dead_code)] // Read by tool dispatch handlers.
     root: Arc<std::path::PathBuf>,
     /// Callback that fires after every publishDiagnostics arrives.
-    /// Set by `resources::diagnostics` to publish MCP resource updates;
-    /// stubbed to no-op until that module lands.
-    #[allow(dead_code)] // Wired in Task 15.
+    /// Forwards a `notifications/resources/updated` upstream once the
+    /// rmcp peer is captured via the `initialize` handshake.
     on_diagnostics: Arc<dyn Fn(&str) + Send + Sync>,
+    /// rmcp peer handle captured from the first `initialize` request.
+    /// Used by `on_diagnostics` to fire `notify_resource_updated`. The
+    /// `OnceCell` is required because the peer doesn't exist at
+    /// construction time — it's bound in by the service loop after the
+    /// MCP handshake.
+    peer: Arc<OnceCell<Peer<RoleServer>>>,
     #[allow(dead_code)] // Read by the `#[tool_handler]` macro expansion.
     tool_router: ToolRouter<Self>,
 }
@@ -94,12 +105,38 @@ impl LspServer {
         let root = std::env::var("SAVVAGENT_TOOL_LSP_ROOT")
             .map(std::path::PathBuf::from)
             .unwrap_or(cwd);
+        let peer: Arc<OnceCell<Peer<RoleServer>>> = Arc::new(OnceCell::new());
+        let on_diagnostics = Self::make_on_diagnostics(Arc::clone(&peer));
         Ok(Self {
             config: Arc::new(config),
             pool: Arc::new(pool::LspPool::default()),
             root: Arc::new(root),
-            on_diagnostics: Arc::new(|_| {}),
+            on_diagnostics,
+            peer,
             tool_router: Self::tool_router(),
+        })
+    }
+
+    /// Build the per-session `on_diagnostics` callback. On every
+    /// `publishDiagnostics` arriving from any child LSP we (a) compute
+    /// the matching `lsp://diagnostics/<path>` URI, then (b) fire
+    /// `notifications/resources/updated` upstream — but ONLY if the
+    /// rmcp peer has been captured. Pre-handshake fires are silently
+    /// dropped (the host will pick up the diagnostics on the next
+    /// `resources/read`).
+    fn make_on_diagnostics(
+        peer: Arc<OnceCell<Peer<RoleServer>>>,
+    ) -> Arc<dyn Fn(&str) + Send + Sync> {
+        Arc::new(move |file_uri: &str| {
+            let uri = resources::diagnostics::diagnostics_uri_for(file_uri);
+            let peer = Arc::clone(&peer);
+            tokio::spawn(async move {
+                if let Some(p) = peer.get() {
+                    let _ = p
+                        .notify_resource_updated(ResourceUpdatedNotificationParam { uri })
+                        .await;
+                }
+            });
         })
     }
 }
@@ -254,5 +291,36 @@ impl ServerHandler for LspServer {
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION"),
         ))
+    }
+
+    /// Capture the rmcp peer on the post-handshake `initialize` request
+    /// so subsequent `publishDiagnostics` callbacks can fire
+    /// `notifications/resources/updated`. We mirror the default
+    /// implementation's `set_peer_info` call so client info is still
+    /// available to `peer.peer_info()`.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        // First handshake wins; later attempts (which shouldn't happen
+        // on a stdio server) are ignored. We deliberately ignore the
+        // `Err` from `set` — it just means the cell was already filled.
+        let _ = self.peer.set(context.peer.clone());
+        Ok(self.get_info())
+    }
+
+    /// Serve `resources/read` for `lsp://diagnostics/*` URIs. Anything
+    /// else falls through to the trait default (which yields
+    /// `MethodNotFound`); we don't currently publish other resources.
+    async fn read_resource(
+        &self,
+        params: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        resources::diagnostics::read(&params.uri, &self.pool).await
     }
 }
