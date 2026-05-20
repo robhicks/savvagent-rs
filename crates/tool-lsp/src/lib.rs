@@ -177,6 +177,24 @@ impl LspServer {
         .map(Json)
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))
     }
+
+    /// Search for symbols across the workspace by query string.
+    #[tool(description = "Search for symbols across the workspace by query string.")]
+    pub async fn lsp_workspace_symbols(
+        &self,
+        Parameters(input): Parameters<tools::workspace_symbols::LspWorkspaceSymbolsInput>,
+    ) -> Result<Json<tools::workspace_symbols::LspWorkspaceSymbolsOutput>, ErrorData> {
+        tools::workspace_symbols::dispatch(
+            input,
+            &self.config,
+            &self.pool,
+            &self.root,
+            Arc::clone(&self.on_diagnostics),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))
+    }
 }
 
 #[tool_handler]
