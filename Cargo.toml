@@ -13,6 +13,7 @@ members = [
     "crates/tool-bash",
     "crates/tool-fs",
     "crates/tool-grep",
+    "crates/savvagent-host/tests/fixtures/resource-tool",
 ]
 default-members = ["crates/savvagent"]
 
