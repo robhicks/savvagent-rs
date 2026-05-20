@@ -3694,6 +3694,7 @@ dependencies = [
  "provider-anthropic",
  "provider-gemini",
  "provider-openai",
+ "resource-tool",
  "rmcp",
  "savvagent-mcp",
  "savvagent-protocol",
