@@ -2840,19 +2840,12 @@ async fn run_app(
                         }
                         KeyCode::Esc => {
                             app.input_textarea = make_input_textarea(Vec::<String>::new());
+                            // Treat Esc as "back to a clean state" — the
+                            // input is wiped, so the conversation log
+                            // returns to the live tail too. Matches the
+                            // contract documented on `log_scroll_offset_from_bottom`.
+                            app.log_scroll_offset_from_bottom = None;
                         }
-                        // Conversation-log scroll. Without these, content
-                        // accumulating beyond the panel height was simply
-                        // clipped — newest messages disappeared and the user
-                        // had no way to see history.
-                        //
-                        // PageUp / PageDown move ~10 wrapped rows (the same
-                        // step the keybindings-help screen uses) so it feels
-                        // identical to other scrollable modals. Home jumps to
-                        // the very top of history; End returns to the live
-                        // tail. Ctrl+Home / Ctrl+End mirror conventional
-                        // desktop bindings in case Home/End get intercepted
-                        // by tui-textarea on some terminals.
                         KeyCode::PageUp => {
                             let next = app
                                 .log_scroll_offset_from_bottom
@@ -2866,13 +2859,15 @@ async fn run_app(
                                 .and_then(|n| n.checked_sub(LOG_SCROLL_STEP))
                                 .filter(|n| *n > 0);
                         }
+                        // Home/End on the home screen scroll the conversation
+                        // log only when the textarea is empty or Ctrl is held.
+                        // Otherwise the keystroke falls through to tui-textarea
+                        // so cursor-to-line-start / line-end still work during
+                        // editing.
                         KeyCode::Home
                             if key.modifiers.contains(KeyModifiers::CONTROL)
                                 || app.input_textarea.lines().iter().all(|l| l.is_empty()) =>
                         {
-                            // Only steal Home from the textarea when the
-                            // input is empty (so cursor-to-line-start still
-                            // works for in-flight editing) or Ctrl is held.
                             app.log_scroll_offset_from_bottom = Some(u16::MAX);
                         }
                         KeyCode::End

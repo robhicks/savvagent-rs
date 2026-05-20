@@ -1,6 +1,6 @@
 //! Render pass: paint the current [`App`] state into the frame.
 
-use crate::app::{App, Entry, InputMode, TranscriptEntry};
+use crate::app::{App, Entry, InputMode, TranscriptEntry, log_scroll_y};
 use crate::palette::Palette;
 use crate::providers::PROVIDERS;
 use crate::splash;
@@ -631,22 +631,17 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
         .wrap(Wrap { trim: false })
         .style(palette.base_style());
 
-    // Auto-tail by default: scroll so the LAST wrapped line is on the bottom
-    // row of `inner_area`. Without this the paragraph renders top-down and
-    // newly-streamed text scrolls off the bottom invisibly. When the user
-    // has scrolled back with PageUp, `log_scroll_offset_from_bottom = Some(n)`
-    // pins the view `n` lines above the bottom so new content arriving below
-    // doesn't yank the viewport.
-    let total = para.line_count(inner_area.width);
-    let viewport = inner_area.height as usize;
-    let max_scroll = total.saturating_sub(viewport);
-    let scroll_y = match app.log_scroll_offset_from_bottom {
-        None => max_scroll,
-        Some(off) => max_scroll.saturating_sub(off as usize),
-    };
-    let scroll_y_u16 = u16::try_from(scroll_y).unwrap_or(u16::MAX);
+    // Auto-tail by default: scroll so the LAST wrapped line lands on the
+    // bottom row of `inner_area`. Ratatui's Paragraph renders top-down, so
+    // without a scroll offset newly-streamed text falls off the bottom and
+    // becomes invisible. See `log_scroll_y` for the cascade.
+    let scroll_y = log_scroll_y(
+        para.line_count(inner_area.width),
+        inner_area.height as usize,
+        app.log_scroll_offset_from_bottom,
+    );
 
-    frame.render_widget(para.scroll((scroll_y_u16, 0)).block(block), area);
+    frame.render_widget(para.scroll((scroll_y, 0)).block(block), area);
 }
 
 fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<'static> {
