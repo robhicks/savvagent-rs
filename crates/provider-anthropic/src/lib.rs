@@ -184,6 +184,22 @@ fn map_reqwest_error(e: reqwest::Error) -> ProviderError {
     }
 }
 
+/// Map an HTTP status code from any Anthropic REST endpoint to the
+/// closest [`ErrorKind`]. Shared between `/v1/messages` and `/v1/models`
+/// so a 401 looks like an auth failure no matter which call surfaced it.
+pub(crate) fn status_to_error_kind(status: u16) -> ErrorKind {
+    match status {
+        400 | 422 => ErrorKind::InvalidRequest,
+        401 => ErrorKind::Authentication,
+        403 => ErrorKind::PermissionDenied,
+        404 => ErrorKind::ModelNotFound,
+        413 => ErrorKind::ContextLengthExceeded,
+        429 => ErrorKind::RateLimited,
+        500 | 502 | 503 | 504 | 529 => ErrorKind::Overloaded,
+        _ => ErrorKind::Internal,
+    }
+}
+
 async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
     let status = resp.status();
     let retry_after_ms = resp
@@ -193,16 +209,7 @@ async fn parse_error_response(resp: reqwest::Response) -> ProviderError {
         .and_then(|s| s.parse::<u64>().ok())
         .map(|s| s * 1000);
 
-    let kind = match status.as_u16() {
-        400 | 422 => ErrorKind::InvalidRequest,
-        401 => ErrorKind::Authentication,
-        403 => ErrorKind::PermissionDenied,
-        404 => ErrorKind::ModelNotFound,
-        413 => ErrorKind::ContextLengthExceeded,
-        429 => ErrorKind::RateLimited,
-        500 | 502 | 503 | 504 | 529 => ErrorKind::Overloaded,
-        _ => ErrorKind::Internal,
-    };
+    let kind = status_to_error_kind(status.as_u16());
 
     let body = resp.text().await.unwrap_or_default();
     let (message, provider_code) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {

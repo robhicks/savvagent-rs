@@ -8,7 +8,20 @@
 use savvagent_protocol::{ErrorKind, ListModelsResponse, ModelInfo, ProviderError};
 use serde::Deserialize;
 
-use crate::{API_VERSION, AnthropicProvider, map_reqwest_error};
+use crate::{API_VERSION, AnthropicProvider, map_reqwest_error, status_to_error_kind};
+
+/// Truncate `body` to at most `max_bytes`, snapping back to the previous
+/// UTF-8 char boundary so `&body[..n]` never panics on multi-byte sequences.
+fn truncate_at_char_boundary(body: &str, max_bytes: usize) -> &str {
+    if body.len() <= max_bytes {
+        return body;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    &body[..end]
+}
 
 /// The model id we report as `default_model_id` when it appears in the
 /// catalog. Keep in sync with `crates/savvagent/src/providers.rs`'s
@@ -47,19 +60,18 @@ pub async fn list_models(
 
     if !resp.status().is_success() {
         let status = resp.status();
+        let kind = status_to_error_kind(status.as_u16());
         let body = resp.text().await.unwrap_or_default();
-        let truncated = if body.len() > 512 {
-            format!("{}…", &body[..512])
-        } else {
-            body
-        };
-        let message = if truncated.is_empty() {
+        let snippet = truncate_at_char_boundary(&body, 512);
+        let message = if snippet.is_empty() {
             format!("Anthropic /v1/models returned HTTP {status}")
+        } else if snippet.len() == body.len() {
+            format!("Anthropic /v1/models returned HTTP {status}: {snippet}")
         } else {
-            format!("Anthropic /v1/models returned HTTP {status}: {truncated}")
+            format!("Anthropic /v1/models returned HTTP {status}: {snippet}…")
         };
         return Err(ProviderError {
-            kind: ErrorKind::Network,
+            kind,
             message,
             retry_after_ms: None,
             provider_code: None,
@@ -180,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_models_propagates_http_failure() {
+    async fn list_models_401_maps_to_authentication() {
         let app = Router::new().route(
             "/v1/models",
             get(|| async {
@@ -195,12 +207,50 @@ mod tests {
         let err = list_models(&provider)
             .await
             .expect_err("401 must surface as ProviderError");
-        assert!(matches!(err.kind, ErrorKind::Network), "kind: {:?}", err);
+        assert!(
+            matches!(err.kind, ErrorKind::Authentication),
+            "kind: {:?}",
+            err
+        );
         assert!(err.message.contains("HTTP 401"), "msg: {}", err.message);
         assert!(
             err.message.contains("invalid api key"),
             "msg: {}",
             err.message
         );
+    }
+
+    #[tokio::test]
+    async fn list_models_5xx_maps_to_overloaded() {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "service unavailable",
+                )
+            }),
+        );
+        let base = spawn_mock(app).await;
+        let provider = provider_for(base);
+        let err = list_models(&provider).await.expect_err("503 must error");
+        assert!(matches!(err.kind, ErrorKind::Overloaded), "kind: {:?}", err);
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_handles_multibyte() {
+        // A 3-byte UTF-8 codepoint straddling the requested boundary must
+        // snap back instead of panicking on `&body[..n]`.
+        let body = format!("{}\u{1F4A9}tail", "a".repeat(510)); // 510 + 4 + 4 = 518 bytes
+        let snipped = truncate_at_char_boundary(&body, 512);
+        // Boundary snaps to byte 510 (the start of the emoji).
+        assert_eq!(snipped.len(), 510);
+        assert!(snipped.is_char_boundary(snipped.len()));
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_passthrough_for_short_body() {
+        let body = "short";
+        assert_eq!(truncate_at_char_boundary(body, 512), "short");
     }
 }

@@ -92,7 +92,7 @@ impl ProviderGeminiPlugin {
     /// credentials are absent.
     pub(crate) async fn try_build_registration(
         &self,
-    ) -> Result<Option<ProviderRegistration>, String> {
+    ) -> Result<Option<(ProviderRegistration, Option<String>)>, String> {
         let key = match crate::creds::load(PROVIDER_ID) {
             Ok(Some(k)) => k,
             Ok(None) => return Ok(None),
@@ -104,31 +104,30 @@ impl ProviderGeminiPlugin {
             .map_err(|e| format!("client build: {e}"))?;
         let client: Arc<dyn ProviderClient + Send + Sync> =
             Arc::new(InProcessProviderClient::new(Arc::new(provider)));
-        // Prefer the live /v1beta/models catalog over the curated static list
-        // so deprecated ids (like the old gemini-2.0-flash) drop out
-        // automatically. Falls back to the static list on any error.
-        let caps = build_dynamic_caps(client.as_ref(), Self::capabilities(), DISPLAY_NAME).await;
-        Ok(Some(
-            ProviderRegistration::new(
-                savvagent_protocol::ProviderId::new(PROVIDER_ID)
-                    .expect("PROVIDER_ID is a valid provider id"),
-                DISPLAY_NAME,
-                client,
-                caps,
-            )
-            .with_aliases(vec![
-                ModelAlias {
-                    alias: "flash".into(),
-                    provider: ProviderId::new("gemini").expect("static alias provider id is valid"),
-                    model: "gemini-2.5-flash".into(),
-                },
-                ModelAlias {
-                    alias: "pro".into(),
-                    provider: ProviderId::new("gemini").expect("static alias provider id is valid"),
-                    model: "gemini-2.5-pro".into(),
-                },
-            ]),
-        ))
+        // Prefer the live /v1beta/models catalog so deprecated ids drop out
+        // automatically. Falls back to the curated static list on any error.
+        let (caps, note) =
+            build_dynamic_caps(client.as_ref(), Self::capabilities(), DISPLAY_NAME).await;
+        let reg = ProviderRegistration::new(
+            savvagent_protocol::ProviderId::new(PROVIDER_ID)
+                .expect("PROVIDER_ID is a valid provider id"),
+            DISPLAY_NAME,
+            client,
+            caps,
+        )
+        .with_aliases(vec![
+            ModelAlias {
+                alias: "flash".into(),
+                provider: ProviderId::new("gemini").expect("static alias provider id is valid"),
+                model: "gemini-2.5-flash".into(),
+            },
+            ModelAlias {
+                alias: "pro".into(),
+                provider: ProviderId::new("gemini").expect("static alias provider id is valid"),
+                model: "gemini-2.5-pro".into(),
+            },
+        ]);
+        Ok(Some((reg, note)))
     }
 
     fn try_connect_from_keyring(&mut self) -> Option<()> {
