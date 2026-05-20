@@ -89,6 +89,10 @@ pub async fn compute_home_frame_data(app: &crate::app::App, area: Rect) -> HomeF
     // ToolEntryRender per Entry::Tool. Locks the owning plugin briefly per
     // call (twice when there's a result_text). Falls back to json_spans
     // when no plugin claims the tool name.
+    //
+    // The registry and index read-locks (`reg_guard`/`idx_guard`) remain
+    // held across the entire loop; write-lock waiters (e.g. `/connect`)
+    // will block until the loop completes.
     let tool_router =
         crate::plugin::tool_summaries::ToolSummaryRouter::new(&idx_guard, &reg_guard);
     let mut tool_entries: Vec<ToolEntryRender> = Vec::new();
@@ -625,6 +629,11 @@ fn render_log(
                 status,
                 result_text: _,
             } => {
+                debug_assert!(
+                    tool_entry_idx < frame_data.tool_entries.len(),
+                    "tool_entries index out of bounds — stale frame data (idx={tool_entry_idx}, len={})",
+                    frame_data.tool_entries.len()
+                );
                 let render = frame_data
                     .tool_entries
                     .get(tool_entry_idx)
