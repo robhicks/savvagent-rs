@@ -615,20 +615,38 @@ fn render_log(app: &App, frame: &mut Frame, area: Rect, palette: Palette) {
         ));
     }
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.border).bg(palette.bg))
+        .padding(Padding::new(2, 2, 1, 1))
+        .title(Line::styled(
+            " Conversation ",
+            palette.base_style().fg(palette.fg),
+        ));
+    // `inner_area` excludes the border + padding, so `line_count(width)` and
+    // `area.height` agree on the same coordinate space.
+    let inner_area = block.inner(area);
+
     let para = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .style(palette.base_style())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.border).bg(palette.bg))
-                .padding(Padding::new(2, 2, 1, 1))
-                .title(Line::styled(
-                    " Conversation ",
-                    palette.base_style().fg(palette.fg),
-                )),
-        );
-    frame.render_widget(para, area);
+        .style(palette.base_style());
+
+    // Auto-tail by default: scroll so the LAST wrapped line is on the bottom
+    // row of `inner_area`. Without this the paragraph renders top-down and
+    // newly-streamed text scrolls off the bottom invisibly. When the user
+    // has scrolled back with PageUp, `log_scroll_offset_from_bottom = Some(n)`
+    // pins the view `n` lines above the bottom so new content arriving below
+    // doesn't yank the viewport.
+    let total = para.line_count(inner_area.width);
+    let viewport = inner_area.height as usize;
+    let max_scroll = total.saturating_sub(viewport);
+    let scroll_y = match app.log_scroll_offset_from_bottom {
+        None => max_scroll,
+        Some(off) => max_scroll.saturating_sub(off as usize),
+    };
+    let scroll_y_u16 = u16::try_from(scroll_y).unwrap_or(u16::MAX);
+
+    frame.render_widget(para.scroll((scroll_y_u16, 0)).block(block), area);
 }
 
 fn line_block(prefix: &str, text: &str, color: Color, palette: Palette) -> Line<'static> {

@@ -495,6 +495,14 @@ pub struct App {
     /// Loaded after `App::new` via [`App::load_prompt_history`] once
     /// `project_root` is known. Appended in the Enter-submit path.
     pub prompt_history: PromptHistory,
+
+    /// Conversation-log scroll position, expressed as "rows hidden BELOW the
+    /// viewport." `None` means auto-tail — newly arriving messages stay
+    /// visible at the bottom. `Some(n)` means the user has scrolled back and
+    /// wants to keep the same window of lines visible even as new content
+    /// streams in. Reset to `None` by `End`/`Esc` and by submitting a new
+    /// prompt. Driven by `PageUp`/`PageDown`/`Home`/`End` on the home screen.
+    pub log_scroll_offset_from_bottom: Option<u16>,
 }
 
 impl App {
@@ -569,6 +577,7 @@ impl App {
             pending_routing_reload: None,
             pending_routing_show: None,
             prompt_history: PromptHistory::default(),
+            log_scroll_offset_from_bottom: None,
         };
         app.refresh_commands();
         app
