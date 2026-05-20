@@ -248,6 +248,20 @@ pub enum TurnEvent {
         /// Reason that's also embedded in the synthetic `tool_result`.
         reason: String,
     },
+    /// A tool server published `notifications/resources/updated`. The TUI
+    /// can render a one-line banner. The host has already injected (or
+    /// will inject at the next iteration boundary) a synthetic
+    /// `[resource updated: <uri>]` user-text block so the model sees the
+    /// update without any TUI involvement.
+    ResourceUpdated {
+        /// Resource URI as published by the tool (e.g. `lsp://diagnostics/src/foo.rs`).
+        uri: String,
+        /// Label of the tool server that published it (matches `ToolServer.label`).
+        owner: String,
+        /// Producer-supplied one-line summary; keep under ~80 chars for TUI banners.
+        /// Defaults to the URI when the producer didn't include one.
+        summary: String,
+    },
     /// The whole turn finished.
     TurnComplete {
         /// Final outcome — same value `run_turn_streaming` returns.
@@ -2892,6 +2906,25 @@ mod policy_tests {
         assert!(prompt.contains("Savvagent version: 7.7.7"));
         // Bash isn't wired in this fixture; the no-tools branch fires.
         assert!(prompt.contains("No tools are currently connected"));
+    }
+
+    #[test]
+    fn turn_event_resource_updated_carries_uri_owner_summary() {
+        // Pinning the variant fields so an accidental rename in a later
+        // refactor doesn't silently change the wire surface the TUI matches on.
+        let ev = TurnEvent::ResourceUpdated {
+            uri: "lsp://diagnostics/src/foo.rs".into(),
+            owner: "tool-lsp".into(),
+            summary: "3 errors, 1 warning".into(),
+        };
+        match ev {
+            TurnEvent::ResourceUpdated { uri, owner, summary } => {
+                assert_eq!(uri, "lsp://diagnostics/src/foo.rs");
+                assert_eq!(owner, "tool-lsp");
+                assert_eq!(summary, "3 errors, 1 warning");
+            }
+            _ => panic!("constructed variant didn't match"),
+        }
     }
 }
 
