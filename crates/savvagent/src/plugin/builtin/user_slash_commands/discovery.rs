@@ -114,6 +114,50 @@ pub fn walk_one(root: &Path, origin: Origin) -> (Vec<Discovered>, Vec<String>) {
     (out, warnings)
 }
 
+use std::collections::BTreeMap;
+
+/// Final per-name index after applying precedence across all four
+/// search paths.
+#[derive(Debug, Default)]
+pub struct Index {
+    /// Map from namespaced command name to its winning entry.
+    pub commands: BTreeMap<String, Discovered>,
+    /// Aggregated warnings, in the order they were produced.
+    pub warnings: Vec<String>,
+}
+
+/// Walk all four directories with precedence:
+/// project-savvagent > project-claude > user-savvagent > user-claude.
+/// First hit per name wins; later hits at lower precedence are silently
+/// dropped (the warning vec collects per-walk warnings only, not
+/// shadowed-by-precedence notices).
+pub fn walk_all(project_root: &Path, home: &Path) -> Index {
+    let layers = [
+        (
+            project_root.join(".savvagent").join("commands"),
+            Origin::ProjectSavvagent,
+        ),
+        (
+            project_root.join(".claude").join("commands"),
+            Origin::ProjectClaude,
+        ),
+        (
+            home.join(".savvagent").join("commands"),
+            Origin::UserSavvagent,
+        ),
+        (home.join(".claude").join("commands"), Origin::UserClaude),
+    ];
+    let mut index = Index::default();
+    for (root, origin) in layers {
+        let (found, warns) = walk_one(&root, origin);
+        index.warnings.extend(warns);
+        for d in found {
+            index.commands.entry(d.name.clone()).or_insert(d);
+        }
+    }
+    index
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +223,42 @@ mod tests {
         write(tmp.path(), "x.md", "body");
         let (out, _) = walk_one(tmp.path(), Origin::UserClaude);
         assert_eq!(out[0].origin, Origin::UserClaude);
+    }
+
+    #[test]
+    fn precedence_project_over_user_and_savvagent_over_claude() {
+        let proj = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        write(
+            &proj.path().join(".savvagent/commands"),
+            "x.md",
+            "from project savvagent",
+        );
+        write(
+            &proj.path().join(".claude/commands"),
+            "x.md",
+            "from project claude",
+        );
+        write(
+            &home.path().join(".savvagent/commands"),
+            "x.md",
+            "from user savvagent",
+        );
+        write(
+            &home.path().join(".claude/commands"),
+            "x.md",
+            "from user claude",
+        );
+        write(
+            &home.path().join(".savvagent/commands"),
+            "user_only.md",
+            "user only",
+        );
+
+        let index = walk_all(proj.path(), home.path());
+        let x = index.commands.get("x").unwrap();
+        assert_eq!(x.origin, Origin::ProjectSavvagent);
+        assert!(x.body.contains("from project savvagent"));
+        assert!(index.commands.contains_key("user_only"));
     }
 }
