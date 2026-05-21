@@ -92,6 +92,9 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             // or `tool_bins`.
             app.pending_model_change = Some(PendingModelChange { id, persist });
         }
+        Effect::SetNextTurnModelOverride { id } => {
+            app.next_turn_model_override = Some(id);
+        }
         Effect::ReloadRoutingRules => {
             app.pending_routing_reload = Some(PendingRoutingAction);
         }
@@ -950,6 +953,30 @@ mod tests {
             .expect("SetActiveModel must populate pending_model_change");
         assert_eq!(pending.id, "gemini-2.5-pro");
         assert!(pending.persist);
+    }
+
+    /// `Effect::SetNextTurnModelOverride` must write the id into
+    /// `App::next_turn_model_override` so the next worker spawn can pick it up.
+    #[tokio::test]
+    async fn set_next_turn_model_override_writes_field() {
+        use savvagent_plugin::Effect;
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        apply_effects(
+            &mut app,
+            vec![Effect::SetNextTurnModelOverride {
+                id: "claude-sonnet-4-6".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+        assert_eq!(
+            app.next_turn_model_override.as_deref(),
+            Some("claude-sonnet-4-6"),
+        );
     }
 
     /// Regression test for the post-v0.9 hotfix that wired `Effect::Quit`
