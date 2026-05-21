@@ -2425,6 +2425,14 @@ mod tests {
     /// We make `~/.savvagent/trusted-projects.json` unwritable by pre-creating
     /// a *directory* at that path. The `std::fs::write` call inside
     /// `trust::save` will then fail with `IsDirectory` (or equivalent).
+    ///
+    /// Unix-only: the test setup itself behaves differently on Windows
+    /// (Win32 `CreateDirectory` returns `ERROR_ALREADY_EXISTS` rather
+    /// than letting us shadow the path). The I-1 behavior (PushNote on
+    /// save failure) is platform-neutral; the *test mechanism* is the
+    /// only thing constrained. Tracked as a follow-up to add a
+    /// platform-agnostic harness for unwritable-path scenarios.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)]
     async fn set_trust_level_always_save_failure_emits_warn_note() {
