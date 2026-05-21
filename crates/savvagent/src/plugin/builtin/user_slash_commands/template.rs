@@ -366,6 +366,26 @@ mod tests {
         assert!(exp.text.contains("!`incomplete"));
     }
 
+    /// I-7: `!cmd` where the command binary does not exist must return an Err.
+    /// On most systems `sh -c "__no_such_binary__"` spawns `sh` successfully
+    /// but exits non-zero, so the error message comes from the "exited" path.
+    /// We assert the error string is non-empty and contains either "spawn" or
+    /// "exit" so the test tolerates both runtime paths.
+    #[tokio::test]
+    async fn shell_substitution_spawn_failure_is_error() {
+        let result = expand_shell("!__no_such_binary_xyz_abc__").await;
+        assert!(result.is_err(), "expected Err from missing binary, got: {result:?}");
+        let err = result.unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "error string must be non-empty, got: {err:?}"
+        );
+        assert!(
+            err.contains("spawn") || err.contains("exit"),
+            "error must mention 'spawn' or 'exit', got: {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn expand_all_runs_in_order() {
         let body = "hello $ARGUMENTS\n!echo SHELL\n@/no/such/file";

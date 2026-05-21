@@ -2617,6 +2617,67 @@ mod tests {
         );
     }
 
+    /// C-4: `App::new` must load the persisted trust file from disk at
+    /// startup so that a project the user previously trusted "always" is
+    /// already trusted in the new session without another modal prompt.
+    ///
+    /// `App::new` calls `trust::load(dirs::home_dir())` during construction;
+    /// redirecting `$HOME` via `HomeGuard` makes the load pick up whatever
+    /// we wrote into the tempdir. This test must hold `HOME_LOCK` across the
+    /// `App::new` call because that call reads `$HOME` (via `dirs::home_dir`)
+    /// to locate the trust file — and across the `trust_levels.read().await`
+    /// below (no await held while the std Mutex is held; we release the lock
+    /// before the async assertion to satisfy the `await_holding_lock` lint in
+    /// the normal multi-thread runtime flavor).
+    #[tokio::test]
+    async fn app_new_loads_persisted_trust_from_disk() {
+        use crate::plugin::builtin::user_slash_commands::trust;
+        use std::path::PathBuf;
+
+        // Acquire lock, set up home, write trust file, construct App.
+        // Drop lock + home guard before any .await so the lint stays happy.
+        let (app, expected_key) = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+
+            // Write a trusted-projects.json into the redirected HOME.
+            let home = dirs::home_dir().expect("HomeGuard must set HOME");
+            let savvagent_dir = home.join(".savvagent");
+            std::fs::create_dir_all(&savvagent_dir).unwrap();
+            let trust_path = trust::trust_file_path(&home);
+            std::fs::write(
+                &trust_path,
+                r#"{ "projects": { "/some/project/path": "always" } }"#,
+            )
+            .unwrap();
+
+            // Construct App::new under the HOME redirect. The production
+            // path calls trust::load(dirs::home_dir()) during new().
+            let app = App::new(
+                "test-model".into(),
+                PathBuf::from("/tmp"),
+                "en".into(),
+            );
+            let key = PathBuf::from("/some/project/path");
+            (app, key)
+        }; // HOME_LOCK released here
+
+        // Now assert: the trust map must contain the entry from disk.
+        let map = app.trust_levels.read().await;
+        assert!(
+            map.contains_key(&expected_key),
+            "App::new must load persisted trust from disk; expected key {expected_key:?}, \
+             got keys: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+        use crate::plugin::builtin::user_slash_commands::trust::TrustLevel;
+        assert_eq!(
+            map.get(&expected_key).copied(),
+            Some(TrustLevel::Always),
+            "loaded trust level must be Always"
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn set_active_locale_unknown_code_is_a_noop_with_note() {

@@ -175,20 +175,25 @@ impl Plugin for UserSlashCommandsPlugin {
         let project_local = d.origin.is_project();
         // Only project-local commands with shell tokens need a trust check.
         // User-scoped commands (home dir) always proceed — the user owns them.
-        let trust = if needs_shell && project_local {
+        //
+        // `has_explicit_trust` is true when the user has already made a
+        // trust decision for this project root (the map contains an entry).
+        // Without an explicit decision the project is implicitly untrusted
+        // and the modal must be shown so the user can decide.
+        let (trust, has_explicit_trust) = if needs_shell && project_local {
             let map = self.trust_levels.read().await;
-            map.get(&self.project_root)
-                .copied()
-                .unwrap_or(TrustLevel::SessionTextOnly)
+            match map.get(&self.project_root).copied() {
+                Some(t) => (t, true),
+                None => (TrustLevel::SessionTextOnly, false),
+            }
         } else {
-            TrustLevel::Always
+            (TrustLevel::Always, true)
         };
-        // If the project is untrusted and shell substitution is needed, stash
-        // the pending command and open the trust modal.
-        if needs_shell
-            && project_local
-            && matches!(trust, TrustLevel::SessionTextOnly | TrustLevel::Cancelled)
-        {
+        // Open the trust modal only when the project has NO explicit trust
+        // decision yet.  If the user already chose "session-text-only" or
+        // "cancelled", let the call fall through to `expand_all` which will
+        // return an error for shell tokens — surfaced as a PushNote.
+        if needs_shell && project_local && !has_explicit_trust {
             return Ok(vec![
                 Effect::StashPendingSlash {
                     name: name.into(),
@@ -594,6 +599,161 @@ mod tests {
         let mut plugin = Arc::try_unwrap(plugin).map_err(|_| "still shared").unwrap();
         let effs = plugin.handle_slash("reload-commands", vec![]).await.unwrap();
         assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::ReindexPlugin { .. })));
+    }
+
+    /// C-3: user-scoped commands (home dir) with shell tokens must bypass the
+    /// trust gate entirely and emit PromptSend. The trust map is irrelevant
+    /// for home-dir commands; the user owns those files unconditionally.
+    #[tokio::test]
+    async fn user_scoped_command_with_shell_runs_without_trust_modal() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        // Write the command under the home dir, NOT the project dir.
+        let dir = home.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("danger.md"), "!echo X").unwrap();
+
+        // Use an empty trust map (project is untrusted).
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            empty_trust(),
+        );
+        let effs = p.handle_slash("danger", vec![]).await.unwrap();
+        // User-scoped origin bypasses the trust gate; shell should run and
+        // PromptSend must be emitted.
+        assert!(
+            effs.iter().any(|e| matches!(e, Effect::PromptSend { .. })),
+            "expected PromptSend for user-scoped command, got: {effs:?}"
+        );
+        // No trust modal opened.
+        assert!(
+            !effs.iter().any(|e| matches!(e, Effect::OpenScreen { .. })),
+            "OpenScreen must NOT fire for user-scoped command, got: {effs:?}"
+        );
+        // No stash.
+        assert!(
+            !effs.iter().any(|e| matches!(e, Effect::StashPendingSlash { .. })),
+            "StashPendingSlash must NOT fire for user-scoped command, got: {effs:?}"
+        );
+    }
+
+    /// I-6: `/reload-commands` must reflect removed, changed, and newly-added
+    /// files in a single call — covering all three delta shapes.
+    #[tokio::test]
+    async fn reload_picks_up_removed_and_changed_files() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Seed: x.md (will be changed), z.md (will be removed).
+        fs::write(dir.join("x.md"), "original").unwrap();
+        fs::write(dir.join("z.md"), "to-be-deleted").unwrap();
+
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            empty_trust(),
+        );
+
+        // Populate the cache via manifest().
+        let m = p.manifest();
+        let names: Vec<_> = m
+            .contributions
+            .slash_commands
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(names.contains(&"x"), "precondition: x present before reload");
+        assert!(names.contains(&"z"), "precondition: z present before reload");
+
+        // Mutate disk state: change x, add y, remove z.
+        fs::write(dir.join("x.md"), "updated").unwrap();
+        fs::write(dir.join("y.md"), "new-command").unwrap();
+        fs::remove_file(dir.join("z.md")).unwrap();
+
+        // Reload.
+        let effs = p.handle_slash("reload-commands", vec![]).await.unwrap();
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, savvagent_plugin::Effect::ReindexPlugin { .. })),
+            "expected ReindexPlugin in reload effects"
+        );
+
+        // Re-snapshot after reload.
+        let m2 = p.manifest();
+        let cmds: std::collections::HashMap<_, _> = m2
+            .contributions
+            .slash_commands
+            .iter()
+            .map(|s| (s.name.as_str(), s))
+            .collect();
+
+        // x must still be present (it was changed, not removed).
+        assert!(cmds.contains_key("x"), "x must remain after reload");
+        // y must now be present (newly added).
+        assert!(cmds.contains_key("y"), "y must appear after reload");
+        // z must be gone (deleted from disk).
+        assert!(!cmds.contains_key("z"), "z must not appear after deletion");
+
+        // Verify x's body is the updated version by dispatching it.
+        let effs2 = p.handle_slash("x", vec![]).await.unwrap();
+        let prompt = effs2
+            .iter()
+            .find_map(|e| match e {
+                savvagent_plugin::Effect::PromptSend { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("x must dispatch to PromptSend");
+        assert!(
+            prompt.contains("updated"),
+            "x body must be 'updated' after reload, got: {prompt:?}"
+        );
+    }
+
+    /// I-8: a session-text-only trusted project that tries to run a command
+    /// with a shell token must emit a PushNote (error) and NOT emit PromptSend.
+    #[tokio::test]
+    async fn handle_slash_session_text_only_with_shell_emits_error_note() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("run.md"), "!echo X").unwrap();
+
+        // Pre-populate trust as SessionTextOnly for the project root.
+        let trust = empty_trust();
+        trust
+            .write()
+            .await
+            .insert(proj.path().to_path_buf(), TrustLevel::SessionTextOnly);
+
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            trust,
+        );
+        let effs = p.handle_slash("run", vec![]).await.unwrap();
+
+        // Must contain a PushNote whose text contains "[error]" or mentions
+        // "shell substitution disabled".
+        let has_error_note = effs.iter().any(|e| match e {
+            savvagent_plugin::Effect::PushNote { line } => {
+                let text: String = line.spans.iter().map(|s| s.text.as_str()).collect();
+                text.contains("[error]") || text.contains("shell substitution disabled")
+            }
+            _ => false,
+        });
+        assert!(
+            has_error_note,
+            "expected an [error] PushNote for session-text-only + shell, got: {effs:?}"
+        );
+        // Must NOT emit PromptSend.
+        assert!(
+            !effs.iter().any(|e| matches!(e, Effect::PromptSend { .. })),
+            "PromptSend must NOT fire when trust=SessionTextOnly and body has shell token, got: {effs:?}"
+        );
     }
 
     /// Task 22: trust gate — project-local shell command with empty trust map
