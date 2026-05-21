@@ -178,6 +178,76 @@ pub async fn expand_shell(body: &str) -> Result<Expanded, String> {
     Ok(Expanded { text: final_out, warnings })
 }
 
+use crate::plugin::builtin::user_slash_commands::trust::TrustLevel;
+
+/// Returns `true` if the body contains any `!<cmd>` token. Used by the
+/// dispatcher to decide whether to invoke the trust check.
+///
+/// Recognizes:
+/// - Line-leading `!` (after any leading whitespace).
+/// - Inline backtick form `!\``.
+///
+/// Conservatively avoids matching `!=` and `!!` as shell tokens.
+pub fn contains_shell_token(body: &str) -> bool {
+    if body.contains("!`") {
+        return true;
+    }
+    for line in body.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix('!') {
+            if !rest.starts_with('=') && !rest.starts_with('!') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Run all expansion passes in order: `$ARGUMENTS`/`$N` → `@<path>` →
+/// `!<cmd>`. Single-pass: included files are NOT re-expanded.
+///
+/// `trust` gates shell substitution:
+/// - `TrustLevel::Always`: shell substitution runs.
+/// - `TrustLevel::SessionTextOnly`: if body contains any shell token,
+///   the whole expansion is aborted with an `Err`. Otherwise it
+///   proceeds without invoking the shell pass.
+/// - `TrustLevel::Cancelled`: always aborted.
+pub async fn expand_all(
+    body: &str,
+    args: &[String],
+    trust: TrustLevel,
+) -> Result<Expanded, String> {
+    if matches!(trust, TrustLevel::Cancelled) {
+        return Err("dispatch aborted: user cancelled trust prompt".into());
+    }
+    let with_args = expand_args(body, args);
+    let files = expand_files(&with_args);
+    let has_shell = contains_shell_token(&files.text);
+    let mut warnings = files.warnings;
+    let final_text = if has_shell {
+        match trust {
+            TrustLevel::Always => {
+                let exp = expand_shell(&files.text).await?;
+                warnings.extend(exp.warnings);
+                exp.text
+            }
+            TrustLevel::SessionTextOnly => {
+                return Err(
+                    "shell substitution disabled for this session (trust=session-text-only)"
+                        .into(),
+                );
+            }
+            TrustLevel::Cancelled => unreachable!(),
+        }
+    } else {
+        files.text
+    };
+    Ok(Expanded {
+        text: final_text,
+        warnings,
+    })
+}
+
 async fn run_shell(cmd: &str) -> Result<String, String> {
     let output = Command::new("sh")
         .arg("-c")
@@ -289,5 +359,44 @@ mod tests {
         assert!(exp.warnings[0].contains("unmatched"));
         // The original characters are still in the output (left as literal).
         assert!(exp.text.contains("!`incomplete"));
+    }
+
+    #[tokio::test]
+    async fn expand_all_runs_in_order() {
+        let body = "hello $ARGUMENTS\n!echo SHELL\n@/no/such/file";
+        let out = expand_all(body, &s(&["world"]), TrustLevel::Always)
+            .await
+            .unwrap();
+        assert!(out.text.contains("hello world"));
+        assert!(out.text.contains("SHELL"));
+        assert!(out.text.contains("@/no/such/file"));
+        assert_eq!(out.warnings.len(), 1); // the @ missing-file warning
+    }
+
+    #[tokio::test]
+    async fn session_text_only_skips_shell_with_error() {
+        let body = "!echo X";
+        let err = expand_all(body, &[], TrustLevel::SessionTextOnly)
+            .await
+            .unwrap_err();
+        assert!(err.contains("shell substitution disabled"));
+    }
+
+    #[tokio::test]
+    async fn session_text_only_allows_body_without_shell() {
+        let body = "Hello $1, file: @/no/such/file";
+        let out = expand_all(body, &s(&["world"]), TrustLevel::SessionTextOnly)
+            .await
+            .unwrap();
+        assert!(out.text.contains("Hello world"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_returns_err() {
+        let body = "anything";
+        let err = expand_all(body, &[], TrustLevel::Cancelled)
+            .await
+            .unwrap_err();
+        assert!(err.contains("cancelled") || err.contains("aborted"));
     }
 }
