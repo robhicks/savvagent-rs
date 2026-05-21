@@ -85,15 +85,45 @@ impl<T: Clone> MultiSelectList<T> {
     }
 
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> MultiSelectOutcome<T> {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
         match key.code {
             KeyCode::Esc => MultiSelectOutcome::Cancel,
             KeyCode::Enter => MultiSelectOutcome::Confirm(self.confirm_selection()),
             KeyCode::Down => self.move_cursor(1),
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Char(' ') => self.toggle_cursor(),
+            KeyCode::Backspace => {
+                if self.filter.pop().is_none() {
+                    return MultiSelectOutcome::Stay;
+                }
+                self.clamp_after_filter_change()
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.filter.push(c);
+                self.clamp_after_filter_change()
+            }
             _ => MultiSelectOutcome::Stay,
         }
+    }
+
+    fn clamp_after_filter_change(&mut self) -> MultiSelectOutcome<T> {
+        let (cursor, preview) = {
+            let filtered = self.filtered();
+            if filtered.is_empty() {
+                return MultiSelectOutcome::Stay;
+            }
+            let cursor = if self.cursor >= filtered.len() {
+                filtered.len() - 1
+            } else {
+                self.cursor
+            };
+            (cursor, filtered[cursor].clone())
+        };
+        self.cursor = cursor;
+        MultiSelectOutcome::Preview(preview)
     }
 
     fn toggle_cursor(&mut self) -> MultiSelectOutcome<T> {
@@ -226,6 +256,43 @@ mod tests {
         let out = l.on_key(key(KeyCode::Char(' ')));
         assert!(matches!(out, MultiSelectOutcome::Toggle(Item { id: "a", .. })));
         assert!(!l.selected().contains("a"));
+    }
+
+    #[test]
+    fn typing_chars_narrows_filter() {
+        let mut l = list();
+        l.on_key(key(KeyCode::Char('l')));
+        assert_eq!(l.filter(), "l");
+        let filtered: Vec<&str> = l.filtered().iter().map(|i| i.id).collect();
+        assert_eq!(filtered, vec!["a", "c"], "alpha + charlie both contain 'l'");
+    }
+
+    #[test]
+    fn backspace_pops_filter_and_reclamps_cursor() {
+        let mut l = list();
+        l.on_key(key(KeyCode::Char('l'))); // narrows to [a, c]; cursor 0
+        l.on_key(key(KeyCode::Down));      // cursor → 1
+        l.on_key(key(KeyCode::Char('p'))); // narrows to [a]; cursor must clamp to 0
+        assert_eq!(l.cursor(), 0, "cursor must clamp when filter shrinks past it");
+        l.on_key(key(KeyCode::Backspace)); // back to [a, c]
+        assert_eq!(l.filter(), "l");
+    }
+
+    #[test]
+    fn selection_survives_filter_changes() {
+        let mut l = list();
+        l.on_key(key(KeyCode::Char(' ')));  // select a
+        l.on_key(key(KeyCode::Char('b')));  // filter narrows so 'a' is hidden
+        assert!(l.filtered().iter().all(|i| i.id != "a"));
+        assert!(l.selected().contains("a"), "selection persists across filter");
+        l.on_key(key(KeyCode::Backspace));  // restore visibility
+        let out = l.on_key(key(KeyCode::Enter));
+        match out {
+            MultiSelectOutcome::Confirm(items) => {
+                assert_eq!(items.iter().map(|i| i.id).collect::<Vec<_>>(), vec!["a"]);
+            }
+            other => panic!("expected Confirm, got {other:?}"),
+        }
     }
 
     #[test]
