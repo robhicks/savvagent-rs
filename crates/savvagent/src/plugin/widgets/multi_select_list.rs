@@ -64,6 +64,36 @@ impl<T> MultiSelectList<T> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum MultiSelectOutcome<T: Clone> {
+    Stay,
+    Preview(T),
+    Toggle(T),
+    Confirm(Vec<T>),
+    Cancel,
+}
+
+impl<T: Clone> MultiSelectList<T> {
+    /// Confirm-by-walking-items: returns selected items in catalog order,
+    /// regardless of selection sequence.
+    fn confirm_selection(&self) -> Vec<T> {
+        self.items
+            .iter()
+            .filter(|i| self.selected_ids.contains(&(self.id_fn)(i)))
+            .cloned()
+            .collect()
+    }
+
+    pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> MultiSelectOutcome<T> {
+        use crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Esc => MultiSelectOutcome::Cancel,
+            KeyCode::Enter => MultiSelectOutcome::Confirm(self.confirm_selection()),
+            _ => MultiSelectOutcome::Stay,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +127,35 @@ mod tests {
         assert_eq!(l.cursor(), 0);
         assert!(l.selected().is_empty());
         assert_eq!(l.filtered().len(), 3);
+    }
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    #[test]
+    fn esc_emits_cancel() {
+        let mut l = list();
+        assert!(matches!(l.on_key(key(KeyCode::Esc)), MultiSelectOutcome::Cancel));
+    }
+
+    #[test]
+    fn unknown_key_emits_stay() {
+        let mut l = list();
+        assert!(matches!(
+            l.on_key(key(KeyCode::F(5))),
+            MultiSelectOutcome::Stay
+        ));
+    }
+
+    #[test]
+    fn enter_with_no_selection_returns_empty_confirm() {
+        let mut l = list();
+        match l.on_key(key(KeyCode::Enter)) {
+            MultiSelectOutcome::Confirm(v) => assert!(v.is_empty()),
+            other => panic!("expected Confirm([]), got {other:?}"),
+        }
     }
 }
