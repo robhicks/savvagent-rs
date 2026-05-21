@@ -6,7 +6,6 @@ use savvagent_plugin::{
     TextMods, ThemeColor,
 };
 
-use crate::plugin::builtin::lsp_installer::catalog::Category;
 use crate::plugin::builtin::lsp_installer::picker::LspPicker;
 use crate::plugin::widgets::MultiSelectOutcome;
 
@@ -65,10 +64,7 @@ impl Screen for LspPickerScreen {
             } else {
                 "[ ]"
             };
-            let category = match entry.category {
-                Category::Binary => "binary",
-                Category::Npm => "npm",
-            };
+            let category = entry.method.category_label();
             out.push(StyledLine {
                 spans: vec![StyledSpan {
                     text: format!(

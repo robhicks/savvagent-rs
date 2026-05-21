@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::plugin::builtin::lsp_installer::catalog::CatalogEntry;
+use crate::plugin::builtin::lsp_installer::catalog::{CatalogEntry, CommandTemplate};
 use crate::plugin::builtin::lsp_installer::installer::InstallOutcome;
 
 /// A single `[[language]]` table in `lsp.toml`. Mirrors
@@ -54,8 +54,9 @@ pub struct LspConfig {
 ///   order.
 ///
 /// The `command` field is `outcome.installed_at` when the catalog
-/// template's `command` was `"{{BIN}}"`, otherwise the literal template
-/// (typical for npm entries where npm puts the binary on `$PATH`).
+/// template's `command` is [`CommandTemplate::Installed`], otherwise the
+/// literal string from [`CommandTemplate::Literal`] (typical for npm
+/// entries where npm puts the binary on `$PATH`).
 pub async fn merge_into_user_config(
     path: &Path,
     upserts: &[(&CatalogEntry, &InstallOutcome)],
@@ -69,10 +70,9 @@ pub async fn merge_into_user_config(
 
     for (entry, outcome) in upserts {
         let tmpl = entry.lsp_entry;
-        let command = if tmpl.command == "{{BIN}}" {
-            outcome.installed_at.to_string_lossy().into_owned()
-        } else {
-            tmpl.command.to_string()
+        let command = match tmpl.command {
+            CommandTemplate::Installed => outcome.installed_at.to_string_lossy().into_owned(),
+            CommandTemplate::Literal(s) => s.to_string(),
         };
         let new_entry = LanguageEntry {
             id: tmpl.id.to_string(),
@@ -115,7 +115,7 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::plugin::builtin::lsp_installer::catalog::{
-        ArchiveKind, Category, InstallMethod, LspEntryTemplate, Target,
+        InstallMethod, LspEntryTemplate, Target,
     };
 
     fn fake_binary_entry() -> CatalogEntry {
@@ -124,17 +124,15 @@ mod tests {
             display_name: "fakelsp",
             language_label: "fake",
             version: "1.0.0",
-            category: Category::Binary,
             method: InstallMethod::BinaryDownload {
                 urls: &[(Target::LinuxX86_64Gnu, "https://example.test/x.gz", "0")],
-                archive: ArchiveKind::GzipOnly,
                 binary_path: "fakelsp",
             },
             lsp_entry: LspEntryTemplate {
                 id: "fake",
                 extensions: &["fake"],
                 root_markers: &["fake.toml"],
-                command: "{{BIN}}",
+                command: CommandTemplate::Installed,
                 args: &[],
             },
         }
@@ -227,7 +225,7 @@ command = "gopls"
             id: "fake",
             extensions: &["fake"],
             root_markers: &["fake.toml"],
-            command: "fakelsp-on-path",
+            command: CommandTemplate::Literal("fakelsp-on-path"),
             args: &["--stdio"],
         };
         let outcome = InstallOutcome {

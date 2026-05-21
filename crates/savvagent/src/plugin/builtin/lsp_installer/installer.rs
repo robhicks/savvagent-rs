@@ -4,9 +4,8 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::io::AsyncWriteExt;
 
-use super::catalog::{ArchiveKind, CatalogEntry, InstallMethod, Target};
+use super::catalog::{CatalogEntry, InstallMethod, Target};
 
 /// Streaming progress emitted by the install path via its `notify`
 /// callback. Each variant maps roughly to one stage of the install
@@ -74,9 +73,9 @@ pub enum InstallProgress {
 pub struct InstallOutcome {
     /// Catalog id (matches `CatalogEntry::id`).
     pub entry_id: String,
-    /// Absolute path to the installed binary; used as `command` in the
-    /// `lsp.toml` entry when the catalog template's `command` is
-    /// `"{{BIN}}"`.
+    /// Absolute path to the installed binary; used as the `command`
+    /// value in the `lsp.toml` entry when
+    /// [`super::catalog::CommandTemplate::Installed`] is used.
     pub installed_at: PathBuf,
 }
 
@@ -86,12 +85,6 @@ pub enum InstallError {
     /// The host's `(OS, arch)` doesn't match any supported `Target`.
     #[error("unsupported host target — {0}")]
     UnsupportedTarget(String),
-    /// A required external tool (e.g. `npm`) isn't on `$PATH`.
-    #[error("required tool not found: {tool} (install it and re-run /lsp)")]
-    ToolNotFound {
-        /// The missing tool's executable name.
-        tool: String,
-    },
     /// HTTP download failed.
     #[error("download failed: {0}")]
     Download(String),
@@ -194,12 +187,7 @@ pub async fn install_binary_entry(
     downloader: &dyn Downloader,
     notify: impl Fn(InstallProgress) + Send + Sync,
 ) -> Result<InstallOutcome, InstallError> {
-    let InstallMethod::BinaryDownload {
-        urls,
-        archive: _,
-        binary_path,
-    } = entry.method
-    else {
+    let InstallMethod::BinaryDownload { urls, binary_path } = entry.method else {
         return Err(InstallError::Download(format!(
             "{}: install_binary_entry called on a non-Binary entry",
             entry.id
@@ -556,7 +544,7 @@ pub async fn install_npm_entry(
 mod tests {
     use super::*;
     use crate::plugin::builtin::lsp_installer::catalog::{
-        ArchiveKind, Category, InstallMethod, LspEntryTemplate,
+        CatalogEntry, CommandTemplate, InstallMethod, LspEntryTemplate, Target,
     };
 
     fn fake_entry(urls: &'static [(Target, &'static str, &'static str)]) -> CatalogEntry {
@@ -565,17 +553,15 @@ mod tests {
             display_name: "fakelsp",
             language_label: "fake",
             version: "0.0.0",
-            category: Category::Binary,
             method: InstallMethod::BinaryDownload {
                 urls,
-                archive: ArchiveKind::GzipOnly,
                 binary_path: "fakelsp",
             },
             lsp_entry: LspEntryTemplate {
                 id: "fake",
                 extensions: &["fake"],
                 root_markers: &["fake.toml"],
-                command: "{{BIN}}",
+                command: CommandTemplate::Installed,
                 args: &[],
             },
         }
@@ -708,7 +694,6 @@ mod tests {
             display_name: "fake-npm-lsp",
             language_label: "fake",
             version: "1.2.3",
-            category: Category::Npm,
             method: InstallMethod::NpmGlobal {
                 package: "fake-npm-lsp",
                 binary: "fake-npm-lsp",
@@ -717,7 +702,7 @@ mod tests {
                 id: "fake",
                 extensions: &["fake"],
                 root_markers: &["fake.toml"],
-                command: "fake-npm-lsp",
+                command: CommandTemplate::Literal("fake-npm-lsp"),
                 args: &[],
             },
         }
@@ -756,14 +741,6 @@ mod tests {
             InstallError::Npm { reason, .. } => assert!(reason.contains("network down")),
             other => panic!("expected InstallError::Npm, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn tool_not_found_display_mentions_tool_and_action() {
-        let e = InstallError::ToolNotFound { tool: "npm".into() };
-        let msg = format!("{e}");
-        assert!(msg.contains("npm"));
-        assert!(msg.contains("install it"));
     }
 
     #[test]
@@ -841,17 +818,15 @@ mod tests {
             display_name: "fakelsp-smoke",
             language_label: "fake",
             version: "0.0.0",
-            category: Category::Binary,
             method: InstallMethod::BinaryDownload {
                 urls,
-                archive: ArchiveKind::GzipOnly,
                 binary_path: "fakelsp-smoke",
             },
             lsp_entry: LspEntryTemplate {
                 id: "fake",
                 extensions: &["fake"],
                 root_markers: &["fake.toml"],
-                command: "{{BIN}}",
+                command: CommandTemplate::Installed,
                 args: &[],
             },
         };

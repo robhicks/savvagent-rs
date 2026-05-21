@@ -34,35 +34,8 @@ impl Target {
     }
 }
 
-/// How a binary asset is packaged. The installer picks the right
-/// extractor by the URL's actual suffix at install time; this enum is
-/// the *predominant* archive kind for catalog browsing/documentation
-/// (rust-analyzer's Windows asset is `.zip` while the rest are `.gz`,
-/// for example).
-#[derive(Debug, Clone, Copy)]
-pub enum ArchiveKind {
-    /// Single gzipped binary (`.gz`) — extracted as the binary itself.
-    GzipOnly,
-    /// Gzipped tarball (`.tar.gz` / `.tgz`).
-    TarGz,
-    /// Zip archive (`.zip`).
-    Zip,
-}
-
-/// High-level grouping shown in the picker. `Binary` entries are
-/// downloaded directly; `Npm` entries require `npm` on `$PATH`.
-#[derive(Debug, Clone, Copy)]
-pub enum Category {
-    /// Direct binary download from a pinned URL.
-    Binary,
-    /// `npm i -g <package>` install.
-    Npm,
-}
-
 /// The `[[language]]` entry to merge into `~/.savvagent/lsp.toml` after
-/// a successful install. `command` may contain the literal token
-/// `"{{BIN}}"` — the installer replaces it with the absolute path to
-/// the installed binary.
+/// a successful install.
 #[derive(Debug, Clone, Copy)]
 pub struct LspEntryTemplate {
     /// Stable id, matches `tool_lsp::config::LanguageEntry::id`.
@@ -71,23 +44,39 @@ pub struct LspEntryTemplate {
     pub extensions: &'static [&'static str],
     /// Root marker filenames.
     pub root_markers: &'static [&'static str],
-    /// Executable command to write. `"{{BIN}}"` is substituted with the
-    /// installed binary's absolute path at write time.
-    pub command: &'static str,
+    /// Executable command to write.
+    pub command: CommandTemplate,
     /// Arguments passed to `command`.
     pub args: &'static [&'static str],
 }
 
+/// Where the `command` value in [`LspEntryTemplate`] comes from. Replaces
+/// the earlier stringly-typed `"{{BIN}}"` sentinel with a closed enum so
+/// typos can't slip past the type system.
+#[derive(Debug, Clone, Copy)]
+pub enum CommandTemplate {
+    /// Write the absolute path to the binary the installer placed under
+    /// `~/.savvagent/lsp-bin/<id>/`. Used by `BinaryDownload` entries
+    /// whose `lsp.toml` entry needs the installer to fill in the path.
+    Installed,
+    /// Write this literal string into `command`. Used by `NpmGlobal`
+    /// entries where the binary lands on `$PATH` and the literal name
+    /// (e.g. `"typescript-language-server"`) is what `tool-lsp` should
+    /// spawn.
+    Literal(&'static str),
+}
+
 /// How [`super::installer`] should install a particular catalog entry.
+/// The variant also drives the picker's category label.
 #[derive(Debug, Clone, Copy)]
 pub enum InstallMethod {
-    /// Download from a templated URL, verify SHA256, extract.
+    /// Download from a templated URL, verify SHA256, extract. The
+    /// extractor dispatches on each URL's actual suffix (`.gz`,
+    /// `.tar.gz`, `.zip`), so a single entry can ship a `.gz` on Unix
+    /// and a `.zip` on Windows without further annotation.
     BinaryDownload {
         /// One URL + checksum per supported `Target`.
         urls: &'static [(Target, &'static str, &'static str)],
-        /// Predominant archive kind (the installer inspects each URL's
-        /// suffix to pick the actual extractor).
-        archive: ArchiveKind,
         /// Relative path inside the extracted archive to the binary
         /// we'll point `lsp.toml` at, e.g. `"bin/lua-language-server"`.
         /// On Windows the installer appends `.exe` if missing.
@@ -104,6 +93,17 @@ pub enum InstallMethod {
     },
 }
 
+impl InstallMethod {
+    /// Picker label corresponding to the variant: `"binary"` for
+    /// `BinaryDownload`, `"npm"` for `NpmGlobal`.
+    pub fn category_label(&self) -> &'static str {
+        match self {
+            Self::BinaryDownload { .. } => "binary",
+            Self::NpmGlobal { .. } => "npm",
+        }
+    }
+}
+
 /// A single catalog entry. `static CATALOG: &[CatalogEntry]` below
 /// holds every server we ship installer support for.
 #[derive(Debug, Clone, Copy)]
@@ -117,38 +117,34 @@ pub struct CatalogEntry {
     pub language_label: &'static str,
     /// Pinned upstream version.
     pub version: &'static str,
-    /// Picker grouping.
-    pub category: Category,
     /// How to install.
     pub method: InstallMethod,
     /// What to write into `lsp.toml` after a successful install.
     pub lsp_entry: LspEntryTemplate,
 }
 
-/// Pinned v1 catalog. Versions and checksums are refreshed at catalog
-/// publication time; see `docs/superpowers/specs/2026-05-20-lsp-installer-design.md`
-/// for the update workflow.
+/// Pinned v1 catalog. SHA256s come from GitHub's release `assets[].digest`
+/// field (`sha256:` prefix stripped). Versions and checksums are refreshed
+/// by editing this file when an upstream release lands; the spec
+/// (`docs/superpowers/specs/2026-05-20-lsp-installer-design.md`) covers
+/// the update workflow in full.
 ///
-/// SHA256s come from GitHub's release `assets[].digest` field (`sha256:` prefix
-/// stripped) for both binary entries — no out-of-band downloads were needed.
+/// **Servers not in the catalog**, with the structural change each would
+/// require:
 ///
-/// **Dropped from v1**, candidates for follow-up catalog versions:
-///
-/// - **clangd** — only ships monolithic Linux/macOS/Windows zips; no
-///   separate `aarch64-unknown-linux-gnu` or `aarch64-apple-darwin`
-///   assets. Would need either a partial-target entry or a per-server
-///   target list.
-/// - **zls** — Unix releases ship `.tar.xz`; would need `ArchiveKind::TarXz`
-///   plus an `xz2` dep.
-/// - **marksman** — assets are raw, unwrapped executables (no
-///   gzip/tar/zip wrapper). Would need an `ArchiveKind::Raw` variant.
+/// - **clangd** — ships only monolithic linux/mac/windows zips, no
+///   separate aarch64 builds. Needs a per-target asset list (some
+///   `Target` variants missing) before it can fit.
+/// - **zls** — Unix releases use `.tar.xz`. Needs an `xz2`-backed
+///   decompressor path in `installer::extract_one`.
+/// - **marksman** — ships raw, unwrapped executables (no archive). Needs
+///   a `Raw` extract path that writes the downloaded bytes verbatim.
 pub static CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         id: "rust-analyzer",
         display_name: "rust-analyzer",
         language_label: "rust",
         version: "2026-05-18",
-        category: Category::Binary,
         method: InstallMethod::BinaryDownload {
             urls: &[
                 (
@@ -177,14 +173,14 @@ pub static CATALOG: &[CatalogEntry] = &[
                     "9990c96852ba745ad555404747ce3cb1be29d461f968ba68c8316f64452f6a47",
                 ),
             ],
-            archive: ArchiveKind::GzipOnly,
+
             binary_path: "rust-analyzer",
         },
         lsp_entry: LspEntryTemplate {
             id: "rust",
             extensions: &["rs"],
             root_markers: &["Cargo.toml", "rust-project.json"],
-            command: "{{BIN}}",
+            command: CommandTemplate::Installed,
             args: &[],
         },
     },
@@ -193,7 +189,6 @@ pub static CATALOG: &[CatalogEntry] = &[
         display_name: "lua-language-server",
         language_label: "lua",
         version: "3.18.2",
-        category: Category::Binary,
         method: InstallMethod::BinaryDownload {
             urls: &[
                 (
@@ -222,14 +217,14 @@ pub static CATALOG: &[CatalogEntry] = &[
                     "a4439a8f5e8e9e6505c11f045a7bf45db602124a1e246371c1dbe34924f3cf71",
                 ),
             ],
-            archive: ArchiveKind::TarGz,
+
             binary_path: "bin/lua-language-server",
         },
         lsp_entry: LspEntryTemplate {
             id: "lua",
             extensions: &["lua"],
             root_markers: &[".luarc.json", ".luarc.jsonc"],
-            command: "{{BIN}}",
+            command: CommandTemplate::Installed,
             args: &[],
         },
     },
@@ -238,7 +233,6 @@ pub static CATALOG: &[CatalogEntry] = &[
         display_name: "typescript-language-server",
         language_label: "typescript",
         version: "5.3.0",
-        category: Category::Npm,
         method: InstallMethod::NpmGlobal {
             package: "typescript-language-server",
             binary: "typescript-language-server",
@@ -247,7 +241,7 @@ pub static CATALOG: &[CatalogEntry] = &[
             id: "typescript",
             extensions: &["ts", "tsx", "mts", "cts"],
             root_markers: &["tsconfig.json", "package.json"],
-            command: "typescript-language-server",
+            command: CommandTemplate::Literal("typescript-language-server"),
             args: &["--stdio"],
         },
     },
@@ -256,7 +250,6 @@ pub static CATALOG: &[CatalogEntry] = &[
         display_name: "pyright",
         language_label: "python",
         version: "1.1.409",
-        category: Category::Npm,
         method: InstallMethod::NpmGlobal {
             package: "pyright",
             binary: "pyright-langserver",
@@ -265,7 +258,7 @@ pub static CATALOG: &[CatalogEntry] = &[
             id: "python",
             extensions: &["py"],
             root_markers: &["pyproject.toml", "setup.py", "pyrightconfig.json"],
-            command: "pyright-langserver",
+            command: CommandTemplate::Literal("pyright-langserver"),
             args: &["--stdio"],
         },
     },
@@ -274,7 +267,6 @@ pub static CATALOG: &[CatalogEntry] = &[
         display_name: "bash-language-server",
         language_label: "bash",
         version: "5.6.0",
-        category: Category::Npm,
         method: InstallMethod::NpmGlobal {
             package: "bash-language-server",
             binary: "bash-language-server",
@@ -283,7 +275,7 @@ pub static CATALOG: &[CatalogEntry] = &[
             id: "bash",
             extensions: &["sh", "bash"],
             root_markers: &[".bashrc"],
-            command: "bash-language-server",
+            command: CommandTemplate::Literal("bash-language-server"),
             args: &["start"],
         },
     },
@@ -292,7 +284,6 @@ pub static CATALOG: &[CatalogEntry] = &[
         display_name: "vscode-langservers-extracted",
         language_label: "html",
         version: "4.10.0",
-        category: Category::Npm,
         method: InstallMethod::NpmGlobal {
             package: "vscode-langservers-extracted",
             binary: "vscode-html-language-server",
@@ -301,7 +292,7 @@ pub static CATALOG: &[CatalogEntry] = &[
             id: "html",
             extensions: &["html"],
             root_markers: &["package.json"],
-            command: "vscode-html-language-server",
+            command: CommandTemplate::Literal("vscode-html-language-server"),
             args: &["--stdio"],
         },
     },

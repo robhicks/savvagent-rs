@@ -168,8 +168,8 @@ impl LspInstallerPlugin {
             Vec::new();
 
         for entry in entries {
-            let result = match entry.category {
-                catalog::Category::Binary => {
+            let result = match entry.method {
+                catalog::InstallMethod::BinaryDownload { .. } => {
                     installer::install_binary_entry(
                         entry,
                         target,
@@ -179,7 +179,7 @@ impl LspInstallerPlugin {
                     )
                     .await
                 }
-                catalog::Category::Npm => {
+                catalog::InstallMethod::NpmGlobal { .. } => {
                     if installer::detect_npm().is_none() {
                         effs.push(push_note(format!(
                             "[lsp-installer] {}: npm not found on $PATH — install Node.js from https://nodejs.org and re-run /lsp",
