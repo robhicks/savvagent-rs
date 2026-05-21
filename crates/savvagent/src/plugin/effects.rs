@@ -253,17 +253,16 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             apply_toggle_plugin(app, id, enabled).await?;
         }
         Effect::ReindexPlugin { id } => {
-            let (reg_handle, idx_handle) =
-                match (&app.plugin_registry, &app.plugin_indexes) {
-                    (Some(r), Some(i)) => (r.clone(), i.clone()),
-                    _ => {
-                        tracing::warn!(
-                            plugin_id = %id.as_str(),
-                            "Effect::ReindexPlugin: plugin runtime not installed; ignoring"
-                        );
-                        return Ok(());
-                    }
-                };
+            let (reg_handle, idx_handle) = match (&app.plugin_registry, &app.plugin_indexes) {
+                (Some(r), Some(i)) => (r.clone(), i.clone()),
+                _ => {
+                    tracing::warn!(
+                        plugin_id = %id.as_str(),
+                        "Effect::ReindexPlugin: plugin runtime not installed; ignoring"
+                    );
+                    return Ok(());
+                }
+            };
             // Acquire write on indexes and read on registry; drop both after
             // reindex_plugin returns so we don't hold guards across await
             // boundaries beyond what the method itself requires.
@@ -2022,11 +2021,11 @@ mod tests {
     /// `spec.requires_arg`, which is `false` for those slashes.
     #[tokio::test]
     async fn palette_commands_use_requires_arg_not_args_hint() {
-        use std::collections::BTreeMap;
-        use std::sync::Arc;
         use crate::plugin::manifests::Indexes;
         use crate::plugin::register_builtins;
         use crate::plugin::registry::PluginRegistry;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
 
         let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
         let registry = PluginRegistry::new(set);
@@ -2068,11 +2067,11 @@ mod tests {
     /// providers appear regardless of credential state.
     #[tokio::test]
     async fn connect_picker_lists_all_provider_plugins() {
-        use std::collections::BTreeMap;
-        use std::sync::Arc;
         use crate::plugin::manifests::Indexes;
         use crate::plugin::register_builtins;
         use crate::plugin::registry::PluginRegistry;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
 
         let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
         let registry = PluginRegistry::new(set);
@@ -2155,18 +2154,22 @@ mod tests {
         // Strategy: leave pending_slash_after_trust = None so there is nothing
         // to re-dispatch. A separate test confirms the re-dispatch path.
         app.pending_slash_after_trust = None;
-        apply_effects(&mut app, effs).await.expect("apply_effects must succeed");
+        apply_effects(&mut app, effs)
+            .await
+            .expect("apply_effects must succeed");
 
         // Verify trust map updated.
         assert!(
-            app.trust_levels.read().await.contains_key(&std::path::PathBuf::from("/proj/x")),
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/x")),
             "trust_levels must contain the resolved project root after 'always'"
         );
 
         // Verify persistence: load from $HOME (the HomeGuard tempdir).
         let home = dirs::home_dir().expect("HOME must be set (HomeGuard)");
-        let (loaded, warn) =
-            crate::plugin::builtin::user_slash_commands::trust::load(&home);
+        let (loaded, warn) = crate::plugin::builtin::user_slash_commands::trust::load(&home);
         assert!(warn.is_none(), "unexpected trust file warning: {warn:?}");
         assert!(
             loaded.contains_key(&std::path::PathBuf::from("/proj/x")),
@@ -2246,8 +2249,16 @@ mod tests {
         .expect("apply_effects must succeed");
 
         // Trust map and persistence.
-        assert!(app.trust_levels.read().await.contains_key(&std::path::PathBuf::from("/proj/x")));
-        assert!(app.pending_slash_after_trust.is_none(), "pending must be consumed");
+        assert!(
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/x"))
+        );
+        assert!(
+            app.pending_slash_after_trust.is_none(),
+            "pending must be consumed"
+        );
 
         // The slash was re-dispatched.
         let dispatched = calls.lock().unwrap();
@@ -2288,7 +2299,10 @@ mod tests {
             "cancelled must clear pending_slash_after_trust"
         );
         assert!(
-            !app.trust_levels.read().await.contains_key(&std::path::PathBuf::from("/proj/x")),
+            !app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/x")),
             "cancelled must remove project from trust_levels"
         );
     }
@@ -2314,13 +2328,15 @@ mod tests {
 
         // In-memory map has the entry.
         assert!(
-            app.trust_levels.read().await.contains_key(&std::path::PathBuf::from("/proj/y")),
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/y")),
             "session-text-only must be present in the in-memory trust map"
         );
         // Disk file must NOT exist (SessionTextOnly is never persisted).
         let home = dirs::home_dir().expect("HOME set by HomeGuard");
-        let path =
-            crate::plugin::builtin::user_slash_commands::trust::trust_file_path(&home);
+        let path = crate::plugin::builtin::user_slash_commands::trust::trust_file_path(&home);
         assert!(
             !path.exists(),
             "session-text-only must not create the trust file on disk"

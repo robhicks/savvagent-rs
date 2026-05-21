@@ -53,7 +53,10 @@ pub fn parse(contents: &str) -> Result<Parsed, String> {
             warnings,
         });
     }
-    let after_open = contents.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+    let after_open = contents
+        .split_once('\n')
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
     let Some((yaml, body)) = split_closing(after_open) else {
         warnings.push("unterminated frontmatter; treating file as bodyless".into());
         return Ok(Parsed {
@@ -84,9 +87,7 @@ pub fn parse(contents: &str) -> Result<Parsed, String> {
                     }
                     let cleaned: serde_yaml_ng::Mapping = map
                         .iter()
-                        .filter(|(k, _)| {
-                            k.as_str().map(|s| known.contains(&s)).unwrap_or(false)
-                        })
+                        .filter(|(k, _)| k.as_str().map(|s| known.contains(&s)).unwrap_or(false))
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     if let Ok(fm) = serde_yaml_ng::from_value::<Frontmatter>(

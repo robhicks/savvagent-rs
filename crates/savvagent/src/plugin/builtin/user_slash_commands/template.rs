@@ -72,7 +72,10 @@ pub fn expand_files(body: &str) -> Expanded {
         }
         i = end;
     }
-    Expanded { text: out, warnings }
+    Expanded {
+        text: out,
+        warnings,
+    }
 }
 
 /// Return the byte index just past the UTF-8 character starting at `i`.
@@ -175,7 +178,10 @@ pub async fn expand_shell(body: &str) -> Result<Expanded, String> {
             final_out.push_str(line);
         }
     }
-    Ok(Expanded { text: final_out, warnings })
+    Ok(Expanded {
+        text: final_out,
+        warnings,
+    })
 }
 
 use crate::plugin::builtin::user_slash_commands::trust::TrustLevel;
@@ -233,8 +239,7 @@ pub async fn expand_all(
             }
             TrustLevel::SessionTextOnly => {
                 return Err(
-                    "shell substitution disabled for this session (trust=session-text-only)"
-                        .into(),
+                    "shell substitution disabled for this session (trust=session-text-only)".into(),
                 );
             }
             TrustLevel::Cancelled => unreachable!(),
@@ -273,7 +278,10 @@ mod tests {
 
     #[test]
     fn arguments_token() {
-        assert_eq!(expand_args("hello $ARGUMENTS", &s(&["a", "b"])), "hello a b");
+        assert_eq!(
+            expand_args("hello $ARGUMENTS", &s(&["a", "b"])),
+            "hello a b"
+        );
     }
 
     #[test]
@@ -326,7 +334,9 @@ mod tests {
 
     #[tokio::test]
     async fn shell_substitution_inlines_stdout() {
-        let exp = expand_shell("hello\n!echo from-shell\nworld").await.unwrap();
+        let exp = expand_shell("hello\n!echo from-shell\nworld")
+            .await
+            .unwrap();
         assert!(exp.text.contains("from-shell"));
         assert!(exp.warnings.is_empty());
     }
@@ -354,7 +364,9 @@ mod tests {
 
     #[tokio::test]
     async fn unmatched_inline_backtick_emits_warning() {
-        let exp = expand_shell("text !`incomplete with no close").await.unwrap();
+        let exp = expand_shell("text !`incomplete with no close")
+            .await
+            .unwrap();
         assert_eq!(exp.warnings.len(), 1);
         assert!(exp.warnings[0].contains("unmatched"));
         // The original characters are still in the output (left as literal).

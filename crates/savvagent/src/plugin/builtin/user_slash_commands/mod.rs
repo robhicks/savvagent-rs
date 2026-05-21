@@ -21,7 +21,7 @@ use savvagent_plugin::{
 };
 use tokio::sync::RwLock;
 
-use crate::plugin::builtin::user_slash_commands::discovery::{walk_all, Index};
+use crate::plugin::builtin::user_slash_commands::discovery::{Index, walk_all};
 use crate::plugin::builtin::user_slash_commands::trust::TrustLevel;
 
 /// Shared trust-level map type — cloned from `App::trust_levels` at startup
@@ -299,21 +299,14 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let dir = proj.path().join(".savvagent/commands");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("hello.md"),
-            "---\ndescription: hi\n---\nHello $1",
-        )
-        .unwrap();
+        fs::write(dir.join("hello.md"), "---\ndescription: hi\n---\nHello $1").unwrap();
 
         let mut p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
             empty_trust(),
         );
-        let effs = p
-            .handle_slash("hello", vec!["world".into()])
-            .await
-            .unwrap();
+        let effs = p.handle_slash("hello", vec!["world".into()]).await.unwrap();
         assert!(effs.iter().any(|e| matches!(
             e,
             savvagent_plugin::Effect::PromptSend { text } if text.contains("Hello world")
@@ -339,11 +332,7 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let dir = proj.path().join(".savvagent/commands");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("h.md"),
-            "---\nmodel: claude-sonnet-4-6\n---\nbody",
-        )
-        .unwrap();
+        fs::write(dir.join("h.md"), "---\nmodel: claude-sonnet-4-6\n---\nbody").unwrap();
         let mut p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
@@ -369,11 +358,12 @@ mod tests {
 
         // Initially empty: only the static `/reload-commands` entry should appear.
         let m = p.manifest();
-        assert!(m
-            .contributions
-            .slash_commands
-            .iter()
-            .all(|s| s.name != "added"));
+        assert!(
+            m.contributions
+                .slash_commands
+                .iter()
+                .all(|s| s.name != "added")
+        );
 
         // Add a command on disk AFTER the cache was populated.
         let dir = proj.path().join(".savvagent/commands");
@@ -382,15 +372,19 @@ mod tests {
 
         // Reload.
         let effs = p.handle_slash("reload-commands", vec![]).await.unwrap();
-        assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::ReindexPlugin { .. })));
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, savvagent_plugin::Effect::ReindexPlugin { .. }))
+        );
 
         // Manifest now contains the new command.
         let m = p.manifest();
-        assert!(m
-            .contributions
-            .slash_commands
-            .iter()
-            .any(|s| s.name == "added"));
+        assert!(
+            m.contributions
+                .slash_commands
+                .iter()
+                .any(|s| s.name == "added")
+        );
     }
 
     #[tokio::test]
@@ -399,11 +393,7 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let dir = proj.path().join(".savvagent/commands");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("f.md"),
-            "Read @/no/such/file please",
-        )
-        .unwrap();
+        fs::write(dir.join("f.md"), "Read @/no/such/file please").unwrap();
         let mut p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
@@ -412,11 +402,17 @@ mod tests {
         let effs = p.handle_slash("f", vec![]).await.unwrap();
         // Expect one PushNote with the warning and one PromptSend with the
         // literal @/no/such/file preserved (per template Task 8 contract).
-        let warn_count = effs.iter().filter(|e| matches!(e, savvagent_plugin::Effect::PushNote { .. })).count();
-        let prompt = effs.iter().find_map(|e| match e {
-            savvagent_plugin::Effect::PromptSend { text } => Some(text),
-            _ => None,
-        }).unwrap();
+        let warn_count = effs
+            .iter()
+            .filter(|e| matches!(e, savvagent_plugin::Effect::PushNote { .. }))
+            .count();
+        let prompt = effs
+            .iter()
+            .find_map(|e| match e {
+                savvagent_plugin::Effect::PromptSend { text } => Some(text),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(warn_count, 1);
         assert!(prompt.contains("@/no/such/file"));
     }
@@ -443,7 +439,8 @@ mod tests {
             "expected OpenScreen(trust.modal), got: {effs:?}"
         );
         assert!(
-            effs.iter().any(|e| matches!(e, Effect::StashPendingSlash { .. })),
+            effs.iter()
+                .any(|e| matches!(e, Effect::StashPendingSlash { .. })),
             "expected StashPendingSlash, got: {effs:?}"
         );
         // No PromptSend before trust is granted.
@@ -503,10 +500,7 @@ mod tests {
             home.path().to_path_buf(),
             empty_trust(),
         );
-        let effs = p
-            .handle_slash("safe", vec!["world".into()])
-            .await
-            .unwrap();
+        let effs = p.handle_slash("safe", vec!["world".into()]).await.unwrap();
         assert!(
             effs.iter()
                 .any(|e| matches!(e, Effect::PromptSend { text } if text.contains("Hello world"))),
@@ -545,7 +539,10 @@ mod tests {
         assert_eq!(entry.args_hint.as_deref(), Some("<range>"));
 
         // 2. Dispatch via handle_slash
-        let effs = p.handle_slash("review", vec!["HEAD~3..".into()]).await.unwrap();
+        let effs = p
+            .handle_slash("review", vec!["HEAD~3..".into()])
+            .await
+            .unwrap();
         let prompt = effs
             .iter()
             .find_map(|e| match e {
@@ -574,8 +571,17 @@ mod tests {
         );
         let effs = p.handle_slash("danger", vec![]).await.unwrap();
         // Expect stash + modal, NOT PromptSend (untrusted).
-        assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::StashPendingSlash { .. })));
-        assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::OpenScreen { id, .. } if id == "trust.modal")));
-        assert!(!effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::PromptSend { .. })));
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, savvagent_plugin::Effect::StashPendingSlash { .. }))
+        );
+        assert!(effs.iter().any(
+            |e| matches!(e, savvagent_plugin::Effect::OpenScreen { id, .. } if id == "trust.modal")
+        ));
+        assert!(
+            !effs
+                .iter()
+                .any(|e| matches!(e, savvagent_plugin::Effect::PromptSend { .. }))
+        );
     }
 }

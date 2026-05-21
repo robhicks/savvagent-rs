@@ -111,7 +111,9 @@ pub(crate) fn register_builtins(
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
-        Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(trust_levels)),
+        Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(
+            trust_levels,
+        )),
         Box::new(builtin::tool_fs_summary::ToolFsSummaryPlugin::new()),
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),

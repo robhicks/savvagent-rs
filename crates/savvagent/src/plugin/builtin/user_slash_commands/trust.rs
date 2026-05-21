@@ -58,10 +58,7 @@ pub fn load(home: &Path) -> (BTreeMap<PathBuf, TrustLevel>, Option<String>) {
 
 /// Persist the `Always` entries to disk. `SessionTextOnly` and
 /// `Cancelled` are skipped.
-pub fn save(
-    home: &Path,
-    levels: &BTreeMap<PathBuf, TrustLevel>,
-) -> Result<(), String> {
+pub fn save(home: &Path, levels: &BTreeMap<PathBuf, TrustLevel>) -> Result<(), String> {
     let mut schema = FileSchema::default();
     for (k, v) in levels {
         if matches!(v, TrustLevel::Always) {
@@ -74,8 +71,8 @@ pub fn save(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {parent:?}: {e}"))?;
     }
-    let body = serde_json::to_string_pretty(&schema)
-        .map_err(|e| format!("serialize trust file: {e}"))?;
+    let body =
+        serde_json::to_string_pretty(&schema).map_err(|e| format!("serialize trust file: {e}"))?;
     std::fs::write(&path, body).map_err(|e| format!("write trust file: {e}"))?;
     Ok(())
 }
@@ -103,7 +100,10 @@ mod tests {
 
         let (loaded, warn) = load(tmp.path());
         assert!(warn.is_none());
-        assert_eq!(loaded.get(&PathBuf::from("/proj/a")), Some(&TrustLevel::Always));
+        assert_eq!(
+            loaded.get(&PathBuf::from("/proj/a")),
+            Some(&TrustLevel::Always)
+        );
         assert!(!loaded.contains_key(&PathBuf::from("/proj/b")));
     }
 

@@ -39,9 +39,7 @@ impl Screen for TrustModal {
         vec![
             StyledLine {
                 spans: vec![StyledSpan {
-                    text: format!(
-                        "Commands in {path_str} use shell substitution (!cmd)."
-                    ),
+                    text: format!("Commands in {path_str} use shell substitution (!cmd)."),
                     fg: Some(ThemeColor::Warning),
                     bg: None,
                     modifiers: TextMods::default(),

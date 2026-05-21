@@ -2918,9 +2918,7 @@ async fn run_app(
                                     host.set_model(original_model.clone()).await;
                                     // Notify the main loop so app.model stays in
                                     // sync with host.current_model.
-                                    let _ = tx
-                                        .send(WorkerMsg::ModelRestored(original_model))
-                                        .await;
+                                    let _ = tx.send(WorkerMsg::ModelRestored(original_model)).await;
                                 }
 
                                 match result {

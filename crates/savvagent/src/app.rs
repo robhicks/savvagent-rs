@@ -2324,11 +2324,18 @@ mod tests {
     #[test]
     fn consume_model_override_takes_the_value() {
         let mut app = fresh_app();
-        assert!(app.next_turn_model_override.is_none(), "fresh App has no override");
+        assert!(
+            app.next_turn_model_override.is_none(),
+            "fresh App has no override"
+        );
 
         app.next_turn_model_override = Some("claude-opus-5".to_string());
         let taken = app.consume_model_override();
-        assert_eq!(taken.as_deref(), Some("claude-opus-5"), "should return the stored id");
+        assert_eq!(
+            taken.as_deref(),
+            Some("claude-opus-5"),
+            "should return the stored id"
+        );
         assert!(
             app.next_turn_model_override.is_none(),
             "field must be None after consume"
