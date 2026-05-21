@@ -325,22 +325,15 @@ mod tests {
         ids.sort();
         let len_before = ids.len();
         ids.dedup();
-        assert_eq!(
-            ids.len(),
-            len_before,
-            "duplicate ids in CATALOG: {:?}",
-            ids
-        );
+        assert_eq!(ids.len(), len_before, "duplicate ids in CATALOG: {:?}", ids);
     }
 
     #[test]
     fn binary_entries_cover_every_target() {
         for entry in CATALOG {
             if let InstallMethod::BinaryDownload { urls, .. } = entry.method {
-                let mut covered: Vec<String> = urls
-                    .iter()
-                    .map(|(t, _, _)| format!("{t:?}"))
-                    .collect();
+                let mut covered: Vec<String> =
+                    urls.iter().map(|(t, _, _)| format!("{t:?}")).collect();
                 covered.sort();
                 covered.dedup();
                 assert_eq!(

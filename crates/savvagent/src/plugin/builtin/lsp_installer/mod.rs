@@ -12,8 +12,8 @@ pub mod screen;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, Screen,
-    ScreenArgs, ScreenLayout, ScreenSpec, SlashSpec, StyledLine,
+    Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, Screen, ScreenArgs,
+    ScreenLayout, ScreenSpec, SlashSpec, StyledLine,
 };
 
 use screen::LspPickerScreen;
@@ -88,11 +88,7 @@ impl Plugin for LspInstallerPlugin {
         }
     }
 
-    fn create_screen(
-        &self,
-        id: &str,
-        _args: ScreenArgs,
-    ) -> Result<Box<dyn Screen>, PluginError> {
+    fn create_screen(&self, id: &str, _args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
         match id {
             "lsp_installer.picker" => Ok(Box::new(LspPickerScreen::new())),
             other => Err(PluginError::ScreenNotFound(other.into())),
@@ -128,9 +124,7 @@ impl LspInstallerPlugin {
         let lsp_bin_root = match dirs::home_dir() {
             Some(home) => home.join(".savvagent").join("lsp-bin"),
             None => {
-                effs.push(push_note(
-                    "/lsp: could not resolve $HOME; install aborted",
-                ));
+                effs.push(push_note("/lsp: could not resolve $HOME; install aborted"));
                 return Ok(effs);
             }
         };
@@ -277,7 +271,10 @@ mod tests {
     #[tokio::test]
     async fn install_with_no_ids_emits_no_effects() {
         let mut p = LspInstallerPlugin::new();
-        let effs = p.handle_slash("lsp", vec!["__install".into()]).await.unwrap();
+        let effs = p
+            .handle_slash("lsp", vec!["__install".into()])
+            .await
+            .unwrap();
         assert!(effs.is_empty(), "no-op for empty id list");
     }
 
@@ -289,7 +286,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            effs.iter().any(|e| matches!(e, Effect::PushNote { line } if line
+            effs.iter()
+                .any(|e| matches!(e, Effect::PushNote { line } if line
                 .spans
                 .iter()
                 .any(|s| s.text.contains("no-such-server")))),
@@ -301,7 +299,12 @@ mod tests {
     fn manifest_advertises_slash_and_screen() {
         let p = LspInstallerPlugin::new();
         let m = p.manifest();
-        assert!(m.contributions.slash_commands.iter().any(|s| s.name == "lsp"));
+        assert!(
+            m.contributions
+                .slash_commands
+                .iter()
+                .any(|s| s.name == "lsp")
+        );
         assert!(
             m.contributions
                 .screens

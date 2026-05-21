@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine,
-    StyledSpan, TextMods, ThemeColor,
+    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine, StyledSpan,
+    TextMods, ThemeColor,
 };
 
 use crate::plugin::builtin::lsp_installer::catalog::Category;

@@ -308,10 +308,11 @@ async fn extract_one(
                 entry_id: entry_id.into(),
                 reason: e.to_string(),
             })?;
-            zip.extract(install_dir).map_err(|e| InstallError::Extract {
-                entry_id: entry_id.into(),
-                reason: e.to_string(),
-            })?;
+            zip.extract(install_dir)
+                .map_err(|e| InstallError::Extract {
+                    entry_id: entry_id.into(),
+                    reason: e.to_string(),
+                })?;
         }
         ArchiveKind::GzipOnly => {
             let bin_in_dir = install_dir.join(resolve_binary_path(binary_path));
@@ -398,10 +399,7 @@ impl NpmRunner for SystemNpmRunner {
                 },
             }
         }
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| format!("wait npm: {e}"))?;
+        let status = child.wait().await.map_err(|e| format!("wait npm: {e}"))?;
         if !status.success() {
             return Err(format!("npm exited with status {status}"));
         }
@@ -549,24 +547,23 @@ mod tests {
         let plain = b"#!/bin/sh\necho fakelsp\n";
         let archive = gzipped(plain);
         let sha = hex::encode(Sha256::digest(&archive));
-        let url_static: &'static str =
-            Box::leak("https://example.test/fakelsp.gz".to_string().into_boxed_str());
+        let url_static: &'static str = Box::leak(
+            "https://example.test/fakelsp.gz"
+                .to_string()
+                .into_boxed_str(),
+        );
         let sha_static: &'static str = Box::leak(sha.into_boxed_str());
-        let urls: &'static [(Target, &'static str, &'static str)] = Box::leak(Box::new([(
-            Target::LinuxX86_64Gnu,
-            url_static,
-            sha_static,
-        )]));
+        let urls: &'static [(Target, &'static str, &'static str)] =
+            Box::leak(Box::new([(Target::LinuxX86_64Gnu, url_static, sha_static)]));
 
         let entry = fake_entry(urls);
         let tmp = tempfile::tempdir().unwrap();
         let dl = StubDownloader {
             payload: bytes::Bytes::from(archive),
         };
-        let outcome =
-            install_binary_entry(&entry, Target::LinuxX86_64Gnu, tmp.path(), &dl, |_| {})
-                .await
-                .unwrap();
+        let outcome = install_binary_entry(&entry, Target::LinuxX86_64Gnu, tmp.path(), &dl, |_| {})
+            .await
+            .unwrap();
         assert!(outcome.installed_at.exists(), "binary must exist on disk");
         let written = std::fs::read(&outcome.installed_at).unwrap();
         assert_eq!(written, plain, "binary contents must match");
@@ -803,15 +800,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let dl = ReqwestDownloader::new().expect("reqwest builds");
-        let outcome = install_binary_entry(
-            &entry,
-            Target::current().unwrap(),
-            tmp.path(),
-            &dl,
-            |_| {},
-        )
-        .await
-        .expect("install must succeed end-to-end");
+        let outcome =
+            install_binary_entry(&entry, Target::current().unwrap(), tmp.path(), &dl, |_| {})
+                .await
+                .expect("install must succeed end-to-end");
 
         assert!(outcome.installed_at.exists());
         let written = std::fs::read(&outcome.installed_at).unwrap();

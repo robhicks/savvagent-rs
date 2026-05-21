@@ -99,10 +99,7 @@ pub async fn merge_into_user_config(
 
 async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = PathBuf::from(dir).join(format!(
-        ".lsp.toml.savvagent.{}.tmp",
-        std::process::id()
-    ));
+    let tmp = PathBuf::from(dir).join(format!(".lsp.toml.savvagent.{}.tmp", std::process::id()));
     tokio::fs::write(&tmp, bytes).await?;
     tokio::fs::rename(&tmp, path).await
 }
