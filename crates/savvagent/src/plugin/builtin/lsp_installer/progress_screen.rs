@@ -25,9 +25,90 @@ impl LspProgressScreen {
     /// Build the screen and (if there's any work to do) spawn the
     /// install driver. `entry_ids` is the picker's confirmed selection.
     pub fn new(entry_ids: Vec<String>) -> Self {
-        let state = Arc::new(TokioMutex::new(initial_state_for_ids(&entry_ids)));
-        // Driver-task spawn is added in a later task (Task 10); for now
-        // the screen only renders the initial state.
+        let mut initial = initial_state_for_ids(&entry_ids);
+
+        // Resolve the "ambient" install context the same way
+        // handle_install does. Any failure here marks the state as
+        // finished with a single explanatory failure row and we don't
+        // spawn the driver task.
+        let target = crate::plugin::builtin::lsp_installer::catalog::Target::current();
+        let home = dirs::home_dir();
+        let downloader_opt =
+            crate::plugin::builtin::lsp_installer::installer::ReqwestDownloader::new();
+
+        let (has_target, has_home) = (target.is_some(), home.is_some());
+        let (target, home, downloader) = match (target, home, downloader_opt) {
+            (Some(t), Some(h), Some(d)) => (t, h, d),
+            _ => {
+                let reason = match (has_target, has_home) {
+                    (false, _) => "this host's target is not supported by the installer",
+                    (_, false) => "could not resolve $HOME",
+                    _ => "could not build the HTTP client",
+                };
+                for entry in initial.entries.iter_mut() {
+                    if matches!(entry.status, EntryStatus::Queued) {
+                        entry.status = EntryStatus::Failed {
+                            reason: reason.to_string(),
+                            fatal: false,
+                        };
+                    }
+                }
+                initial.finished = true;
+                return Self {
+                    state: Arc::new(TokioMutex::new(initial)),
+                };
+            }
+        };
+
+        let lsp_bin_root = home.join(".savvagent").join("lsp-bin");
+        let lsp_toml = home.join(".savvagent").join("lsp.toml");
+
+        // Resolve queued ids → static catalog refs. (Already-failed
+        // entries from initial_state_for_ids stay as they are.)
+        let entries: Vec<&'static crate::plugin::builtin::lsp_installer::catalog::CatalogEntry> =
+            initial
+                .entries
+                .iter()
+                .filter(|e| matches!(e.status, EntryStatus::Queued))
+                .filter_map(|e| {
+                    crate::plugin::builtin::lsp_installer::catalog::CATALOG
+                        .iter()
+                        .find(|c| c.id == e.id)
+                })
+                .collect();
+
+        // Nothing to do — every selected id was unknown (or none
+        // selected). Mark the state finished synchronously BEFORE
+        // wrapping in the Arc so the empty-entries path doesn't depend
+        // on a tokio runtime being present (this is what
+        // `id_is_lsp_installer_progress` exercises as a plain #[test]).
+        if entries.is_empty() {
+            initial.finished = true;
+            return Self {
+                state: Arc::new(TokioMutex::new(initial)),
+            };
+        }
+
+        let state = Arc::new(TokioMutex::new(initial));
+
+        let downloader: Arc<dyn crate::plugin::builtin::lsp_installer::installer::Downloader> =
+            Arc::new(downloader);
+        let npm: Arc<dyn crate::plugin::builtin::lsp_installer::installer::NpmRunner> =
+            Arc::new(crate::plugin::builtin::lsp_installer::installer::SystemNpmRunner);
+
+        // Drop the JoinHandle — the screen polls `state` for progress
+        // instead of awaiting the task. The task completes when it
+        // sets `state.finished = true`.
+        drop(crate::plugin::builtin::lsp_installer::progress::spawn_driver(
+            entries,
+            target,
+            lsp_bin_root,
+            lsp_toml,
+            Arc::clone(&state),
+            downloader,
+            npm,
+        ));
+
         Self { state }
     }
 
@@ -262,6 +343,20 @@ mod tests {
     fn id_is_lsp_installer_progress() {
         let s = LspProgressScreen::new(vec![]);
         assert_eq!(s.id(), "lsp_installer.progress");
+    }
+
+    #[tokio::test]
+    async fn unknown_only_selection_finishes_immediately() {
+        let s = LspProgressScreen::new(vec!["totally-fake-id".to_string()]);
+        // With the empty-entries fix in `new`, `finished` is set
+        // synchronously before the Arc is built. No tokio task to await.
+        let g = s.state.lock().await;
+        assert!(g.finished, "unknown-only selection must finish synchronously");
+        assert!(
+            matches!(g.entries[0].status, EntryStatus::Failed { .. }),
+            "unknown id must land as Failed, got {:?}",
+            g.entries[0].status
+        );
     }
 
     #[test]
