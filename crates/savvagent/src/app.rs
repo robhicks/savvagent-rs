@@ -510,9 +510,8 @@ pub struct App {
 
     /// One-turn model override populated by
     /// [`savvagent_plugin::Effect::SetNextTurnModelOverride`] and consumed
-    /// by the worker spawn at the start of the next turn (Task 14). `None`
+    /// by the worker spawn at the start of the next turn. `None`
     /// means "use the provider's currently-active model."
-    #[allow(dead_code)] // consumed by Task 14
     pub next_turn_model_override: Option<String>,
     /// `(command_name, args)` that should re-dispatch after the trust
     /// modal resolves. Set by `internal:user-slash-commands` before
@@ -1599,6 +1598,16 @@ impl App {
     pub fn submit_prompt(&mut self, text: String) {
         tracing::debug!("submit_prompt effect ignored in PR 3");
     }
+
+    /// Take the one-turn model override out of `App`, leaving `None` behind.
+    ///
+    /// Called at the worker-spawn site before every user turn so the override
+    /// is consumed exactly once (the turn it was set for). Returns `Some(id)`
+    /// if a `SetNextTurnModelOverride` effect fired before this turn, `None`
+    /// otherwise.
+    pub(crate) fn consume_model_override(&mut self) -> Option<String> {
+        self.next_turn_model_override.take()
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -2280,5 +2289,23 @@ mod tests {
         assert_eq!(args.get("path").unwrap(), &serde_json::json!("src/main.rs"));
         assert_eq!(status, Some(ToolCallStatus::Ok));
         assert_eq!(result_text.as_deref(), Some(r#"{"bytes": 1234}"#));
+    }
+
+    /// `consume_model_override` returns the stored id and clears the field.
+    #[test]
+    fn consume_model_override_takes_the_value() {
+        let mut app = fresh_app();
+        assert!(app.next_turn_model_override.is_none(), "fresh App has no override");
+
+        app.next_turn_model_override = Some("claude-opus-5".to_string());
+        let taken = app.consume_model_override();
+        assert_eq!(taken.as_deref(), Some("claude-opus-5"), "should return the stored id");
+        assert!(
+            app.next_turn_model_override.is_none(),
+            "field must be None after consume"
+        );
+
+        // Second call is idempotent — no panic, returns None.
+        assert!(app.consume_model_override().is_none());
     }
 }
