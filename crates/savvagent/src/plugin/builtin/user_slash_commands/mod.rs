@@ -128,8 +128,19 @@ impl Plugin for UserSlashCommandsPlugin {
         args: Vec<String>,
     ) -> Result<Vec<Effect>, PluginError> {
         if name == "reload-commands" {
-            // Implemented in Task 20.
-            return Ok(vec![]);
+            *self.cache.lock().unwrap() = None;
+            // Touching index_snapshot repopulates the cache from disk.
+            let _ = self.index_snapshot();
+            return Ok(vec![
+                Effect::ReindexPlugin {
+                    id: PluginId::new("internal:user-slash-commands").expect("valid built-in id"),
+                },
+                Effect::PushNote {
+                    line: savvagent_plugin::StyledLine::plain(
+                        "user-slash-commands: reloaded".to_string(),
+                    ),
+                },
+            ]);
         }
         let idx = self.index_snapshot();
         let Some(d) = idx.commands.get(name) else {
@@ -290,6 +301,42 @@ mod tests {
             e,
             savvagent_plugin::Effect::SetNextTurnModelOverride { id } if id == "claude-sonnet-4-6"
         )));
+    }
+
+    #[tokio::test]
+    async fn reload_emits_reindex_and_picks_up_new_files() {
+        use std::fs;
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+        );
+
+        // Initially empty: only the static `/reload-commands` entry should appear.
+        let m = p.manifest();
+        assert!(m
+            .contributions
+            .slash_commands
+            .iter()
+            .all(|s| s.name != "added"));
+
+        // Add a command on disk AFTER the cache was populated.
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("added.md"), "body").unwrap();
+
+        // Reload.
+        let effs = p.handle_slash("reload-commands", vec![]).await.unwrap();
+        assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::ReindexPlugin { .. })));
+
+        // Manifest now contains the new command.
+        let m = p.manifest();
+        assert!(m
+            .contributions
+            .slash_commands
+            .iter()
+            .any(|s| s.name == "added"));
     }
 
     #[tokio::test]
