@@ -668,6 +668,14 @@ mod tests {
         buf
     }
 
+    // Real-world Windows archives ship binaries with explicit `.exe`
+    // suffixes (e.g. rust-analyzer's `.zip` and lua-language-server's
+    // Windows `.zip` both already contain `<name>.exe`); these tests
+    // build Unix-flavored fixtures, so on Windows `resolve_binary_path`
+    // looks for `<name>.exe` while the archive actually wrote `<name>`.
+    // Windows coverage of the gzip-only path comes from
+    // `smoke_local_http_install` and `reinstall_wipes_existing_install_dir`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn targz_extract_writes_binary_at_nested_path() {
         let payload = b"#!/bin/sh\necho lua\n";
@@ -700,6 +708,7 @@ mod tests {
         assert_eq!(std::fs::read(&outcome.installed_at).unwrap(), payload);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn zip_extract_writes_binary_at_top_level() {
         let payload = b"binary-bytes";
