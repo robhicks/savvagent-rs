@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Effect, KeyEventPortable, PluginError, Region, Screen, StyledLine,
+    Effect, KeyCodePortable, KeyEventPortable, PluginError, Region, Screen, StyledLine,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
@@ -97,9 +97,25 @@ impl Screen for LspProgressScreen {
         Self::render_lines(&state)
     }
 
-    async fn on_key(&mut self, _key: KeyEventPortable) -> Result<Vec<Effect>, PluginError> {
-        // Filled in in the next task (Task 9).
-        Ok(vec![])
+    async fn on_key(&mut self, key: KeyEventPortable) -> Result<Vec<Effect>, PluginError> {
+        let state = self.state.lock().await;
+        match key.code {
+            KeyCodePortable::Enter if state.finished => {
+                Ok(vec![Effect::Stack(close_and_summary(&state))])
+            }
+            KeyCodePortable::Enter => Ok(vec![]),
+            KeyCodePortable::Esc if state.finished => Ok(vec![Effect::CloseScreen]),
+            KeyCodePortable::Esc => Ok(vec![Effect::Stack(vec![
+                Effect::CloseScreen,
+                Effect::PushNote {
+                    line: StyledLine::plain(
+                        "[lsp-installer] still installing in the background \u{2014} results will appear when done"
+                            .to_string(),
+                    ),
+                },
+            ])]),
+            _ => Ok(vec![]),
+        }
     }
 
     fn tips(&self) -> Vec<StyledLine> {
@@ -177,6 +193,44 @@ fn truncate(s: &str, max: usize) -> String {
         out.push('…');
         out
     }
+}
+
+fn close_and_summary(state: &ProgressState) -> Vec<Effect> {
+    let mut effs: Vec<Effect> = Vec::with_capacity(1 + state.entries.len() + 2);
+    effs.push(Effect::CloseScreen);
+    for entry in &state.entries {
+        let line = match &entry.status {
+            EntryStatus::Installed { installed_at } => format!(
+                "[lsp-installer] {}: installed at {}",
+                entry.id,
+                installed_at.display()
+            ),
+            EntryStatus::Failed { reason, fatal } => {
+                let prefix = if *fatal { "batch aborted" } else { "failed" };
+                format!("[lsp-installer] {}: {prefix} \u{2014} {reason}", entry.id)
+            }
+            other => format!(
+                "[lsp-installer] {}: ended in unexpected state {other:?}",
+                entry.id
+            ),
+        };
+        effs.push(Effect::PushNote {
+            line: StyledLine::plain(line),
+        });
+    }
+    if let Some(err) = &state.config_error {
+        effs.push(Effect::PushNote {
+            line: StyledLine::plain(format!(
+                "[lsp-installer] warning: writing lsp.toml failed: {err}"
+            )),
+        });
+    }
+    effs.push(Effect::PushNote {
+        line: StyledLine::plain(
+            "[lsp-installer] done \u{2014} restart savvagent to pick up the new servers".to_string(),
+        ),
+    });
+    effs
 }
 
 #[cfg(test)]
@@ -389,5 +443,147 @@ mod tests {
         let out = rendered(&s);
         assert!(out.contains("lsp.toml"));
         assert!(out.contains("disk full"));
+    }
+
+    use savvagent_plugin::KeyMods;
+
+    fn key(code: KeyCodePortable) -> KeyEventPortable {
+        KeyEventPortable {
+            code,
+            modifiers: KeyMods::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn enter_while_unfinished_is_a_noop() {
+        let mut s = screen_with_state(ProgressState {
+            entries: vec![EntryProgress {
+                id: "a".into(),
+                display_name: "a".into(),
+                status: EntryStatus::Verifying,
+            }],
+            finished: false,
+            config_error: None,
+        });
+        let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
+        assert!(effs.is_empty(), "Enter pre-finish must not close, got {effs:?}");
+    }
+
+    #[tokio::test]
+    async fn enter_after_finish_closes_and_emits_summary_notes() {
+        let mut s = screen_with_state(ProgressState {
+            entries: vec![
+                EntryProgress {
+                    id: "ok".into(),
+                    display_name: "ok".into(),
+                    status: EntryStatus::Installed {
+                        installed_at: PathBuf::from("/tmp/ok"),
+                    },
+                },
+                EntryProgress {
+                    id: "bad".into(),
+                    display_name: "bad".into(),
+                    status: EntryStatus::Failed {
+                        reason: "boom".into(),
+                        fatal: false,
+                    },
+                },
+            ],
+            finished: true,
+            config_error: None,
+        });
+        let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
+        // Expect a Stack starting with CloseScreen followed by at least
+        // one PushNote per entry.
+        match &effs[..] {
+            [Effect::Stack(children)] => {
+                assert!(matches!(children[0], Effect::CloseScreen));
+                assert!(
+                    children.iter().skip(1).all(|e| matches!(e, Effect::PushNote { .. })),
+                    "every post-close effect must be a PushNote, got {children:?}"
+                );
+                let texts: String = children
+                    .iter()
+                    .filter_map(|e| match e {
+                        Effect::PushNote { line } => Some(
+                            line.spans
+                                .iter()
+                                .map(|s| s.text.as_str())
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(texts.contains("ok"));
+                assert!(texts.contains("bad"));
+                assert!(texts.contains("/tmp/ok"));
+                assert!(texts.contains("boom"));
+            }
+            other => panic!("expected single Stack, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn esc_during_install_dismisses_with_background_note() {
+        let mut s = screen_with_state(ProgressState {
+            entries: vec![EntryProgress {
+                id: "a".into(),
+                display_name: "a".into(),
+                status: EntryStatus::Downloading {
+                    bytes_so_far: 100,
+                    total: None,
+                },
+            }],
+            finished: false,
+            config_error: None,
+        });
+        let effs = s.on_key(key(KeyCodePortable::Esc)).await.unwrap();
+        match &effs[..] {
+            [Effect::Stack(children)] => {
+                assert!(matches!(children[0], Effect::CloseScreen));
+                let note_text: String = children
+                    .iter()
+                    .filter_map(|e| match e {
+                        Effect::PushNote { line } => Some(
+                            line.spans
+                                .iter()
+                                .map(|s| s.text.as_str())
+                                .collect::<String>(),
+                        ),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(note_text.to_lowercase().contains("background"));
+            }
+            other => panic!("expected single Stack, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn esc_after_finish_just_closes() {
+        let mut s = screen_with_state(ProgressState {
+            entries: vec![EntryProgress {
+                id: "a".into(),
+                display_name: "a".into(),
+                status: EntryStatus::Installed {
+                    installed_at: PathBuf::from("/tmp/a"),
+                },
+            }],
+            finished: true,
+            config_error: None,
+        });
+        let effs = s.on_key(key(KeyCodePortable::Esc)).await.unwrap();
+        // No need for the background note when nothing's running.
+        // Either a bare CloseScreen or a Stack with CloseScreen first
+        // is acceptable; assert there is no PushNote saying "background".
+        let body = format!("{effs:?}");
+        assert!(
+            !body.to_lowercase().contains("background"),
+            "no background note after finish, got {effs:?}"
+        );
+        // Make sure the screen does close.
+        assert!(body.contains("CloseScreen"));
     }
 }
