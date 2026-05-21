@@ -128,8 +128,183 @@ pub struct CatalogEntry {
 /// Pinned v1 catalog. Versions and checksums are refreshed at catalog
 /// publication time; see `docs/superpowers/specs/2026-05-20-lsp-installer-design.md`
 /// for the update workflow.
+///
+/// SHA256s come from GitHub's release `assets[].digest` field (`sha256:` prefix
+/// stripped) for both binary entries — no out-of-band downloads were needed.
+///
+/// **Dropped from v1**, candidates for follow-up catalog versions:
+///
+/// - **clangd** — only ships monolithic Linux/macOS/Windows zips; no
+///   separate `aarch64-unknown-linux-gnu` or `aarch64-apple-darwin`
+///   assets. Would need either a partial-target entry or a per-server
+///   target list.
+/// - **zls** — Unix releases ship `.tar.xz`; would need `ArchiveKind::TarXz`
+///   plus an `xz2` dep.
+/// - **marksman** — assets are raw, unwrapped executables (no
+///   gzip/tar/zip wrapper). Would need an `ArchiveKind::Raw` variant.
 pub static CATALOG: &[CatalogEntry] = &[
-    // Populated by Task 12.
+    CatalogEntry {
+        id: "rust-analyzer",
+        display_name: "rust-analyzer",
+        language_label: "rust",
+        version: "2026-05-18",
+        category: Category::Binary,
+        method: InstallMethod::BinaryDownload {
+            urls: &[
+                (
+                    Target::LinuxX86_64Gnu,
+                    "https://github.com/rust-lang/rust-analyzer/releases/download/2026-05-18/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+                    "d4a0f9acec52904af584332199cb41d19c9d5d4bf0d15e0466459c1d1b2d8881",
+                ),
+                (
+                    Target::LinuxAarch64Gnu,
+                    "https://github.com/rust-lang/rust-analyzer/releases/download/2026-05-18/rust-analyzer-aarch64-unknown-linux-gnu.gz",
+                    "7ff2062959cff408fb1c6e73f842c62896a3e808f83a2781a1b8f38a764df7d0",
+                ),
+                (
+                    Target::MacosX86_64,
+                    "https://github.com/rust-lang/rust-analyzer/releases/download/2026-05-18/rust-analyzer-x86_64-apple-darwin.gz",
+                    "185f13571ad0b092475e7b8be79587227e6f0749505a8cde1c8443d596c3e349",
+                ),
+                (
+                    Target::MacosAarch64,
+                    "https://github.com/rust-lang/rust-analyzer/releases/download/2026-05-18/rust-analyzer-aarch64-apple-darwin.gz",
+                    "3753cd9f0ee40914b2f9e51475b8df7aba74e034aca5175ffeb4a53c6aaf53f3",
+                ),
+                (
+                    Target::WindowsX86_64,
+                    "https://github.com/rust-lang/rust-analyzer/releases/download/2026-05-18/rust-analyzer-x86_64-pc-windows-msvc.zip",
+                    "9990c96852ba745ad555404747ce3cb1be29d461f968ba68c8316f64452f6a47",
+                ),
+            ],
+            archive: ArchiveKind::GzipOnly,
+            binary_path: "rust-analyzer",
+        },
+        lsp_entry: LspEntryTemplate {
+            id: "rust",
+            extensions: &["rs"],
+            root_markers: &["Cargo.toml", "rust-project.json"],
+            command: "{{BIN}}",
+            args: &[],
+        },
+    },
+    CatalogEntry {
+        id: "lua-language-server",
+        display_name: "lua-language-server",
+        language_label: "lua",
+        version: "3.18.2",
+        category: Category::Binary,
+        method: InstallMethod::BinaryDownload {
+            urls: &[
+                (
+                    Target::LinuxX86_64Gnu,
+                    "https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-linux-x64.tar.gz",
+                    "ca71415dd19f19e30aaa35a4915aefca9fdb5fec31b98331cc3d77f778d539c5",
+                ),
+                (
+                    Target::LinuxAarch64Gnu,
+                    "https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-linux-arm64.tar.gz",
+                    "273af33f26f4a1143f27c96d9f9e1188aba619c71e0807042134f66b4bd27f24",
+                ),
+                (
+                    Target::MacosX86_64,
+                    "https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-darwin-x64.tar.gz",
+                    "e26cfefe423dd7326fc7c649539e4d4aaa4f35f34d2fefd8af2ed7090b72c556",
+                ),
+                (
+                    Target::MacosAarch64,
+                    "https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-darwin-arm64.tar.gz",
+                    "cec99d70b1f612acec4a10a79a03664e3aa0c229d4d8a586cb3f928ec37d509e",
+                ),
+                (
+                    Target::WindowsX86_64,
+                    "https://github.com/LuaLS/lua-language-server/releases/download/3.18.2/lua-language-server-3.18.2-win32-x64.zip",
+                    "a4439a8f5e8e9e6505c11f045a7bf45db602124a1e246371c1dbe34924f3cf71",
+                ),
+            ],
+            archive: ArchiveKind::TarGz,
+            binary_path: "bin/lua-language-server",
+        },
+        lsp_entry: LspEntryTemplate {
+            id: "lua",
+            extensions: &["lua"],
+            root_markers: &[".luarc.json", ".luarc.jsonc"],
+            command: "{{BIN}}",
+            args: &[],
+        },
+    },
+    CatalogEntry {
+        id: "typescript-language-server",
+        display_name: "typescript-language-server",
+        language_label: "typescript",
+        version: "5.3.0",
+        category: Category::Npm,
+        method: InstallMethod::NpmGlobal {
+            package: "typescript-language-server",
+            binary: "typescript-language-server",
+        },
+        lsp_entry: LspEntryTemplate {
+            id: "typescript",
+            extensions: &["ts", "tsx", "mts", "cts"],
+            root_markers: &["tsconfig.json", "package.json"],
+            command: "typescript-language-server",
+            args: &["--stdio"],
+        },
+    },
+    CatalogEntry {
+        id: "pyright",
+        display_name: "pyright",
+        language_label: "python",
+        version: "1.1.409",
+        category: Category::Npm,
+        method: InstallMethod::NpmGlobal {
+            package: "pyright",
+            binary: "pyright-langserver",
+        },
+        lsp_entry: LspEntryTemplate {
+            id: "python",
+            extensions: &["py"],
+            root_markers: &["pyproject.toml", "setup.py", "pyrightconfig.json"],
+            command: "pyright-langserver",
+            args: &["--stdio"],
+        },
+    },
+    CatalogEntry {
+        id: "bash-language-server",
+        display_name: "bash-language-server",
+        language_label: "bash",
+        version: "5.6.0",
+        category: Category::Npm,
+        method: InstallMethod::NpmGlobal {
+            package: "bash-language-server",
+            binary: "bash-language-server",
+        },
+        lsp_entry: LspEntryTemplate {
+            id: "bash",
+            extensions: &["sh", "bash"],
+            root_markers: &[".bashrc"],
+            command: "bash-language-server",
+            args: &["start"],
+        },
+    },
+    CatalogEntry {
+        id: "vscode-langservers-extracted",
+        display_name: "vscode-langservers-extracted",
+        language_label: "html",
+        version: "4.10.0",
+        category: Category::Npm,
+        method: InstallMethod::NpmGlobal {
+            package: "vscode-langservers-extracted",
+            binary: "vscode-html-language-server",
+        },
+        lsp_entry: LspEntryTemplate {
+            id: "html",
+            extensions: &["html"],
+            root_markers: &["package.json"],
+            command: "vscode-html-language-server",
+            args: &["--stdio"],
+        },
+    },
 ];
 
 #[cfg(test)]
