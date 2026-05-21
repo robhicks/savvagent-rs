@@ -273,6 +273,10 @@ pub async fn install_binary_entry(
 /// suffix (`.gz` / `.tar.gz` / `.zip`). Returns the absolute path to
 /// the binary inside the install dir (with `.exe` appended on Windows
 /// if the catalog template omitted it).
+///
+/// All sync I/O (gzip decode, tar unpack, zip extract, write to disk)
+/// runs inside `tokio::task::spawn_blocking` so a 30+ MB rust-analyzer
+/// archive doesn't stall the runtime worker.
 async fn extract_one(
     bytes: &bytes::Bytes,
     url: &str,
@@ -280,12 +284,17 @@ async fn extract_one(
     install_dir: &Path,
     entry_id: &str,
 ) -> Result<PathBuf, InstallError> {
-    let extract_kind = if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
-        ArchiveKind::TarGz
+    enum ExtractKind {
+        TarGz,
+        Zip,
+        GzipOnly,
+    }
+    let kind = if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
+        ExtractKind::TarGz
     } else if url.ends_with(".zip") {
-        ArchiveKind::Zip
+        ExtractKind::Zip
     } else if url.ends_with(".gz") {
-        ArchiveKind::GzipOnly
+        ExtractKind::GzipOnly
     } else {
         return Err(InstallError::Extract {
             entry_id: entry_id.into(),
@@ -293,39 +302,58 @@ async fn extract_one(
         });
     };
 
-    match extract_kind {
-        ArchiveKind::TarGz => {
-            let dec = flate2::read::GzDecoder::new(&bytes[..]);
-            let mut ar = tar::Archive::new(dec);
-            ar.unpack(install_dir).map_err(|e| InstallError::Extract {
-                entry_id: entry_id.into(),
-                reason: e.to_string(),
-            })?;
-        }
-        ArchiveKind::Zip => {
-            let reader = std::io::Cursor::new(&bytes[..]);
-            let mut zip = zip::ZipArchive::new(reader).map_err(|e| InstallError::Extract {
-                entry_id: entry_id.into(),
-                reason: e.to_string(),
-            })?;
-            zip.extract(install_dir)
-                .map_err(|e| InstallError::Extract {
-                    entry_id: entry_id.into(),
+    let bin_in_dir = install_dir.join(resolve_binary_path(binary_path));
+    let bytes = bytes.clone();
+    let install_dir = install_dir.to_path_buf();
+    let entry_id_owned = entry_id.to_string();
+    let bin_for_blocking = bin_in_dir.clone();
+
+    tokio::task::spawn_blocking(move || -> Result<(), InstallError> {
+        match kind {
+            ExtractKind::TarGz => {
+                let dec = flate2::read::GzDecoder::new(&bytes[..]);
+                let mut ar = tar::Archive::new(dec);
+                ar.unpack(&install_dir)
+                    .map_err(|e| InstallError::Extract {
+                        entry_id: entry_id_owned.clone(),
+                        reason: e.to_string(),
+                    })?;
+            }
+            ExtractKind::Zip => {
+                let reader = std::io::Cursor::new(&bytes[..]);
+                let mut zip = zip::ZipArchive::new(reader).map_err(|e| InstallError::Extract {
+                    entry_id: entry_id_owned.clone(),
                     reason: e.to_string(),
                 })?;
+                zip.extract(&install_dir)
+                    .map_err(|e| InstallError::Extract {
+                        entry_id: entry_id_owned.clone(),
+                        reason: e.to_string(),
+                    })?;
+            }
+            ExtractKind::GzipOnly => {
+                use std::io::{Read, Write};
+                let mut dec = flate2::read::GzDecoder::new(&bytes[..]);
+                let mut out = std::fs::File::create(&bin_for_blocking)?;
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = dec.read(&mut buf).map_err(InstallError::Io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    out.write_all(&buf[..n])?;
+                }
+                out.flush()?;
+            }
         }
-        ArchiveKind::GzipOnly => {
-            let bin_in_dir = install_dir.join(resolve_binary_path(binary_path));
-            let mut dec = flate2::read::GzDecoder::new(&bytes[..]);
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut dec, &mut buf).map_err(InstallError::Io)?;
-            let mut out = tokio::fs::File::create(&bin_in_dir).await?;
-            out.write_all(&buf).await?;
-            out.flush().await?;
-        }
-    }
+        Ok(())
+    })
+    .await
+    .map_err(|join_err| InstallError::Extract {
+        entry_id: entry_id.into(),
+        reason: format!("extractor task panicked: {join_err}"),
+    })??;
 
-    let bin_in_dir = install_dir.join(resolve_binary_path(binary_path));
     if !bin_in_dir.exists() {
         return Err(InstallError::Extract {
             entry_id: entry_id.into(),
