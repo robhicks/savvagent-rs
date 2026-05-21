@@ -118,7 +118,7 @@ use std::collections::BTreeMap;
 
 /// Final per-name index after applying precedence across all four
 /// search paths.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Index {
     /// Map from namespaced command name to its winning entry.
     pub commands: BTreeMap<String, Discovered>,
