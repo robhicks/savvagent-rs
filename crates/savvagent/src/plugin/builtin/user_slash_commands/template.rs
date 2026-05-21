@@ -1,11 +1,4 @@
 //! Single-pass templating expansion for command bodies.
-//!
-//! Task 7: `$ARGUMENTS` and `$N` substitution.
-//! Task 8 adds `@<path>` file inclusion.
-//! Task 9 adds `!<cmd>` shell substitution.
-//! Task 10 wires them together in `expand_all` with trust-level gating.
-
-#![allow(dead_code)] // consumed by Task 10 (expand_all) and Task 19 (handle_slash)
 
 /// Outcome of expanding a command body.
 #[derive(Debug, Clone, Default)]

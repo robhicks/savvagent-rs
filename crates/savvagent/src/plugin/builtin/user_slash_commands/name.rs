@@ -4,8 +4,6 @@
 //! command `/team:security:audit`. Each segment must match
 //! `[a-z0-9][-a-z0-9_]*`.
 
-#![allow(dead_code)] // consumed by Task 4 (discovery)
-
 use std::path::Path;
 
 /// Compute the namespaced command name (without the leading `/`) for a

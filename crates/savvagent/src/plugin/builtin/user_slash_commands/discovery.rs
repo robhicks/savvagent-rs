@@ -1,10 +1,5 @@
 //! Walks the four well-known command directories and produces a
 //! per-name, precedence-respecting index of discovered commands.
-//!
-//! Task 4: `walk_one` — walks a single directory.
-//! Task 5: `walk_all` — walks all four with precedence rules.
-
-#![allow(dead_code)] // consumed by Task 5 (walk_all) and Task 18 (plugin manifest)
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +20,7 @@ pub struct Discovered {
     /// Origin scope; drives precedence and the trust check.
     pub origin: Origin,
     /// Non-fatal warnings collected during parse.
+    #[allow(dead_code)] // populated during walk; surfaced to the log in a future pass
     pub warnings: Vec<String>,
 }
 

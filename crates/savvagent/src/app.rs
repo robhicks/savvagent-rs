@@ -517,7 +517,6 @@ pub struct App {
     /// modal resolves. Set by `internal:user-slash-commands` before
     /// emitting `Effect::OpenScreen("trust.modal")`; cleared by
     /// `apply_effects` after the re-dispatch (or on cancel).
-    #[allow(dead_code)] // consumed by Task 17
     pub pending_slash_after_trust: Option<(String, Vec<String>)>,
 
     /// In-memory trust state for the session, shared with the

@@ -104,7 +104,6 @@ impl Plugin for UserSlashCommandsPlugin {
                 requires_arg: false,
             });
         }
-        // Keep the trust.modal screen contribution from Task 16.
         contributions.screens = vec![ScreenSpec {
             id: "trust.modal".into(),
             layout: ScreenLayout::CenteredModal {

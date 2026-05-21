@@ -1,8 +1,6 @@
 //! First-run trust modal: `y` / `n` / `q` decision for project-local
 //! command directories that include shell substitution.
 
-#![allow(dead_code)] // consumed by Task 21 (handle_slash trust check)
-
 use std::path::PathBuf;
 
 use async_trait::async_trait;

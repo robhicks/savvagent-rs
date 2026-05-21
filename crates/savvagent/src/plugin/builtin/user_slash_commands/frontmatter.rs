@@ -9,7 +9,6 @@ use serde::Deserialize;
 /// Parsed frontmatter values; every field is optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)] // consumed by later tasks
 pub struct Frontmatter {
     /// One-line palette summary; defaults to the file's relative path.
     #[serde(default)]
@@ -27,7 +26,6 @@ pub struct Frontmatter {
 
 /// Outcome of splitting a command file into frontmatter + body.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // consumed by later tasks
 pub struct Parsed {
     /// Parsed (or default) frontmatter.
     pub frontmatter: Frontmatter,
@@ -43,7 +41,6 @@ pub struct Parsed {
 /// Returns `Err` only when frontmatter is present but malformed *or*
 /// contains unknown keys with no recovery path. Malformed-frontmatter
 /// files are reported and skipped at discovery time.
-#[allow(dead_code)] // consumed by later tasks
 pub fn parse(contents: &str) -> Result<Parsed, String> {
     let mut warnings = Vec::new();
     if !contents.starts_with("---\n") && !contents.starts_with("---\r\n") {

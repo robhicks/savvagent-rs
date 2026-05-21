@@ -1,8 +1,6 @@
 //! Loads and saves `~/.savvagent/trusted-projects.json` — the persistent
 //! store of "always trust this project's commands" decisions.
 
-#![allow(dead_code)] // consumed by Task 17 (apply SetTrustLevel) and Task 21 (trust wiring)
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +15,7 @@ pub enum TrustLevel {
     /// in-memory only; not persisted.
     SessionTextOnly,
     /// User cancelled the prompt — dispatch aborted.
+    #[allow(dead_code)] // pending refactor: replace with Option<TrustLevel>
     Cancelled,
 }
 
