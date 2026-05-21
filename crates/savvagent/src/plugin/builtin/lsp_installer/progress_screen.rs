@@ -210,7 +210,7 @@ impl Screen for LspProgressScreen {
 
 fn format_entry(entry: &EntryProgress) -> (&'static str, String) {
     match &entry.status {
-        EntryStatus::Queued => ("..", "queued".to_string()),
+        EntryStatus::Queued => ("⋯", "queued".to_string()),
         EntryStatus::Downloading {
             bytes_so_far,
             total,
@@ -223,15 +223,22 @@ fn format_entry(entry: &EntryProgress) -> (&'static str, String) {
                 ),
                 None => format!("downloading… {}", human_mb(*bytes_so_far)),
             };
-            ("..", label)
+            ("●", label)
         }
-        EntryStatus::Verifying => ("..", "verifying SHA256…".to_string()),
-        EntryStatus::Extracting => ("..", "extracting…".to_string()),
+        EntryStatus::Verifying => ("●", "verifying SHA256…".to_string()),
+        EntryStatus::Extracting => ("●", "extracting…".to_string()),
         EntryStatus::RunningNpm { last_line } => {
-            ("..", format!("running npm…   {}", truncate(last_line, 48)))
+            ("●", format!("running npm…   {}", truncate(last_line, 48)))
         }
-        EntryStatus::Installed { .. } => ("OK", "installed".to_string()),
-        EntryStatus::Failed { reason, .. } => ("!!", format!("failed: {reason}")),
+        EntryStatus::Installed { .. } => ("✓", "installed".to_string()),
+        EntryStatus::Failed {
+            reason: _,
+            fatal: true,
+        } => ("✗", "SHA256 mismatch — batch aborted".to_string()),
+        EntryStatus::Failed {
+            reason,
+            fatal: false,
+        } => ("✗", format!("failed: {reason}")),
     }
 }
 
@@ -694,5 +701,28 @@ mod tests {
         );
         // Make sure the screen does close.
         assert!(body.contains("CloseScreen"));
+    }
+
+    #[test]
+    fn render_shows_fatal_checksum_failure_label() {
+        let s = screen_with_state(ProgressState {
+            entries: vec![EntryProgress {
+                id: "ra".into(),
+                display_name: "ra".into(),
+                status: EntryStatus::Failed {
+                    reason: "SHA256 mismatch".into(),
+                    fatal: true,
+                },
+            }],
+            finished: false,
+            config_error: None,
+        });
+        let out = rendered(&s);
+        assert!(out.contains("SHA256 mismatch"));
+        assert!(out.contains("batch aborted"));
+        assert!(
+            !out.contains("failed:"),
+            "fatal arm must not use 'failed:' prefix, got:\n{out}"
+        );
     }
 }
