@@ -99,15 +99,17 @@ impl LspProgressScreen {
         // Drop the JoinHandle — the screen polls `state` for progress
         // instead of awaiting the task. The task completes when it
         // sets `state.finished = true`.
-        drop(crate::plugin::builtin::lsp_installer::progress::spawn_driver(
-            entries,
-            target,
-            lsp_bin_root,
-            lsp_toml,
-            Arc::clone(&state),
-            downloader,
-            npm,
-        ));
+        drop(
+            crate::plugin::builtin::lsp_installer::progress::spawn_driver(
+                entries,
+                target,
+                lsp_bin_root,
+                lsp_toml,
+                Arc::clone(&state),
+                downloader,
+                npm,
+            ),
+        );
 
         Self { state }
     }
@@ -209,7 +211,10 @@ impl Screen for LspProgressScreen {
 fn format_entry(entry: &EntryProgress) -> (&'static str, String) {
     match &entry.status {
         EntryStatus::Queued => ("..", "queued".to_string()),
-        EntryStatus::Downloading { bytes_so_far, total } => {
+        EntryStatus::Downloading {
+            bytes_so_far,
+            total,
+        } => {
             let label = match total {
                 Some(t) => format!(
                     "downloading… {} / {}",
@@ -222,10 +227,9 @@ fn format_entry(entry: &EntryProgress) -> (&'static str, String) {
         }
         EntryStatus::Verifying => ("..", "verifying SHA256…".to_string()),
         EntryStatus::Extracting => ("..", "extracting…".to_string()),
-        EntryStatus::RunningNpm { last_line } => (
-            "..",
-            format!("running npm…   {}", truncate(last_line, 48)),
-        ),
+        EntryStatus::RunningNpm { last_line } => {
+            ("..", format!("running npm…   {}", truncate(last_line, 48)))
+        }
         EntryStatus::Installed { .. } => ("OK", "installed".to_string()),
         EntryStatus::Failed { reason, .. } => ("!!", format!("failed: {reason}")),
     }
@@ -308,7 +312,8 @@ fn close_and_summary(state: &ProgressState) -> Vec<Effect> {
     }
     effs.push(Effect::PushNote {
         line: StyledLine::plain(
-            "[lsp-installer] done \u{2014} restart savvagent to pick up the new servers".to_string(),
+            "[lsp-installer] done \u{2014} restart savvagent to pick up the new servers"
+                .to_string(),
         ),
     });
     effs
@@ -351,7 +356,10 @@ mod tests {
         // With the empty-entries fix in `new`, `finished` is set
         // synchronously before the Arc is built. No tokio task to await.
         let g = s.state.lock().await;
-        assert!(g.finished, "unknown-only selection must finish synchronously");
+        assert!(
+            g.finished,
+            "unknown-only selection must finish synchronously"
+        );
         assert!(
             matches!(g.entries[0].status, EntryStatus::Failed { .. }),
             "unknown id must land as Failed, got {:?}",
@@ -561,7 +569,10 @@ mod tests {
             config_error: None,
         });
         let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
-        assert!(effs.is_empty(), "Enter pre-finish must not close, got {effs:?}");
+        assert!(
+            effs.is_empty(),
+            "Enter pre-finish must not close, got {effs:?}"
+        );
     }
 
     #[tokio::test]
@@ -594,7 +605,10 @@ mod tests {
             [Effect::Stack(children)] => {
                 assert!(matches!(children[0], Effect::CloseScreen));
                 assert!(
-                    children.iter().skip(1).all(|e| matches!(e, Effect::PushNote { .. })),
+                    children
+                        .iter()
+                        .skip(1)
+                        .all(|e| matches!(e, Effect::PushNote { .. })),
                     "every post-close effect must be a PushNote, got {children:?}"
                 );
                 let texts: String = children

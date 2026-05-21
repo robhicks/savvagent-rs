@@ -50,7 +50,9 @@ pub fn apply_notification(state: &mut ProgressState, ev: InstallProgress) {
     match ev {
         InstallProgress::Started { .. } => { /* no-op; see doc */ }
         InstallProgress::Downloading {
-            bytes_so_far, total, ..
+            bytes_so_far,
+            total,
+            ..
         } => {
             entry.status = EntryStatus::Downloading {
                 bytes_so_far,
@@ -145,10 +147,10 @@ pub enum EntryStatus {
 }
 
 use crate::plugin::builtin::lsp_installer::catalog::{CatalogEntry, InstallMethod, Target};
+use crate::plugin::builtin::lsp_installer::config_writer;
 use crate::plugin::builtin::lsp_installer::installer::{
     self, Downloader, InstallError, InstallOutcome, NpmRunner,
 };
-use crate::plugin::builtin::lsp_installer::config_writer;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -193,14 +195,8 @@ pub async fn run_installs(
 
         let result = match entry.method {
             InstallMethod::BinaryDownload { .. } => {
-                installer::install_binary_entry(
-                    entry,
-                    target,
-                    &lsp_bin_root,
-                    downloader,
-                    notify,
-                )
-                .await
+                installer::install_binary_entry(entry, target, &lsp_bin_root, downloader, notify)
+                    .await
             }
             InstallMethod::NpmGlobal { .. } => {
                 installer::install_npm_entry(entry, npm, notify).await
@@ -598,9 +594,7 @@ mod tests {
     }
 
     use crate::plugin::builtin::lsp_installer::catalog::Target;
-    use crate::plugin::builtin::lsp_installer::installer::{
-        Downloader, InstallError, NpmRunner,
-    };
+    use crate::plugin::builtin::lsp_installer::installer::{Downloader, InstallError, NpmRunner};
     use std::sync::Arc;
     use tokio::sync::Mutex as TokioMutex;
 
@@ -633,7 +627,12 @@ mod tests {
     /// Build a minimal catalog entry that points at a gzipped fixture
     /// URL whose sha matches the supplied bytes. Returns the leaked
     /// 'static `CatalogEntry` (acceptable for tests) and the bytes.
-    fn fake_binary_entry(id: &'static str) -> (&'static crate::plugin::builtin::lsp_installer::catalog::CatalogEntry, bytes::Bytes) {
+    fn fake_binary_entry(
+        id: &'static str,
+    ) -> (
+        &'static crate::plugin::builtin::lsp_installer::catalog::CatalogEntry,
+        bytes::Bytes,
+    ) {
         use crate::plugin::builtin::lsp_installer::catalog::{
             CatalogEntry, CommandTemplate, InstallMethod, LspEntryTemplate,
         };
@@ -646,9 +645,7 @@ mod tests {
         enc.write_all(plain).unwrap();
         let archive = enc.finish().unwrap();
         let sha = hex::encode(Sha256::digest(&archive));
-        let url: &'static str = Box::leak(
-            format!("https://example.test/{id}.gz").into_boxed_str(),
-        );
+        let url: &'static str = Box::leak(format!("https://example.test/{id}.gz").into_boxed_str());
         let sha_static: &'static str = Box::leak(sha.into_boxed_str());
         let urls: &'static [(Target, &'static str, &'static str)] =
             Box::leak(Box::new([(Target::LinuxX86_64Gnu, url, sha_static)]));
@@ -681,8 +678,16 @@ mod tests {
         let npm = NoopNpm;
         let state = Arc::new(TokioMutex::new(ProgressState {
             entries: vec![
-                EntryProgress { id: "fake-a".into(), display_name: "fake-a".into(), status: EntryStatus::Queued },
-                EntryProgress { id: "fake-b".into(), display_name: "fake-b".into(), status: EntryStatus::Queued },
+                EntryProgress {
+                    id: "fake-a".into(),
+                    display_name: "fake-a".into(),
+                    status: EntryStatus::Queued,
+                },
+                EntryProgress {
+                    id: "fake-b".into(),
+                    display_name: "fake-b".into(),
+                    status: EntryStatus::Queued,
+                },
             ],
             finished: false,
             config_error: None,
@@ -721,8 +726,16 @@ mod tests {
         let npm = NoopNpm;
         let state = Arc::new(TokioMutex::new(ProgressState {
             entries: vec![
-                EntryProgress { id: "fake-a".into(), display_name: "fake-a".into(), status: EntryStatus::Queued },
-                EntryProgress { id: "fake-b".into(), display_name: "fake-b".into(), status: EntryStatus::Queued },
+                EntryProgress {
+                    id: "fake-a".into(),
+                    display_name: "fake-a".into(),
+                    status: EntryStatus::Queued,
+                },
+                EntryProgress {
+                    id: "fake-b".into(),
+                    display_name: "fake-b".into(),
+                    status: EntryStatus::Queued,
+                },
             ],
             finished: false,
             config_error: None,
@@ -808,13 +821,13 @@ mod tests {
     ///   - `lsp.toml` was written and parses.
     #[tokio::test]
     async fn smoke_spawn_driver_end_to_end() {
-        use sha2::{Digest, Sha256};
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        use tokio::net::TcpListener;
         use crate::plugin::builtin::lsp_installer::catalog::{
             CatalogEntry, CommandTemplate, InstallMethod, LspEntryTemplate,
         };
         use crate::plugin::builtin::lsp_installer::installer::ReqwestDownloader;
+        use sha2::{Digest, Sha256};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
 
         let plain = b"#!/bin/sh\necho hi\n";
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -850,8 +863,11 @@ mod tests {
 
         let url_static: &'static str = Box::leak(url.into_boxed_str());
         let sha_static: &'static str = Box::leak(sha.into_boxed_str());
-        let urls: &'static [(Target, &'static str, &'static str)] =
-            Box::leak(Box::new([(Target::current().expect("host target"), url_static, sha_static)]));
+        let urls: &'static [(Target, &'static str, &'static str)] = Box::leak(Box::new([(
+            Target::current().expect("host target"),
+            url_static,
+            sha_static,
+        )]));
 
         let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
             id: "fake-smoke",
@@ -914,7 +930,9 @@ mod tests {
         // entry_a fails (download error), entry_b succeeds. We achieve
         // that by using a downloader that returns Err for any url
         // containing "fake-a" and the good archive for "fake-b".
-        struct Mixed { good: bytes::Bytes }
+        struct Mixed {
+            good: bytes::Bytes,
+        }
         #[async_trait::async_trait]
         impl Downloader for Mixed {
             async fn fetch(&self, url: &str) -> Result<bytes::Bytes, InstallError> {
@@ -929,8 +947,16 @@ mod tests {
         let npm = NoopNpm;
         let state = Arc::new(TokioMutex::new(ProgressState {
             entries: vec![
-                EntryProgress { id: "fake-a".into(), display_name: "fake-a".into(), status: EntryStatus::Queued },
-                EntryProgress { id: "fake-b".into(), display_name: "fake-b".into(), status: EntryStatus::Queued },
+                EntryProgress {
+                    id: "fake-a".into(),
+                    display_name: "fake-a".into(),
+                    status: EntryStatus::Queued,
+                },
+                EntryProgress {
+                    id: "fake-b".into(),
+                    display_name: "fake-b".into(),
+                    status: EntryStatus::Queued,
+                },
             ],
             finished: false,
             config_error: None,

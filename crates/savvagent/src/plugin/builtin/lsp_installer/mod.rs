@@ -378,9 +378,7 @@ mod tests {
         let screen = p
             .create_screen(
                 "lsp_installer.progress",
-                ScreenArgs::LspInstallProgress {
-                    entry_ids: vec![],
-                },
+                ScreenArgs::LspInstallProgress { entry_ids: vec![] },
             )
             .expect("create_screen must accept the progress id");
         assert_eq!(screen.id(), "lsp_installer.progress");
