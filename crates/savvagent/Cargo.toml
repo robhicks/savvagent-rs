@@ -79,6 +79,7 @@ reqwest.workspace = true
 self_update.workspace = true
 semver.workspace = true
 serde_yaml_ng.workspace = true
+ignore.workspace = true
 
 [dev-dependencies]
 rmcp.workspace = true

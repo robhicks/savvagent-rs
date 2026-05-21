@@ -3,6 +3,7 @@
 //!
 //! See `docs/superpowers/specs/2026-05-21-user-slash-commands-design.md`.
 
+mod discovery;
 mod frontmatter;
 mod name;
 
