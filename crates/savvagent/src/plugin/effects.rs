@@ -282,12 +282,26 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             decision,
         } => {
             use crate::plugin::builtin::user_slash_commands::trust::{self, TrustLevel};
+            // Collect extra effects to dispatch after the main arm logic.
+            // Using a local Vec avoids restructuring the arm; the whole
+            // batch is dispatched at depth + 1 at the bottom.
+            let mut extra_effects: Vec<Effect> = Vec::new();
+
             let level = match decision.as_str() {
                 "always" => Some(TrustLevel::Always),
                 "session-text-only" => Some(TrustLevel::SessionTextOnly),
                 "cancelled" => None,
                 other => {
                     tracing::warn!("unknown trust decision: {other}");
+                    // I-2: if there was a pending command to drop, tell the user.
+                    if let Some((name, _)) = app.pending_slash_after_trust.take() {
+                        extra_effects.push(Effect::PushNote {
+                            line: savvagent_plugin::StyledLine::plain(format!(
+                                "[error] dropped pending /{name}: unrecognized trust decision \
+                                 '{other}'"
+                            )),
+                        });
+                    }
                     None
                 }
             };
@@ -300,6 +314,13 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                             if let Some(home) = dirs::home_dir() {
                                 if let Err(e) = trust::save(&home, &map) {
                                     tracing::warn!("trust file save: {e}");
+                                    // I-1: user-visible note; in-memory write is already done.
+                                    extra_effects.push(Effect::PushNote {
+                                        line: savvagent_plugin::StyledLine::plain(format!(
+                                            "[warn] Trusted for this session only — could not \
+                                             write to disk: {e}"
+                                        )),
+                                    });
                                 }
                             }
                         }
@@ -307,27 +328,56 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                     // Re-dispatch pending slash command, if any. Runs at
                     // depth + 1 so the shared MAX_DISPATCH_DEPTH cap is
                     // respected and we don't spin unboundedly.
+                    // RunSlash at depth+1 == MAX_DISPATCH_DEPTH would be
+                    // rejected by the RunSlash depth guard, so we detect
+                    // that case here and emit a user-visible note instead
+                    // of silently dropping the command (I-3).
                     if let Some((name, args)) = app.pending_slash_after_trust.take() {
-                        if depth < MAX_DISPATCH_DEPTH {
-                            Box::pin(apply_effects_with_depth(
-                                app,
-                                vec![Effect::RunSlash { name, args }],
-                                depth + 1,
-                            ))
-                            .await?;
+                        if depth + 1 < MAX_DISPATCH_DEPTH {
+                            extra_effects.push(Effect::RunSlash { name, args });
                         } else {
                             tracing::warn!(
                                 "SetTrustLevel: depth limit reached; cannot re-dispatch pending \
                                  slash command"
                             );
+                            // I-3: user-visible note about the dropped command.
+                            extra_effects.push(Effect::PushNote {
+                                line: savvagent_plugin::StyledLine::plain(format!(
+                                    "[error] dropped pending /{name}: trust resume hit dispatch \
+                                     depth limit"
+                                )),
+                            });
                         }
                     }
                 }
                 None => {
-                    // Cancelled or unknown — drop the pending entry and
-                    // remove the project from the in-memory map.
+                    // Cancelled — drop the pending entry and remove the
+                    // project from the in-memory map.
+                    // Note: unknown-decision already called take() above and
+                    // populated extra_effects, so pending_slash_after_trust is
+                    // already None in that path; the assignment is harmless.
                     app.pending_slash_after_trust = None;
                     app.trust_levels.write().await.remove(&project_root);
+                }
+            }
+            // Dispatch any collected effects (PushNote, RunSlash) at depth + 1
+            // so the shared MAX_DISPATCH_DEPTH cap is respected. PushNote never
+            // recurses, so the only risk of hitting the cap here is RunSlash —
+            // and that case is guarded above with the `depth < MAX_DISPATCH_DEPTH`
+            // check. We deliberately do NOT propagate a depth-limit error from
+            // this dispatch: the in-memory trust update is already committed and
+            // the user has already been notified via a PushNote.
+            if !extra_effects.is_empty() {
+                if let Err(e) = Box::pin(apply_effects_with_depth(
+                    app,
+                    extra_effects,
+                    depth + 1,
+                ))
+                .await
+                {
+                    tracing::warn!(
+                        "SetTrustLevel: extra-effects dispatch failed (depth {depth}): {e}"
+                    );
                 }
             }
         }
@@ -2367,6 +2417,203 @@ mod tests {
             app.pending_slash_after_trust,
             Some(("review".into(), vec!["foo".into()])),
             "StashPendingSlash must populate pending_slash_after_trust"
+        );
+    }
+
+    /// I-1: when `trust::save` fails (e.g. the target path is a directory),
+    /// the in-memory trust map must still be updated (session-scoped trust is
+    /// useful) and a user-visible `PushNote` must be emitted explaining that
+    /// persistence failed. Previously only a `tracing::warn` was emitted and
+    /// the user saw nothing.
+    ///
+    /// We make `~/.savvagent/trusted-projects.json` unwritable by pre-creating
+    /// a *directory* at that path. The `std::fs::write` call inside
+    /// `trust::save` will then fail with `IsDirectory` (or equivalent).
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_always_save_failure_emits_warn_note() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+
+        // Pre-create ~/.savvagent/trusted-projects.json as a *directory* so
+        // that the subsequent fs::write inside trust::save will fail.
+        let home = dirs::home_dir().expect("HomeGuard must set HOME");
+        let savvagent_dir = home.join(".savvagent");
+        std::fs::create_dir_all(&savvagent_dir).expect("create .savvagent dir");
+        let file_path = savvagent_dir.join("trusted-projects.json");
+        std::fs::create_dir_all(&file_path)
+            .expect("create trusted-projects.json as directory to block writes");
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/fail"),
+                decision: "always".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed even when save fails");
+
+        // In-memory map updated (session trust still useful).
+        assert!(
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/fail")),
+            "in-memory trust map must still be updated even when disk save fails"
+        );
+
+        // A user-visible note must have been pushed.
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => {
+                text.contains("session only") || text.contains("could not write")
+            }
+            _ => false,
+        });
+        assert!(
+            found,
+            "expected a warn note about disk save failure; entries: {:?}",
+            app.entries
+        );
+    }
+
+    /// I-2: when an unrecognised trust decision string arrives AND there is a
+    /// pending slash command, the command was previously silently dropped. Now
+    /// a `PushNote` must be emitted naming the dropped command and the bad
+    /// decision string. When there is NO pending command, no note must be
+    /// emitted (to avoid spamming the user).
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_unknown_decision_with_pending_emits_error_note() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("x".into(), vec![]));
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/z"),
+                decision: "bogus".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed on unknown decision");
+
+        // Pending must be consumed.
+        assert!(
+            app.pending_slash_after_trust.is_none(),
+            "pending must be cleared even on unknown decision"
+        );
+
+        // A user-visible error note mentioning the dropped command.
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => text.contains("bogus") || text.contains("/x"),
+            _ => false,
+        });
+        assert!(
+            found,
+            "expected an error note about the dropped pending command; entries: {:?}",
+            app.entries
+        );
+    }
+
+    /// I-2 (no-pending): when the unknown decision has no pending command,
+    /// no note must be pushed (nothing was dropped).
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_unknown_decision_without_pending_no_note() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        // No pending command set.
+
+        let entries_before = app.entries.len();
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/z"),
+                decision: "bogus".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed on unknown decision with no pending");
+
+        assert_eq!(
+            app.entries.len(),
+            entries_before,
+            "no note should be pushed when there is no pending command to drop"
+        );
+    }
+
+    /// I-3: when `depth >= MAX_DISPATCH_DEPTH` at the point of the re-dispatch
+    /// after a trust decision, the pending slash command must NOT silently
+    /// disappear. A user-visible `PushNote` must be emitted naming the dropped
+    /// command. Previously only a `tracing::warn` was emitted.
+    ///
+    /// We call `apply_effects_with_depth` at `MAX_DISPATCH_DEPTH - 1` with a
+    /// pending entry. Inside `SetTrustLevel` the re-dispatch would run at
+    /// `depth + 1 == MAX_DISPATCH_DEPTH`, which exceeds the guard
+    /// (`depth < MAX_DISPATCH_DEPTH`), so the pending command is dropped.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_depth_limit_drops_pending_with_error_note() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("blocked-cmd".into(), vec![]));
+
+        // Install a minimal plugin runtime so run_slash doesn't immediately
+        // return Err("plugin runtime not installed"). The slash "blocked-cmd"
+        // is not registered, but that's fine — at MAX_DISPATCH_DEPTH - 1 the
+        // re-dispatch is already suppressed before run_slash is attempted.
+        let set = BuiltinSet {
+            plugins: vec![],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        // Drive at MAX_DISPATCH_DEPTH - 1. The SetTrustLevel arm attempts
+        // re-dispatch at depth + 1 == MAX_DISPATCH_DEPTH, which fails the
+        // `depth < MAX_DISPATCH_DEPTH` guard, dropping the pending command.
+        Box::pin(apply_effects_with_depth(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/deep"),
+                decision: "always".into(),
+            }],
+            MAX_DISPATCH_DEPTH - 1,
+        ))
+        .await
+        .expect("apply_effects must not propagate a depth-limit as an error here");
+
+        // In-memory trust must still be set.
+        assert!(
+            app.trust_levels
+                .read()
+                .await
+                .contains_key(&std::path::PathBuf::from("/proj/deep")),
+            "in-memory trust must still be updated at the depth limit"
+        );
+
+        // A user-visible note must have been pushed about the dropped command.
+        let found = app.entries.iter().any(|e| match e {
+            crate::app::Entry::Note(text) => {
+                text.contains("depth limit") || text.contains("blocked-cmd")
+            }
+            _ => false,
+        });
+        assert!(
+            found,
+            "expected an error note about depth-limit dropping the pending command; entries: {:?}",
+            app.entries
         );
     }
 
