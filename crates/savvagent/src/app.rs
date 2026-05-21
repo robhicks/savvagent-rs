@@ -515,7 +515,7 @@ pub struct App {
     pub next_turn_model_override: Option<String>,
     /// `(command_name, args)` that should re-dispatch after the trust
     /// modal resolves. Set by `internal:user-slash-commands` before
-    /// emitting `Effect::OpenScreen("trust_modal")`; cleared by
+    /// emitting `Effect::OpenScreen("trust.modal")`; cleared by
     /// `apply_effects` after the re-dispatch (or on cancel).
     #[allow(dead_code)] // consumed by Task 17
     pub pending_slash_after_trust: Option<(String, Vec<String>)>,

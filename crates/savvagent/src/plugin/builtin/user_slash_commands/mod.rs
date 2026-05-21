@@ -12,7 +12,8 @@ mod trust_modal;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
-    Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, SlashSpec,
+    Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, ScreenArgs,
+    ScreenLayout, ScreenSpec, SlashSpec,
 };
 
 /// Built-in plugin that exposes user-authored slash commands.
@@ -41,6 +42,14 @@ impl Plugin for UserSlashCommandsPlugin {
             args_hint: None,
             requires_arg: false,
         }];
+        contributions.screens = vec![ScreenSpec {
+            id: "trust.modal".into(),
+            layout: ScreenLayout::CenteredModal {
+                width_pct: 60,
+                height_pct: 30,
+                title: Some("Trust project commands?".into()),
+            },
+        }];
         Manifest {
             id: PluginId::new("internal:user-slash-commands").expect("valid built-in id"),
             name: "User slash commands".into(),
@@ -49,6 +58,17 @@ impl Plugin for UserSlashCommandsPlugin {
                 .into(),
             kind: PluginKind::Core,
             contributions,
+        }
+    }
+
+    fn create_screen(
+        &self,
+        id: &str,
+        args: ScreenArgs,
+    ) -> Result<Box<dyn savvagent_plugin::Screen>, PluginError> {
+        match id {
+            "trust.modal" => Ok(Box::new(trust_modal::TrustModal::from_args(args)?)),
+            _ => Err(PluginError::ScreenNotFound(id.into())),
         }
     }
 
@@ -78,5 +98,17 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
         assert!(names.contains(&"reload-commands"));
+    }
+
+    #[test]
+    fn manifest_registers_trust_modal_screen() {
+        let p = UserSlashCommandsPlugin::new();
+        let m = p.manifest();
+        assert_eq!(
+            m.contributions.screens.len(),
+            1,
+            "expected exactly one screen contribution"
+        );
+        assert_eq!(m.contributions.screens[0].id, "trust.modal");
     }
 }

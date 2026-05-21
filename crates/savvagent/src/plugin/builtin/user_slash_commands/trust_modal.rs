@@ -189,6 +189,48 @@ mod tests {
         assert!(effs.is_empty(), "expected no effects, got {effs:?}");
     }
 
+    #[tokio::test]
+    async fn y_uppercase_returns_always() {
+        let mut m = modal();
+        let effs = m.on_key(key('Y')).await.unwrap();
+        assert_eq!(effs.len(), 2);
+        match &effs[0] {
+            Effect::SetTrustLevel { decision, .. } => {
+                assert_eq!(decision, "always");
+            }
+            _ => panic!("expected SetTrustLevel, got {:?}", effs[0]),
+        }
+        assert!(matches!(effs[1], Effect::CloseScreen));
+    }
+
+    #[tokio::test]
+    async fn n_uppercase_returns_session_text_only() {
+        let mut m = modal();
+        let effs = m.on_key(key('N')).await.unwrap();
+        assert_eq!(effs.len(), 2);
+        match &effs[0] {
+            Effect::SetTrustLevel { decision, .. } => {
+                assert_eq!(decision, "session-text-only");
+            }
+            _ => panic!("expected SetTrustLevel, got {:?}", effs[0]),
+        }
+        assert!(matches!(effs[1], Effect::CloseScreen));
+    }
+
+    #[tokio::test]
+    async fn q_uppercase_returns_cancelled() {
+        let mut m = modal();
+        let effs = m.on_key(key('Q')).await.unwrap();
+        assert_eq!(effs.len(), 2);
+        match &effs[0] {
+            Effect::SetTrustLevel { decision, .. } => {
+                assert_eq!(decision, "cancelled");
+            }
+            _ => panic!("expected SetTrustLevel, got {:?}", effs[0]),
+        }
+        assert!(matches!(effs[1], Effect::CloseScreen));
+    }
+
     #[test]
     fn from_args_accepts_trust_modal_variant() {
         let args = ScreenArgs::TrustModal {
