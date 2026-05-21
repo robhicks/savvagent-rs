@@ -723,4 +723,110 @@ mod tests {
         assert!(msg.contains("abc"));
         assert!(msg.contains("def"));
     }
+
+    /// End-to-end smoke test: serve a gzipped fixture over loopback,
+    /// run `install_binary_entry` against the production
+    /// [`ReqwestDownloader`], assert the binary was extracted with the
+    /// executable bit set. Verifies the wiring between download → SHA
+    /// verify → gzip extract that the stubbed-Downloader tests can't
+    /// exercise.
+    #[tokio::test]
+    async fn smoke_local_http_install() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let payload = b"#!/bin/sh\necho hello-from-fakelsp\n";
+        let archive = gzipped(payload);
+        let sha = hex::encode(Sha256::digest(&archive));
+        let archive = Arc::new(archive);
+
+        // Single-shot HTTP/1.1 server. Listens on 127.0.0.1 with an
+        // OS-assigned port, serves the gzipped archive, then exits.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}/fakelsp.gz");
+
+        let archive_for_server = Arc::clone(&archive);
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let (read, mut write) = sock.split();
+            let mut reader = BufReader::new(read);
+            // Read + discard the request headers until an empty line.
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                let n = reader.read_line(&mut buf).await.unwrap_or(0);
+                if n == 0 || buf == "\r\n" || buf == "\n" {
+                    break;
+                }
+            }
+            let body = &*archive_for_server;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                body.len()
+            );
+            write.write_all(header.as_bytes()).await.unwrap();
+            write.write_all(body).await.unwrap();
+            write.flush().await.unwrap();
+        });
+
+        // Leak the URL + SHA + url-array into 'static so they can sit
+        // in CatalogEntry's static-only fields. Acceptable in a test.
+        let url_static: &'static str = Box::leak(url.into_boxed_str());
+        let sha_static: &'static str = Box::leak(sha.into_boxed_str());
+        let urls: &'static [(Target, &'static str, &'static str)] = Box::leak(Box::new([(
+            Target::current().expect("supported host target"),
+            url_static,
+            sha_static,
+        )]));
+
+        let entry = CatalogEntry {
+            id: "fakelsp-smoke",
+            display_name: "fakelsp-smoke",
+            language_label: "fake",
+            version: "0.0.0",
+            category: Category::Binary,
+            method: InstallMethod::BinaryDownload {
+                urls,
+                archive: ArchiveKind::GzipOnly,
+                binary_path: "fakelsp-smoke",
+            },
+            lsp_entry: LspEntryTemplate {
+                id: "fake",
+                extensions: &["fake"],
+                root_markers: &["fake.toml"],
+                command: "{{BIN}}",
+                args: &[],
+            },
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dl = ReqwestDownloader::new().expect("reqwest builds");
+        let outcome = install_binary_entry(
+            &entry,
+            Target::current().unwrap(),
+            tmp.path(),
+            &dl,
+            |_| {},
+        )
+        .await
+        .expect("install must succeed end-to-end");
+
+        assert!(outcome.installed_at.exists());
+        let written = std::fs::read(&outcome.installed_at).unwrap();
+        assert_eq!(written, payload, "binary contents must match the fixture");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&outcome.installed_at)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "binary must be executable");
+        }
+
+        let _ = server.await;
+    }
 }
