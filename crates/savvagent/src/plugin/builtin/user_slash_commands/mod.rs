@@ -3,6 +3,8 @@
 //!
 //! See `docs/superpowers/specs/2026-05-21-user-slash-commands-design.md`.
 
+mod frontmatter;
+
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, SlashSpec,
