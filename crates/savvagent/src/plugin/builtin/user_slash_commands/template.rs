@@ -374,7 +374,10 @@ mod tests {
     #[tokio::test]
     async fn shell_substitution_spawn_failure_is_error() {
         let result = expand_shell("!__no_such_binary_xyz_abc__").await;
-        assert!(result.is_err(), "expected Err from missing binary, got: {result:?}");
+        assert!(
+            result.is_err(),
+            "expected Err from missing binary, got: {result:?}"
+        );
         let err = result.unwrap_err();
         assert!(
             !err.is_empty(),
@@ -419,9 +422,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_returns_err() {
         let body = "anything";
-        let err = expand_all(body, &[], None)
-            .await
-            .unwrap_err();
+        let err = expand_all(body, &[], None).await.unwrap_err();
         assert!(err.contains("cancelled") || err.contains("aborted"));
     }
 }

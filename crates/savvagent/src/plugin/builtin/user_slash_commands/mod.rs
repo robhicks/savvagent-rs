@@ -180,15 +180,16 @@ impl Plugin for UserSlashCommandsPlugin {
         // trust decision for this project root (the map contains an entry).
         // Without an explicit decision the project is implicitly untrusted
         // and the modal must be shown so the user can decide.
-        let (trust, has_explicit_trust): (Option<TrustLevel>, bool) = if needs_shell && project_local {
-            let map = self.trust_levels.read().await;
-            match map.get(&self.project_root).copied() {
-                Some(t) => (Some(t), true),
-                None => (Some(TrustLevel::SessionTextOnly), false),
-            }
-        } else {
-            (Some(TrustLevel::Always), true)
-        };
+        let (trust, has_explicit_trust): (Option<TrustLevel>, bool) =
+            if needs_shell && project_local {
+                let map = self.trust_levels.read().await;
+                match map.get(&self.project_root).copied() {
+                    Some(t) => (Some(t), true),
+                    None => (Some(TrustLevel::SessionTextOnly), false),
+                }
+            } else {
+                (Some(TrustLevel::Always), true)
+            };
         // Open the trust modal only when the project has NO explicit trust
         // decision yet.  If the user already chose "session-text-only",
         // let the call fall through to `expand_all` which will return an
@@ -597,8 +598,14 @@ mod tests {
         // reload-commands also must not panic.
         assert_eq!(Arc::strong_count(&plugin), 1);
         let mut plugin = Arc::try_unwrap(plugin).map_err(|_| "still shared").unwrap();
-        let effs = plugin.handle_slash("reload-commands", vec![]).await.unwrap();
-        assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::ReindexPlugin { .. })));
+        let effs = plugin
+            .handle_slash("reload-commands", vec![])
+            .await
+            .unwrap();
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, savvagent_plugin::Effect::ReindexPlugin { .. }))
+        );
     }
 
     /// C-3: user-scoped commands (home dir) with shell tokens must bypass the
@@ -633,7 +640,9 @@ mod tests {
         );
         // No stash.
         assert!(
-            !effs.iter().any(|e| matches!(e, Effect::StashPendingSlash { .. })),
+            !effs
+                .iter()
+                .any(|e| matches!(e, Effect::StashPendingSlash { .. })),
             "StashPendingSlash must NOT fire for user-scoped command, got: {effs:?}"
         );
     }
@@ -665,8 +674,14 @@ mod tests {
             .iter()
             .map(|s| s.name.as_str())
             .collect();
-        assert!(names.contains(&"x"), "precondition: x present before reload");
-        assert!(names.contains(&"z"), "precondition: z present before reload");
+        assert!(
+            names.contains(&"x"),
+            "precondition: x present before reload"
+        );
+        assert!(
+            names.contains(&"z"),
+            "precondition: z present before reload"
+        );
 
         // Mutate disk state: change x, add y, remove z.
         fs::write(dir.join("x.md"), "updated").unwrap();

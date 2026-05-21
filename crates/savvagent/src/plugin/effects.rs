@@ -368,12 +368,8 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             // this dispatch: the in-memory trust update is already committed and
             // the user has already been notified via a PushNote.
             if !extra_effects.is_empty() {
-                if let Err(e) = Box::pin(apply_effects_with_depth(
-                    app,
-                    extra_effects,
-                    depth + 1,
-                ))
-                .await
+                if let Err(e) =
+                    Box::pin(apply_effects_with_depth(app, extra_effects, depth + 1)).await
                 {
                     tracing::warn!(
                         "SetTrustLevel: extra-effects dispatch failed (depth {depth}): {e}"
@@ -2653,11 +2649,7 @@ mod tests {
 
             // Construct App::new under the HOME redirect. The production
             // path calls trust::load(dirs::home_dir()) during new().
-            let app = App::new(
-                "test-model".into(),
-                PathBuf::from("/tmp"),
-                "en".into(),
-            );
+            let app = App::new("test-model".into(), PathBuf::from("/tmp"), "en".into());
             let key = PathBuf::from("/some/project/path");
             (app, key)
         }; // HOME_LOCK released here
