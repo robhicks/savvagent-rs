@@ -55,6 +55,7 @@ pub async fn dispatch(
     let session = pool
         .get_or_spawn(lang, workspace_root.clone(), on_diagnostics)
         .await?;
+    session.ensure_did_open(&file).await?;
 
     let uri: Uri = crate::session::path_to_uri(&file)?;
     let params = GotoDefinitionParams {
@@ -89,8 +90,17 @@ pub async fn dispatch(
 
 /// Resolve `relative` against `root_env`, rejecting anything that
 /// escapes via `..`. Mirrors the discipline `tool-fs` uses.
+///
+/// The traversal check is component-based — a literal substring search
+/// for `..` would (incorrectly) reject legitimate filenames like
+/// `foo..bar.rs`. Only `..` standing alone as a path component (i.e.
+/// `Path::Component::ParentDir`) is treated as an escape attempt.
 pub(crate) fn resolve_inside_root(relative: &str, root_env: &PathBuf) -> Result<PathBuf> {
-    if relative.contains("..") {
+    let candidate = std::path::Path::new(relative);
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(anyhow!("path traversal not allowed in `{relative}`"));
     }
     let joined = root_env.join(relative);
@@ -130,5 +140,18 @@ mod tests {
         let canonical_root = root.path().canonicalize().unwrap();
         let resolved = resolve_inside_root("src/lib.rs", &canonical_root).unwrap();
         assert!(resolved.starts_with(&canonical_root));
+    }
+
+    #[test]
+    fn resolve_inside_root_accepts_dots_in_filename() {
+        // Regression: the previous substring-based `..` check would
+        // (incorrectly) reject `foo..bar.rs` as a traversal attempt.
+        // Component-based matching only rejects `..` standing alone.
+        let root = tempdir().unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let file = canonical_root.join("foo..bar.rs");
+        fs::write(&file, "").unwrap();
+        let resolved = resolve_inside_root("foo..bar.rs", &canonical_root).unwrap();
+        assert!(resolved.ends_with("foo..bar.rs"));
     }
 }

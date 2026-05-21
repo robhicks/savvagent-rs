@@ -50,7 +50,10 @@ use tokio::sync::OnceCell;
 
 /// Entrypoint used by the `savvagent-tool-lsp` shim binary. Reads the
 /// configured `lsp.toml` files, starts an rmcp stdio server, and serves
-/// until stdin closes.
+/// until stdin closes. While the server runs we spin a background task
+/// that calls [`LspPool::evict_idle`] every `IDLE_TIMEOUT / 2`; on EOF
+/// we drive [`LspPool::shutdown_all`] so every active LSP child is
+/// shut down gracefully instead of being orphaned.
 pub async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -61,8 +64,28 @@ pub async fn run() -> anyhow::Result<()> {
         .init();
 
     let server = LspServer::new()?;
+    // Capture pool handle BEFORE `server.serve(...)` consumes `server`.
+    let pool_for_eviction = Arc::clone(&server.pool);
+    let pool_for_shutdown = Arc::clone(&server.pool);
     let service = server.serve(stdio()).await?;
-    service.waiting().await?;
+
+    // Fire-and-forget eviction loop. The handle is dropped at function
+    // return, which cancels the task; that's the intended shutdown.
+    let _eviction_task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(pool::IDLE_TIMEOUT / 2);
+        // First tick fires immediately; skip it so we don't churn the
+        // pool right after construction (sessions are spawned lazily,
+        // so it would be a no-op, but the log noise is wasteful).
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            pool_for_eviction.evict_idle().await;
+        }
+    });
+
+    let result = service.waiting().await;
+    pool_for_shutdown.shutdown_all().await;
+    result?;
     Ok(())
 }
 

@@ -87,11 +87,12 @@ pub async fn dispatch(
             Some(lsp_types::WorkspaceSymbolResponse::Nested(_)) => Vec::new(),
         };
         for s in flat {
+            // Route through `convert::relativize_against_root` so the
+            // Windows UNC long-path normalization (and forward-slash
+            // rendering) applies here too. The URI-string fallback
+            // stays for the rare case where `uri_to_path` itself fails.
             let path = match crate::session::uri_to_path(&s.location.uri) {
-                Ok(p) => match p.strip_prefix(root_env) {
-                    Ok(rel) => rel.display().to_string(),
-                    Err(_) => p.display().to_string(),
-                },
+                Ok(p) => crate::convert::relativize_against_root(&p, root_env),
                 Err(_) => s.location.uri.to_string(),
             };
             out.push(WorkspaceSymbolOut {

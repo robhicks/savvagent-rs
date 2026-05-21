@@ -77,7 +77,7 @@ pub fn location_to_out(loc: Location, workspace_root: &Path) -> Result<LocationO
 /// form `url::Url::to_file_path` yields). We strip the `\\?\` (and
 /// `\\?\UNC\` server prefix) before comparing so both sides share the
 /// same shape. On non-Windows, `strip_unc_prefix` is a no-op.
-fn relativize_against_root(path: &Path, workspace_root: &Path) -> String {
+pub(crate) fn relativize_against_root(path: &Path, workspace_root: &Path) -> String {
     let normalized_root = strip_unc_prefix(workspace_root);
     let normalized_path = strip_unc_prefix(path);
     match normalized_path.strip_prefix(&normalized_root) {

@@ -101,6 +101,7 @@ pub async fn dispatch(
     let session = pool
         .get_or_spawn(lang, workspace_root.clone(), on_diagnostics)
         .await?;
+    session.ensure_did_open(&file).await?;
 
     let uri = crate::session::path_to_uri(&file)?;
     let only = input.only.map(|v| {

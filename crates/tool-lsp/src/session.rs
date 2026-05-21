@@ -11,7 +11,7 @@ use lsp_types::{
     WorkspaceFolder, notification::Notification as LspNotification, request::Request as LspRequest,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -34,6 +34,12 @@ pub struct LspSession {
     /// upstream.
     #[allow(dead_code)]
     on_diagnostics: Arc<dyn Fn(&str) + Send + Sync>,
+    /// URIs we've already sent `textDocument/didOpen` for. Real LSP
+    /// servers (rust-analyzer, tsserver, pyright, gopls) only return
+    /// meaningful results for OPENED documents, so we lazily open every
+    /// file before its first per-tool request and dedupe on subsequent
+    /// hits to avoid spamming the server with redundant didOpens.
+    open_files: Mutex<HashSet<String>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,6 +94,9 @@ impl LspSession {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::null());
+        // Without this, a panic/abort path that drops the `Child`
+        // without calling `kill().await` would leak the child process.
+        cmd.kill_on_drop(true);
         let mut child = cmd.spawn().with_context(|| format!("spawn {command}"))?;
         let stdin = child.stdin.take().context("child stdin missing")?;
         let stdout = child.stdout.take().context("child stdout missing")?;
@@ -117,6 +126,7 @@ impl LspSession {
             pending,
             diagnostics,
             on_diagnostics,
+            open_files: Mutex::new(HashSet::new()),
         });
 
         session.initialize(&root).await?;
@@ -195,6 +205,46 @@ impl LspSession {
         self.write_message(&body).await
     }
 
+    /// Ensure the file at `path` has been sent `textDocument/didOpen`.
+    /// Reads the file content from disk on first open, picks the
+    /// language id from the file extension, and tracks the URI so
+    /// subsequent calls are a no-op.
+    ///
+    /// Real LSP servers (rust-analyzer, tsserver, pyright, gopls)
+    /// return empty results for unopened documents; the fake-lsp
+    /// fixture doesn't enforce that, so the gap was test-invisible
+    /// until this hook landed.
+    pub async fn ensure_did_open(&self, path: &Path) -> Result<()> {
+        let uri = path_to_uri(path)?;
+        let uri_str = uri.as_str().to_string();
+        {
+            let guard = self.open_files.lock().await;
+            if guard.contains(&uri_str) {
+                return Ok(());
+            }
+        }
+        let text = tokio::fs::read_to_string(path)
+            .await
+            .with_context(|| format!("read file for didOpen: {}", path.display()))?;
+        let language_id = path
+            .extension()
+            .and_then(|os| os.to_str())
+            .map(str::to_string)
+            .unwrap_or_default();
+        let params = lsp_types::DidOpenTextDocumentParams {
+            text_document: lsp_types::TextDocumentItem {
+                uri,
+                language_id,
+                version: 1,
+                text,
+            },
+        };
+        self.notify::<lsp_types::notification::DidOpenTextDocument>(params)
+            .await?;
+        self.open_files.lock().await.insert(uri_str);
+        Ok(())
+    }
+
     async fn write_message(&self, body: &[u8]) -> Result<()> {
         let header = format!("Content-Length: {}\r\n\r\n", body.len());
         let mut guard = self.stdin.lock().await;
@@ -231,6 +281,17 @@ impl LspSession {
 async fn read_loop(
     stdout: ChildStdout,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    diagnostics: Arc<Mutex<HashMap<String, Vec<lsp_types::Diagnostic>>>>,
+    on_diagnostics: Arc<dyn Fn(&str) + Send + Sync>,
+) -> Result<()> {
+    let exit = inner_read_loop(stdout, &pending, diagnostics, on_diagnostics).await;
+    drain_pending(&pending, &exit).await;
+    exit
+}
+
+async fn inner_read_loop(
+    stdout: ChildStdout,
+    pending: &Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
     diagnostics: Arc<Mutex<HashMap<String, Vec<lsp_types::Diagnostic>>>>,
     on_diagnostics: Arc<dyn Fn(&str) + Send + Sync>,
 ) -> Result<()> {
@@ -293,6 +354,33 @@ async fn read_loop(
                 tracing::warn!(?resp, "LSP message had no id and no method");
             }
         }
+    }
+}
+
+/// On read_loop exit (EOF or error), drain every still-pending request
+/// waiter and fire a synthetic `lsp_error` envelope at it. `request<R>`
+/// translates that envelope into `Err(anyhow!(...))`, so each hung
+/// waiter becomes a clean error to the caller instead of hanging on
+/// the oneshot receiver forever.
+async fn drain_pending(
+    pending: &Arc<Mutex<HashMap<i64, oneshot::Sender<serde_json::Value>>>>,
+    exit_reason: &Result<()>,
+) {
+    let drained: Vec<_> = {
+        let mut guard = pending.lock().await;
+        guard.drain().collect()
+    };
+    if drained.is_empty() {
+        return;
+    }
+    let reason_str = match exit_reason {
+        Ok(()) => "LSP connection closed (EOF)".to_string(),
+        Err(e) => format!("LSP connection error: {e}"),
+    };
+    for (_id, tx) in drained {
+        let _ = tx.send(serde_json::json!({
+            "lsp_error": { "message": reason_str.clone() }
+        }));
     }
 }
 
