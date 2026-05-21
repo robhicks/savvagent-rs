@@ -32,7 +32,7 @@ pub type TrustMap = Arc<RwLock<BTreeMap<PathBuf, TrustLevel>>>;
 pub struct UserSlashCommandsPlugin {
     project_root: PathBuf,
     home: PathBuf,
-    cache: Mutex<Option<Index>>,
+    pub(super) cache: Mutex<Option<Index>>,
     /// Shared with `App::trust_levels`; read under a read-lock in `handle_slash`.
     trust_levels: TrustMap,
 }
@@ -64,9 +64,19 @@ impl UserSlashCommandsPlugin {
         }
     }
 
+    /// Acquire the cache lock, tolerating a poisoned mutex by accepting the
+    /// inner value. The cache is a transient snapshot of disk state; any
+    /// inconsistency from a prior panic is repaired by the next
+    /// populate-or-reload write.
+    fn lock_cache(&self) -> std::sync::MutexGuard<'_, Option<Index>> {
+        self.cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Snapshot the cached Index, populating the cache on first access.
     fn index_snapshot(&self) -> Index {
-        let mut g = self.cache.lock().unwrap();
+        let mut g = self.lock_cache();
         if g.is_none() {
             *g = Some(walk_all(&self.project_root, &self.home));
         }
@@ -140,7 +150,7 @@ impl Plugin for UserSlashCommandsPlugin {
         args: Vec<String>,
     ) -> Result<Vec<Effect>, PluginError> {
         if name == "reload-commands" {
-            *self.cache.lock().unwrap() = None;
+            *self.lock_cache() = None;
             // Touching index_snapshot repopulates the cache from disk.
             let _ = self.index_snapshot();
             return Ok(vec![
@@ -550,6 +560,40 @@ mod tests {
             })
             .expect("dispatch emits PromptSend");
         assert!(prompt.contains("Review HEAD~3.."));
+    }
+
+    /// C-1: a poisoned cache mutex must not panic the TUI. Both `manifest()` and
+    /// `reload-commands` must survive a poisoned lock.
+    #[tokio::test]
+    async fn poisoned_cache_does_not_panic() {
+        use std::sync::Arc;
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let plugin = Arc::new(UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            empty_trust(),
+        ));
+
+        // Poison the cache by panicking inside a thread that holds the lock.
+        {
+            let poison_plugin = plugin.clone();
+            let _ = std::thread::spawn(move || {
+                let _guard = poison_plugin.cache.lock().unwrap();
+                panic!("intentional poison");
+            })
+            .join();
+        } // poison_plugin clone dropped here
+
+        // The cache mutex is now poisoned. Verify normal operations still work.
+        // manifest() must not panic.
+        let _m = plugin.manifest();
+
+        // reload-commands also must not panic.
+        assert_eq!(Arc::strong_count(&plugin), 1);
+        let mut plugin = Arc::try_unwrap(plugin).map_err(|_| "still shared").unwrap();
+        let effs = plugin.handle_slash("reload-commands", vec![]).await.unwrap();
+        assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::ReindexPlugin { .. })));
     }
 
     /// Task 22: trust gate — project-local shell command with empty trust map
