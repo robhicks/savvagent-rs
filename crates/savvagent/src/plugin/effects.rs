@@ -252,6 +252,25 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         Effect::TogglePlugin { id, enabled } => {
             apply_toggle_plugin(app, id, enabled).await?;
         }
+        Effect::ReindexPlugin { id } => {
+            let (reg_handle, idx_handle) =
+                match (&app.plugin_registry, &app.plugin_indexes) {
+                    (Some(r), Some(i)) => (r.clone(), i.clone()),
+                    _ => {
+                        tracing::warn!(
+                            plugin_id = %id.as_str(),
+                            "Effect::ReindexPlugin: plugin runtime not installed; ignoring"
+                        );
+                        return Ok(());
+                    }
+                };
+            // Acquire write on indexes and read on registry; drop both after
+            // reindex_plugin returns so we don't hold guards across await
+            // boundaries beyond what the method itself requires.
+            let reg = reg_handle.read().await;
+            let mut idx = idx_handle.write().await;
+            idx.reindex_plugin(&id, &reg).await;
+        }
         Effect::Stack(children) => {
             // Recurse via Box::pin so the future has a known size.
             Box::pin(apply_effects_with_depth(app, children, depth)).await?;
