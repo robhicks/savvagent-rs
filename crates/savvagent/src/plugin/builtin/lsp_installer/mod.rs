@@ -79,7 +79,7 @@ impl Plugin for LspInstallerPlugin {
                 id: "lsp_installer.picker".into(),
                 args: ScreenArgs::None,
             }]),
-            Some("__install") => Ok(vec![]), // Task 20 wires the real install path.
+            Some("__install") => self.handle_install(args[1..].to_vec()).await,
             Some(other) => Ok(vec![Effect::PushNote {
                 line: StyledLine::plain(format!(
                     "/lsp: unknown sub-command `{other}` — run `/lsp` with no args to open the picker"
@@ -97,6 +97,152 @@ impl Plugin for LspInstallerPlugin {
             "lsp_installer.picker" => Ok(Box::new(LspPickerScreen::new())),
             other => Err(PluginError::ScreenNotFound(other.into())),
         }
+    }
+}
+
+impl LspInstallerPlugin {
+    /// Run installs for the catalog ids supplied by the picker's
+    /// `Confirm` outcome. Sequential awaits; each entry's progress is
+    /// logged via `tracing` and a terminal note is pushed for every
+    /// success/failure. After all entries complete, the lsp.toml entries
+    /// are merged in one write.
+    ///
+    /// Sequential is intentional for v1: streaming-while-awaiting requires
+    /// either new `Effect` plumbing (HostEvent for progress) or an mpsc
+    /// channel into the runtime — both out of scope for the first cut.
+    async fn handle_install(&self, ids: Vec<String>) -> Result<Vec<Effect>, PluginError> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut effs: Vec<Effect> = Vec::new();
+        let target = match catalog::Target::current() {
+            Some(t) => t,
+            None => {
+                effs.push(push_note(
+                    "/lsp: this host's target is not supported by the installer",
+                ));
+                return Ok(effs);
+            }
+        };
+        let lsp_bin_root = match dirs::home_dir() {
+            Some(home) => home.join(".savvagent").join("lsp-bin"),
+            None => {
+                effs.push(push_note(
+                    "/lsp: could not resolve $HOME; install aborted",
+                ));
+                return Ok(effs);
+            }
+        };
+        let lsp_toml = lsp_bin_root
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("lsp.toml");
+
+        // Resolve ids → catalog entries up front; surface unknowns
+        // synchronously so a typo doesn't disappear into the install
+        // log.
+        let mut entries: Vec<&'static catalog::CatalogEntry> = Vec::new();
+        for id in &ids {
+            match catalog::CATALOG.iter().find(|e| e.id == id) {
+                Some(e) => entries.push(e),
+                None => effs.push(push_note(format!(
+                    "[lsp-installer] skipped: no catalog entry for `{id}`"
+                ))),
+            }
+        }
+        if entries.is_empty() {
+            return Ok(effs);
+        }
+
+        effs.push(push_note(format!(
+            "[lsp-installer] installing {} server(s)…",
+            entries.len()
+        )));
+
+        let downloader = match installer::ReqwestDownloader::new() {
+            Some(d) => d,
+            None => {
+                effs.push(push_note(
+                    "[lsp-installer] failed to build HTTP client; install aborted",
+                ));
+                return Ok(effs);
+            }
+        };
+        let npm = installer::SystemNpmRunner;
+        let mut outcomes: Vec<(&'static catalog::CatalogEntry, installer::InstallOutcome)> =
+            Vec::new();
+
+        for entry in entries {
+            let result = match entry.category {
+                catalog::Category::Binary => {
+                    installer::install_binary_entry(
+                        entry,
+                        target,
+                        &lsp_bin_root,
+                        &downloader,
+                        |progress| tracing::info!(?progress, "lsp install"),
+                    )
+                    .await
+                }
+                catalog::Category::Npm => {
+                    if installer::detect_npm().is_none() {
+                        effs.push(push_note(format!(
+                            "[lsp-installer] {}: npm not found on $PATH — install Node.js from https://nodejs.org and re-run /lsp",
+                            entry.id
+                        )));
+                        continue;
+                    }
+                    installer::install_npm_entry(entry, &npm, |progress| {
+                        tracing::info!(?progress, "lsp install")
+                    })
+                    .await
+                }
+            };
+            match result {
+                Ok(outcome) => {
+                    effs.push(push_note(format!(
+                        "[lsp-installer] {}: installed at {}",
+                        entry.id,
+                        outcome.installed_at.display()
+                    )));
+                    outcomes.push((entry, outcome));
+                }
+                Err(e) => effs.push(push_note(format!(
+                    "[lsp-installer] {}: failed — {e}",
+                    entry.id
+                ))),
+            }
+        }
+
+        if !outcomes.is_empty() {
+            let upserts: Vec<(&catalog::CatalogEntry, &installer::InstallOutcome)> =
+                outcomes.iter().map(|(e, o)| (*e, o)).collect();
+            if let Err(e) = config_writer::merge_into_user_config(&lsp_toml, &upserts).await {
+                effs.push(push_note(format!(
+                    "[lsp-installer] config write to {} failed: {e}",
+                    lsp_toml.display()
+                )));
+            } else {
+                effs.push(push_note(format!(
+                    "[lsp-installer] wrote {} entr{} to {}",
+                    outcomes.len(),
+                    if outcomes.len() == 1 { "y" } else { "ies" },
+                    lsp_toml.display()
+                )));
+            }
+        }
+
+        effs.push(push_note(
+            "[lsp-installer] done — restart savvagent to pick up the new servers",
+        ));
+        Ok(effs)
+    }
+}
+
+fn push_note(text: impl Into<String>) -> Effect {
+    Effect::PushNote {
+        line: StyledLine::plain(text.into()),
     }
 }
 
@@ -126,6 +272,29 @@ mod tests {
         let mut p = LspInstallerPlugin::new();
         let err = p.handle_slash("not-lsp", vec![]).await.unwrap_err();
         assert!(matches!(err, PluginError::SlashNotHandled(_)));
+    }
+
+    #[tokio::test]
+    async fn install_with_no_ids_emits_no_effects() {
+        let mut p = LspInstallerPlugin::new();
+        let effs = p.handle_slash("lsp", vec!["__install".into()]).await.unwrap();
+        assert!(effs.is_empty(), "no-op for empty id list");
+    }
+
+    #[tokio::test]
+    async fn install_with_unknown_id_pushes_skipped_note() {
+        let mut p = LspInstallerPlugin::new();
+        let effs = p
+            .handle_slash("lsp", vec!["__install".into(), "no-such-server".into()])
+            .await
+            .unwrap();
+        assert!(
+            effs.iter().any(|e| matches!(e, Effect::PushNote { line } if line
+                .spans
+                .iter()
+                .any(|s| s.text.contains("no-such-server")))),
+            "expected a PushNote mentioning the unknown id, got {effs:?}"
+        );
     }
 
     #[test]
