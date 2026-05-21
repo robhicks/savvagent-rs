@@ -89,8 +89,24 @@ impl<T: Clone> MultiSelectList<T> {
         match key.code {
             KeyCode::Esc => MultiSelectOutcome::Cancel,
             KeyCode::Enter => MultiSelectOutcome::Confirm(self.confirm_selection()),
+            KeyCode::Down => self.move_cursor(1),
+            KeyCode::Up => self.move_cursor(-1),
             _ => MultiSelectOutcome::Stay,
         }
+    }
+
+    fn move_cursor(&mut self, delta: isize) -> MultiSelectOutcome<T> {
+        let (new_cursor, preview) = {
+            let filtered = self.filtered();
+            if filtered.is_empty() {
+                return MultiSelectOutcome::Stay;
+            }
+            let last = filtered.len() - 1;
+            let new = (self.cursor as isize + delta).clamp(0, last as isize) as usize;
+            (new, filtered[new].clone())
+        };
+        self.cursor = new_cursor;
+        MultiSelectOutcome::Preview(preview)
     }
 }
 
@@ -157,5 +173,31 @@ mod tests {
             MultiSelectOutcome::Confirm(v) => assert!(v.is_empty()),
             other => panic!("expected Confirm([]), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn down_moves_cursor_and_emits_preview() {
+        let mut l = list();
+        let outcome = l.on_key(key(KeyCode::Down));
+        assert_eq!(l.cursor(), 1);
+        assert!(matches!(outcome, MultiSelectOutcome::Preview(Item { id: "b", .. })));
+    }
+
+    #[test]
+    fn down_clamps_at_last_row() {
+        let mut l = list();
+        l.on_key(key(KeyCode::Down));
+        l.on_key(key(KeyCode::Down));
+        let outcome = l.on_key(key(KeyCode::Down));
+        assert_eq!(l.cursor(), 2);
+        assert!(matches!(outcome, MultiSelectOutcome::Preview(Item { id: "c", .. })));
+    }
+
+    #[test]
+    fn up_clamps_at_first_row() {
+        let mut l = list();
+        let outcome = l.on_key(key(KeyCode::Up));
+        assert_eq!(l.cursor(), 0);
+        assert!(matches!(outcome, MultiSelectOutcome::Preview(Item { id: "a", .. })));
     }
 }
