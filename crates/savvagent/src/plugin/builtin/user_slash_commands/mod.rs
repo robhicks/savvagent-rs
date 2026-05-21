@@ -124,11 +124,46 @@ impl Plugin for UserSlashCommandsPlugin {
 
     async fn handle_slash(
         &mut self,
-        _name: &str,
-        _args: Vec<String>,
+        name: &str,
+        args: Vec<String>,
     ) -> Result<Vec<Effect>, PluginError> {
-        // Implemented in Task 19.
-        Ok(vec![])
+        if name == "reload-commands" {
+            // Implemented in Task 20.
+            return Ok(vec![]);
+        }
+        let idx = self.index_snapshot();
+        let Some(d) = idx.commands.get(name) else {
+            return Ok(vec![]);
+        };
+        // Task 21 adds the trust check; for now assume Always.
+        let trust = crate::plugin::builtin::user_slash_commands::trust::TrustLevel::Always;
+        let body = d.body.clone();
+        let frontmatter_model = d.frontmatter.model.clone();
+        let expanded = match crate::plugin::builtin::user_slash_commands::template::expand_all(
+            &body, &args, trust,
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(msg) => {
+                return Ok(vec![Effect::PushNote {
+                    line: savvagent_plugin::StyledLine::plain(format!("[error] {msg}")),
+                }]);
+            }
+        };
+        let mut effs: Vec<Effect> = Vec::new();
+        for w in expanded.warnings {
+            effs.push(Effect::PushNote {
+                line: savvagent_plugin::StyledLine::plain(format!("[warn] {w}")),
+            });
+        }
+        if let Some(id) = frontmatter_model {
+            effs.push(Effect::SetNextTurnModelOverride { id });
+        }
+        effs.push(Effect::PromptSend {
+            text: expanded.text,
+        });
+        Ok(effs)
     }
 }
 
@@ -195,5 +230,92 @@ mod tests {
             .find(|s| s.name == "review")
             .unwrap();
         assert_eq!(review.summary, "Review the diff");
+    }
+
+    #[tokio::test]
+    async fn handle_slash_emits_prompt_send() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("hello.md"),
+            "---\ndescription: hi\n---\nHello $1",
+        )
+        .unwrap();
+
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+        );
+        let effs = p
+            .handle_slash("hello", vec!["world".into()])
+            .await
+            .unwrap();
+        assert!(effs.iter().any(|e| matches!(
+            e,
+            savvagent_plugin::Effect::PromptSend { text } if text.contains("Hello world")
+        )));
+    }
+
+    #[tokio::test]
+    async fn handle_slash_unknown_command_returns_empty() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+        );
+        let effs = p.handle_slash("does-not-exist", vec![]).await.unwrap();
+        assert!(effs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_slash_with_model_emits_override() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("h.md"),
+            "---\nmodel: claude-sonnet-4-6\n---\nbody",
+        )
+        .unwrap();
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+        );
+        let effs = p.handle_slash("h", vec![]).await.unwrap();
+        assert!(effs.iter().any(|e| matches!(
+            e,
+            savvagent_plugin::Effect::SetNextTurnModelOverride { id } if id == "claude-sonnet-4-6"
+        )));
+    }
+
+    #[tokio::test]
+    async fn handle_slash_template_warning_surfaces_as_push_note() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("f.md"),
+            "Read @/no/such/file please",
+        )
+        .unwrap();
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+        );
+        let effs = p.handle_slash("f", vec![]).await.unwrap();
+        // Expect one PushNote with the warning and one PromptSend with the
+        // literal @/no/such/file preserved (per template Task 8 contract).
+        let warn_count = effs.iter().filter(|e| matches!(e, savvagent_plugin::Effect::PushNote { .. })).count();
+        let prompt = effs.iter().find_map(|e| match e {
+            savvagent_plugin::Effect::PromptSend { text } => Some(text),
+            _ => None,
+        }).unwrap();
+        assert_eq!(warn_count, 1);
+        assert!(prompt.contains("@/no/such/file"));
     }
 }
