@@ -109,6 +109,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
+        Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new()),
         Box::new(builtin::tool_fs_summary::ToolFsSummaryPlugin::new()),
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
@@ -157,6 +158,7 @@ mod tests {
             "internal:tool-bash-summary",
             "internal:tool-fs-summary",
             "internal:tool-grep-summary",
+            "internal:user-slash-commands",
             "internal:view-file",
         ] {
             assert!(
@@ -164,7 +166,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 24);
+        assert_eq!(set.plugins.len(), 25);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -192,12 +194,13 @@ mod tests {
         // Task 9 adds migration-picker, bringing non-provider count to 20;
         // Task 6 adds route, bringing non-provider count to 21;
         // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
-        // total registry size is 24 + 4 = 28.
+        // Task 1 (user-slash-commands) adds user-slash-commands, bringing non-provider count to 25;
+        // total registry size is 25 + 4 = 29.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            28,
-            "registry should have 24 non-provider + 4 provider plugins"
+            29,
+            "registry should have 25 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),
