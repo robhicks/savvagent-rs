@@ -11,6 +11,7 @@
 
 use std::path::PathBuf;
 
+use crate::plugin::builtin::lsp_installer::catalog::CATALOG;
 use crate::plugin::builtin::lsp_installer::installer::InstallProgress;
 
 /// Fold an [`InstallProgress`] event into [`ProgressState`].
@@ -130,6 +131,36 @@ pub enum EntryStatus {
         /// entries with their own `Failed { fatal: true }`).
         fatal: bool,
     },
+}
+
+/// Build the initial [`ProgressState`] for the list of catalog ids the
+/// picker confirmed. Unknown ids become pre-`Failed` entries so a typo
+/// (or a stale id from an external dispatcher) surfaces in the modal
+/// instead of disappearing silently.
+pub fn initial_state_for_ids(ids: &[String]) -> ProgressState {
+    let entries = ids
+        .iter()
+        .map(|id| match CATALOG.iter().find(|e| e.id == id) {
+            Some(catalog_entry) => EntryProgress {
+                id: catalog_entry.id.to_string(),
+                display_name: catalog_entry.display_name.to_string(),
+                status: EntryStatus::Queued,
+            },
+            None => EntryProgress {
+                id: id.clone(),
+                display_name: id.clone(),
+                status: EntryStatus::Failed {
+                    reason: format!("no catalog entry for `{id}`"),
+                    fatal: false,
+                },
+            },
+        })
+        .collect();
+    ProgressState {
+        entries,
+        finished: false,
+        config_error: None,
+    }
 }
 
 #[cfg(test)]
@@ -280,5 +311,43 @@ mod tests {
             },
         );
         assert_eq!(s.entries[0].status, EntryStatus::Queued);
+    }
+
+    use crate::plugin::builtin::lsp_installer::catalog::CATALOG;
+
+    #[test]
+    fn initial_state_for_known_id_is_queued() {
+        let known = CATALOG[0].id.to_string();
+        let state = initial_state_for_ids(&[known.clone()]);
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.entries[0].id, known);
+        assert_eq!(state.entries[0].status, EntryStatus::Queued);
+        assert!(!state.finished);
+    }
+
+    #[test]
+    fn initial_state_for_unknown_id_marks_failed_non_fatal() {
+        let state = initial_state_for_ids(&["nonsense-id".to_string()]);
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.entries[0].id, "nonsense-id");
+        match &state.entries[0].status {
+            EntryStatus::Failed { reason, fatal } => {
+                assert!(reason.to_lowercase().contains("no catalog entry"));
+                assert!(!fatal, "unknown id is not a security signal");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // `finished` must remain false — the driver task still needs
+        // to run (or no-op past) the queued entries.
+        assert!(!state.finished);
+    }
+
+    #[test]
+    fn initial_state_preserves_picker_order() {
+        let a = CATALOG[0].id.to_string();
+        let b = CATALOG[1].id.to_string();
+        let state = initial_state_for_ids(&[b.clone(), a.clone()]);
+        assert_eq!(state.entries[0].id, b);
+        assert_eq!(state.entries[1].id, a);
     }
 }
