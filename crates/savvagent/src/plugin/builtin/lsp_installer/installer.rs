@@ -347,6 +347,155 @@ fn resolve_binary_path(binary_path: &str) -> PathBuf {
     PathBuf::from(binary_path)
 }
 
+/// Thin abstraction over the `npm` subprocess so tests can stub it.
+#[async_trait::async_trait]
+pub trait NpmRunner: Send + Sync {
+    /// Run `npm i -g <package>@<version>`. Each line of npm's combined
+    /// stdout/stderr is forwarded via `on_line`. Returns `Ok` on a
+    /// zero exit code, `Err(message)` otherwise.
+    async fn install_global(
+        &self,
+        package: &str,
+        version: &str,
+        on_line: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<(), String>;
+    /// Return `npm root -g` — the directory npm installs globals into.
+    async fn root_global(&self) -> Result<PathBuf, String>;
+}
+
+/// Production [`NpmRunner`] backed by `tokio::process::Command`.
+pub struct SystemNpmRunner;
+
+#[async_trait::async_trait]
+impl NpmRunner for SystemNpmRunner {
+    async fn install_global(
+        &self,
+        package: &str,
+        version: &str,
+        on_line: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<(), String> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::process::Command;
+        let mut child = Command::new("npm")
+            .args(["i", "-g", &format!("{package}@{version}")])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn npm: {e}"))?;
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let mut out_lines = BufReader::new(stdout).lines();
+        let mut err_lines = BufReader::new(stderr).lines();
+        loop {
+            tokio::select! {
+                line = out_lines.next_line() => match line {
+                    Ok(Some(l)) => on_line(l),
+                    _ => break,
+                },
+                line = err_lines.next_line() => match line {
+                    Ok(Some(l)) => on_line(l),
+                    _ => break,
+                },
+            }
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("wait npm: {e}"))?;
+        if !status.success() {
+            return Err(format!("npm exited with status {status}"));
+        }
+        Ok(())
+    }
+
+    async fn root_global(&self) -> Result<PathBuf, String> {
+        let out = tokio::process::Command::new("npm")
+            .args(["root", "-g"])
+            .output()
+            .await
+            .map_err(|e| format!("spawn `npm root -g`: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("npm root -g failed: status {}", out.status));
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok(PathBuf::from(path))
+    }
+}
+
+/// `Some(path)` if `npm` is on `$PATH`, `None` otherwise. The wrapping
+/// plugin uses this to skip npm-based entries with a clear note rather
+/// than blowing up mid-install.
+pub fn detect_npm() -> Option<PathBuf> {
+    which::which("npm").ok()
+}
+
+/// Install a single `NpmGlobal` catalog entry by shelling out to the
+/// host's `npm`. Returns the absolute path npm placed the binary at;
+/// the wrapping plugin writes that path into `lsp.toml` only when the
+/// catalog's `lsp_entry.command` is `"{{BIN}}"` — usually npm entries
+/// pin a literal `command` and the installed path is informational.
+pub async fn install_npm_entry(
+    entry: &CatalogEntry,
+    runner: &dyn NpmRunner,
+    notify: impl Fn(InstallProgress) + Send + Sync,
+) -> Result<InstallOutcome, InstallError> {
+    let InstallMethod::NpmGlobal { package, binary } = entry.method else {
+        return Err(InstallError::Npm {
+            entry_id: entry.id.into(),
+            reason: "install_npm_entry called on a non-Npm entry".into(),
+        });
+    };
+
+    notify(InstallProgress::Started {
+        entry_id: entry.id.into(),
+    });
+
+    let entry_id_for_notify = entry.id.to_string();
+    let notify_for_npm = &notify;
+    runner
+        .install_global(package, entry.version, &move |line| {
+            notify_for_npm(InstallProgress::RunningNpm {
+                entry_id: entry_id_for_notify.clone(),
+                line,
+            });
+        })
+        .await
+        .map_err(|reason| InstallError::Npm {
+            entry_id: entry.id.into(),
+            reason,
+        })?;
+
+    let root = runner
+        .root_global()
+        .await
+        .map_err(|reason| InstallError::Npm {
+            entry_id: entry.id.into(),
+            reason,
+        })?;
+    // `npm root -g` returns `<prefix>/lib/node_modules`. Bins live at
+    // `<prefix>/bin/<binary>` on Unix, `<prefix>\<binary>.cmd` on
+    // Windows. v1 supports Unix layout; Windows users typically have
+    // npm putting bins on `$PATH` directly so the literal `command`
+    // in the lsp.toml entry resolves regardless of this path.
+    let installed_at = root
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|prefix| prefix.join("bin").join(binary))
+        .ok_or_else(|| InstallError::Npm {
+            entry_id: entry.id.into(),
+            reason: format!("could not derive bin path from npm root {}", root.display()),
+        })?;
+
+    notify(InstallProgress::Done {
+        entry_id: entry.id.into(),
+        installed_at: installed_at.clone(),
+    });
+    Ok(InstallOutcome {
+        entry_id: entry.id.into(),
+        installed_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +624,83 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, InstallError::UnsupportedTarget(_)));
+    }
+
+    struct StubNpm {
+        install_result: Result<(), String>,
+        root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl NpmRunner for StubNpm {
+        async fn install_global(
+            &self,
+            _package: &str,
+            _version: &str,
+            on_line: &(dyn Fn(String) + Send + Sync),
+        ) -> Result<(), String> {
+            on_line("added 1 package".into());
+            self.install_result.clone()
+        }
+        async fn root_global(&self) -> Result<PathBuf, String> {
+            Ok(self.root.clone())
+        }
+    }
+
+    fn npm_entry() -> CatalogEntry {
+        CatalogEntry {
+            id: "fake-npm-lsp",
+            display_name: "fake-npm-lsp",
+            language_label: "fake",
+            version: "1.2.3",
+            category: Category::Npm,
+            method: InstallMethod::NpmGlobal {
+                package: "fake-npm-lsp",
+                binary: "fake-npm-lsp",
+            },
+            lsp_entry: LspEntryTemplate {
+                id: "fake",
+                extensions: &["fake"],
+                root_markers: &["fake.toml"],
+                command: "fake-npm-lsp",
+                args: &[],
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn npm_happy_path_derives_bin_from_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prefix = tmp.path();
+        let root = prefix.join("lib").join("node_modules");
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        std::fs::write(prefix.join("bin").join("fake-npm-lsp"), b"#!/bin/sh\n").unwrap();
+        let runner = StubNpm {
+            install_result: Ok(()),
+            root,
+        };
+        let outcome = install_npm_entry(&npm_entry(), &runner, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.installed_at,
+            prefix.join("bin").join("fake-npm-lsp")
+        );
+    }
+
+    #[tokio::test]
+    async fn npm_install_failure_returns_npm_error() {
+        let runner = StubNpm {
+            install_result: Err("network down".into()),
+            root: PathBuf::from("/tmp/unused"),
+        };
+        let err = install_npm_entry(&npm_entry(), &runner, |_| {})
+            .await
+            .unwrap_err();
+        match err {
+            InstallError::Npm { reason, .. } => assert!(reason.contains("network down")),
+            other => panic!("expected InstallError::Npm, got {other:?}"),
+        }
     }
 
     #[test]
