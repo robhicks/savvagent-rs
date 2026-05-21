@@ -275,6 +275,60 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             // Recurse via Box::pin so the future has a known size.
             Box::pin(apply_effects_with_depth(app, children, depth)).await?;
         }
+        Effect::StashPendingSlash { name, args } => {
+            app.pending_slash_after_trust = Some((name, args));
+        }
+        Effect::SetTrustLevel {
+            project_root,
+            decision,
+        } => {
+            use crate::plugin::builtin::user_slash_commands::trust::{self, TrustLevel};
+            let level = match decision.as_str() {
+                "always" => Some(TrustLevel::Always),
+                "session-text-only" => Some(TrustLevel::SessionTextOnly),
+                "cancelled" => None,
+                other => {
+                    tracing::warn!("unknown trust decision: {other}");
+                    None
+                }
+            };
+            match level {
+                Some(l) => {
+                    app.trust_levels.insert(project_root.clone(), l);
+                    if matches!(l, TrustLevel::Always) {
+                        if let Some(home) = dirs::home_dir() {
+                            if let Err(e) = trust::save(&home, &app.trust_levels) {
+                                tracing::warn!("trust file save: {e}");
+                            }
+                        }
+                    }
+                    // Re-dispatch pending slash command, if any. Runs at
+                    // depth + 1 so the shared MAX_DISPATCH_DEPTH cap is
+                    // respected and we don't spin unboundedly.
+                    if let Some((name, args)) = app.pending_slash_after_trust.take() {
+                        if depth < MAX_DISPATCH_DEPTH {
+                            Box::pin(apply_effects_with_depth(
+                                app,
+                                vec![Effect::RunSlash { name, args }],
+                                depth + 1,
+                            ))
+                            .await?;
+                        } else {
+                            tracing::warn!(
+                                "SetTrustLevel: depth limit reached; cannot re-dispatch pending \
+                                 slash command"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    // Cancelled or unknown — drop the pending entry and
+                    // remove the project from the in-memory map.
+                    app.pending_slash_after_trust = None;
+                    app.trust_levels.remove(&project_root);
+                }
+            }
+        }
         // The Effect enum is #[non_exhaustive]; unhandled variants are logged
         // so implementers of future PRs can spot missing wiring.
         other => {
@@ -2061,6 +2115,235 @@ mod tests {
         assert!(
             !app.screen_stack.is_empty(),
             "connect.picker should be pushed onto the stack"
+        );
+    }
+
+    /// `Effect::SetTrustLevel { decision: "always" }` must (a) update the
+    /// in-memory trust map, (b) persist to disk via `trust::save`, and
+    /// (c) re-dispatch the stashed pending slash command via `RunSlash`.
+    ///
+    /// HOME_LOCK + HomeGuard are used as in the `set_active_locale_*` tests
+    /// so the `trust::save` call lands in a per-test tempdir and never
+    /// touches the developer's real `~/.savvagent/`.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_always_persists_and_resumes() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("review".into(), vec!["foo".into()]));
+
+        let effs = vec![Effect::SetTrustLevel {
+            project_root: std::path::PathBuf::from("/proj/x"),
+            decision: "always".into(),
+        }];
+        // apply_effects is expected to succeed even though the stashed slash
+        // "review" isn't registered — RunSlash with no plugin runtime returns
+        // Err("plugin runtime not installed"), which propagates. To avoid that
+        // without spinning up a full plugin runtime, we confirm the trust map
+        // update and disk persistence by checking _before_ the pending slash
+        // would be re-dispatched. Here we clear the pending entry and check
+        // them both manually to keep the test self-contained.
+        //
+        // Strategy: leave pending_slash_after_trust = None so there is nothing
+        // to re-dispatch. A separate test confirms the re-dispatch path.
+        app.pending_slash_after_trust = None;
+        apply_effects(&mut app, effs).await.expect("apply_effects must succeed");
+
+        // Verify trust map updated.
+        assert!(
+            app.trust_levels.contains_key(&std::path::PathBuf::from("/proj/x")),
+            "trust_levels must contain the resolved project root after 'always'"
+        );
+
+        // Verify persistence: load from $HOME (the HomeGuard tempdir).
+        let home = dirs::home_dir().expect("HOME must be set (HomeGuard)");
+        let (loaded, warn) =
+            crate::plugin::builtin::user_slash_commands::trust::load(&home);
+        assert!(warn.is_none(), "unexpected trust file warning: {warn:?}");
+        assert!(
+            loaded.contains_key(&std::path::PathBuf::from("/proj/x")),
+            "trust file on disk must contain /proj/x after 'always'"
+        );
+    }
+
+    /// Re-dispatch path: when `pending_slash_after_trust` is set and the
+    /// plugin runtime IS installed, `SetTrustLevel { "always" }` must
+    /// emit `RunSlash` for the stashed command. We drive this with a
+    /// real (but minimal) plugin runtime so the re-dispatch resolves.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_always_resumes_pending_slash() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::{BuiltinSet, PluginRegistry};
+        use async_trait::async_trait;
+        use savvagent_plugin::{
+            Contributions, Manifest, Plugin, PluginError, PluginId, PluginKind, SlashSpec,
+        };
+
+        // Minimal slash plugin that records when it's called.
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct RecordSlash(Arc<Mutex<Vec<String>>>);
+        #[async_trait]
+        impl Plugin for RecordSlash {
+            fn manifest(&self) -> Manifest {
+                let mut contributions = Contributions::default();
+                contributions.slash_commands = vec![SlashSpec {
+                    name: "review".into(),
+                    summary: "".into(),
+                    args_hint: None,
+                    requires_arg: false,
+                }];
+                Manifest {
+                    id: PluginId::new("internal:test-record-slash").expect("valid"),
+                    name: "TestRecordSlash".into(),
+                    version: "0".into(),
+                    description: "".into(),
+                    kind: PluginKind::Optional,
+                    contributions,
+                }
+            }
+            async fn handle_slash(
+                &mut self,
+                name: &str,
+                _args: Vec<String>,
+            ) -> Result<Vec<Effect>, PluginError> {
+                self.0.lock().unwrap().push(name.to_string());
+                Ok(vec![])
+            }
+        }
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("review".into(), vec![]));
+
+        let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
+        let set = BuiltinSet {
+            plugins: vec![Box::new(RecordSlash(calls.clone()))],
+            providers: vec![],
+        };
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        app.install_plugin_runtime(registry, indexes);
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/x"),
+                decision: "always".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        // Trust map and persistence.
+        assert!(app.trust_levels.contains_key(&std::path::PathBuf::from("/proj/x")));
+        assert!(app.pending_slash_after_trust.is_none(), "pending must be consumed");
+
+        // The slash was re-dispatched.
+        let dispatched = calls.lock().unwrap();
+        assert_eq!(
+            dispatched.as_slice(),
+            &["review"],
+            "pending slash must be re-dispatched after trust resolves"
+        );
+    }
+
+    /// `Effect::SetTrustLevel { decision: "cancelled" }` must drop the
+    /// pending slash entry and leave the project absent from the trust map.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_cancelled_drops_pending() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+        app.pending_slash_after_trust = Some(("x".into(), vec![]));
+        // Pre-populate so we can assert removal.
+        app.trust_levels.insert(
+            std::path::PathBuf::from("/proj/x"),
+            crate::plugin::builtin::user_slash_commands::trust::TrustLevel::Always,
+        );
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/x"),
+                decision: "cancelled".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        assert!(
+            app.pending_slash_after_trust.is_none(),
+            "cancelled must clear pending_slash_after_trust"
+        );
+        assert!(
+            !app.trust_levels.contains_key(&std::path::PathBuf::from("/proj/x")),
+            "cancelled must remove project from trust_levels"
+        );
+    }
+
+    /// `Effect::SetTrustLevel { decision: "session-text-only" }` must update
+    /// the in-memory map but NOT write anything to disk (in-memory only).
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::await_holding_lock)]
+    async fn set_trust_level_session_text_only_not_persisted() {
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+        let mut app = fresh_app();
+
+        apply_effects(
+            &mut app,
+            vec![Effect::SetTrustLevel {
+                project_root: std::path::PathBuf::from("/proj/y"),
+                decision: "session-text-only".into(),
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        // In-memory map has the entry.
+        assert!(
+            app.trust_levels.contains_key(&std::path::PathBuf::from("/proj/y")),
+            "session-text-only must be present in the in-memory trust map"
+        );
+        // Disk file must NOT exist (SessionTextOnly is never persisted).
+        let home = dirs::home_dir().expect("HOME set by HomeGuard");
+        let path =
+            crate::plugin::builtin::user_slash_commands::trust::trust_file_path(&home);
+        assert!(
+            !path.exists(),
+            "session-text-only must not create the trust file on disk"
+        );
+    }
+
+    /// `Effect::StashPendingSlash` must write to `App::pending_slash_after_trust`.
+    #[tokio::test]
+    async fn stash_pending_slash_sets_field() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        assert!(app.pending_slash_after_trust.is_none(), "precondition");
+
+        apply_effects(
+            &mut app,
+            vec![Effect::StashPendingSlash {
+                name: "review".into(),
+                args: vec!["foo".into()],
+            }],
+        )
+        .await
+        .expect("apply_effects must succeed");
+
+        assert_eq!(
+            app.pending_slash_after_trust,
+            Some(("review".into(), vec!["foo".into()])),
+            "StashPendingSlash must populate pending_slash_after_trust"
         );
     }
 

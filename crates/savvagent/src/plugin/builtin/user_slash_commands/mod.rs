@@ -7,7 +7,7 @@ mod discovery;
 mod frontmatter;
 mod name;
 mod template;
-mod trust;
+pub(crate) mod trust;
 mod trust_modal;
 
 use async_trait::async_trait;
