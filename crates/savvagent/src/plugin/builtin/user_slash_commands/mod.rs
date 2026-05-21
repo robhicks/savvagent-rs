@@ -6,6 +6,7 @@
 mod discovery;
 mod frontmatter;
 mod name;
+mod template;
 mod trust;
 
 use async_trait::async_trait;
