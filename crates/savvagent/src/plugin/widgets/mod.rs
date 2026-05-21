@@ -6,3 +6,5 @@
 //! outcome enum into closed-vocabulary `Effect`s.
 
 pub mod multi_select_list;
+
+pub use multi_select_list::{MultiSelectList, MultiSelectOutcome};

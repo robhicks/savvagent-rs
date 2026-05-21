@@ -2,6 +2,22 @@
 
 use std::collections::BTreeSet;
 
+/// State machine for a filterable, multi-select list of `T`.
+///
+/// Intended to be wrapped by a `Screen` implementation that translates
+/// each [`MultiSelectOutcome`] into closed-vocabulary
+/// [`savvagent_plugin::Effect`]s. The first consumer is
+/// `plugin::builtin::lsp_installer::screen::LspPickerScreen`.
+///
+/// Selection is tracked by **stable string id** rather than by index,
+/// so a checked item survives the user typing into and out of the
+/// filter (and re-orderings of the filtered view). `Confirm` walks the
+/// catalog in order, not the selection sequence, so callers get a
+/// deterministic result regardless of click order.
+///
+/// Catalog size is expected to be under ~100 items. `filtered()`
+/// re-allocates a `Vec<&T>` on every call; revisit if a future consumer
+/// pushes hundreds of rows.
 pub struct MultiSelectList<T> {
     items: Vec<T>,
     filter: String,
@@ -23,6 +39,18 @@ impl<T> std::fmt::Debug for MultiSelectList<T> {
 }
 
 impl<T> MultiSelectList<T> {
+    /// Construct a fresh picker over `items` with an empty filter, no
+    /// selection, and cursor at row 0.
+    ///
+    /// `filter_fn` is invoked as `filter_fn(&item, &filter_string)` —
+    /// `filter_string` is whatever the user has typed verbatim
+    /// (case-sensitive). Consumers that want case-insensitive matching
+    /// lower-case both sides inside their closure; the widget does not
+    /// do that for you.
+    ///
+    /// `id_fn` returns the stable string id used to track selection
+    /// across filter changes. It must be cheap (called once per
+    /// `Confirm` per item).
     pub fn new(
         items: Vec<T>,
         filter_fn: impl Fn(&T, &str) -> bool + Send + 'static,
@@ -38,14 +66,20 @@ impl<T> MultiSelectList<T> {
         }
     }
 
+    /// Current filter string (whatever the user has typed since the
+    /// picker opened, minus any Backspace pops).
     pub fn filter(&self) -> &str {
         &self.filter
     }
 
+    /// Index of the highlighted row within the **filtered** view (not
+    /// the original `items` index).
     pub fn cursor(&self) -> usize {
         self.cursor
     }
 
+    /// Borrow the set of stable ids currently selected. Survives filter
+    /// changes; items may be selected even when filtered out of view.
     pub fn selected(&self) -> &BTreeSet<String> {
         &self.selected_ids
     }
@@ -64,12 +98,25 @@ impl<T> MultiSelectList<T> {
     }
 }
 
+/// Returned by [`MultiSelectList::on_key`]. The wrapping screen owns
+/// the side effects (preview rendering, screen close, etc.); this enum
+/// only describes what the widget thinks the user just asked for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MultiSelectOutcome<T: Clone> {
+    /// No observable state change — picker stays open, no preview update.
     Stay,
+    /// Cursor moved (Up/Down/filter narrow). Payload is the item now
+    /// under the cursor — useful for screens that show a preview pane.
     Preview(T),
+    /// Selection state for the cursor item flipped. Payload is the
+    /// affected item (always the one under the cursor). The widget
+    /// already updated [`MultiSelectList::selected`].
     Toggle(T),
+    /// User pressed Enter. Payload is the selected items in **catalog
+    /// order** (not selection order). May be empty — callers decide
+    /// whether to treat that as a no-op or close the picker.
     Confirm(Vec<T>),
+    /// User pressed Esc.
     Cancel,
 }
 
@@ -84,6 +131,20 @@ impl<T: Clone> MultiSelectList<T> {
             .collect()
     }
 
+    /// Dispatch a single key event and mutate state in-place.
+    ///
+    /// Recognised keys:
+    ///
+    /// | Key            | Outcome                                                                       |
+    /// | -------------- | ----------------------------------------------------------------------------- |
+    /// | `Esc`          | [`MultiSelectOutcome::Cancel`].                                               |
+    /// | `Enter`        | [`MultiSelectOutcome::Confirm`] with selected items in catalog order.         |
+    /// | `Up` / `Down`  | Move cursor (clamped); emits [`MultiSelectOutcome::Preview`] for the new row. |
+    /// | `Space`        | Toggle selection of the cursor item; emits [`MultiSelectOutcome::Toggle`].    |
+    /// | `Backspace`    | Pop last filter char; re-clamps cursor; emits `Preview` (or `Stay` if no filter). |
+    /// | Printable char | Append to filter (Ctrl/Alt held → ignored); re-clamps cursor; emits `Preview`.    |
+    ///
+    /// All other keys return [`MultiSelectOutcome::Stay`].
     pub fn on_key(&mut self, key: crossterm::event::KeyEvent) -> MultiSelectOutcome<T> {
         use crossterm::event::{KeyCode, KeyModifiers};
         match key.code {
