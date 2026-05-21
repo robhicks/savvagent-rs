@@ -6,6 +6,7 @@
 mod discovery;
 mod frontmatter;
 mod name;
+mod trust;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
