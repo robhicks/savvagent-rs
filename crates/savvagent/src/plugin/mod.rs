@@ -4,6 +4,10 @@
 /// Built-in plugin implementations shipped with the binary.
 pub mod builtin;
 
+/// Reusable UI state-machine helpers (no `Plugin`/`Screen` trait impl).
+/// Wrapped by screens under [`builtin`] when a plugin needs the behaviour.
+pub mod widgets;
+
 /// Conversion helpers between `savvagent-plugin` types and ratatui types.
 pub mod convert;
 
