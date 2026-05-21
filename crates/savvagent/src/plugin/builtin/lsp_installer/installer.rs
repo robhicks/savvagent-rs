@@ -301,11 +301,10 @@ async fn extract_one(
             ExtractKind::TarGz => {
                 let dec = flate2::read::GzDecoder::new(&bytes[..]);
                 let mut ar = tar::Archive::new(dec);
-                ar.unpack(&install_dir)
-                    .map_err(|e| InstallError::Extract {
-                        entry_id: entry_id_owned.clone(),
-                        reason: e.to_string(),
-                    })?;
+                ar.unpack(&install_dir).map_err(|e| InstallError::Extract {
+                    entry_id: entry_id_owned.clone(),
+                    reason: e.to_string(),
+                })?;
             }
             ExtractKind::Zip => {
                 let reader = std::io::Cursor::new(&bytes[..]);
@@ -445,7 +444,10 @@ impl NpmRunner for SystemNpmRunner {
             let suffix = if tail.is_empty() {
                 String::new()
             } else {
-                format!(" — last output:\n{}", tail.into_iter().collect::<Vec<_>>().join("\n"))
+                format!(
+                    " — last output:\n{}",
+                    tail.into_iter().collect::<Vec<_>>().join("\n")
+                )
             };
             return Err(format!("npm exited with status {status}{suffix}"));
         }
@@ -626,6 +628,139 @@ mod tests {
                 "binary must be executable, got {mode:o}"
             );
         }
+    }
+
+    /// Build a `.tar.gz` archive in memory containing a single file at
+    /// `binary_path` with the given contents.
+    fn targz_with(binary_path: &str, contents: &[u8]) -> Vec<u8> {
+        use flate2::{Compression, write::GzEncoder};
+        let mut tar_buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_buf);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, binary_path, contents)
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        std::io::Write::write_all(&mut gz, &tar_buf).unwrap();
+        gz.finish().unwrap()
+    }
+
+    /// Build a `.zip` archive in memory containing a single file at
+    /// `binary_path` with the given contents.
+    fn zipped_with(binary_path: &str, contents: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let cursor = std::io::Cursor::new(&mut buf);
+            let mut writer = zip::ZipWriter::new(cursor);
+            let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(0o755);
+            zip::ZipWriter::start_file::<&str, ()>(&mut writer, binary_path, options).unwrap();
+            std::io::Write::write_all(&mut writer, contents).unwrap();
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    #[tokio::test]
+    async fn targz_extract_writes_binary_at_nested_path() {
+        let payload = b"#!/bin/sh\necho lua\n";
+        let archive = targz_with("bin/fakelsp", payload);
+        let sha = hex::encode(Sha256::digest(&archive));
+        let url_static: &'static str = Box::leak(
+            "https://example.test/fakelsp.tar.gz"
+                .to_string()
+                .into_boxed_str(),
+        );
+        let sha_static: &'static str = Box::leak(sha.into_boxed_str());
+        let urls: &'static [(Target, &'static str, &'static str)] =
+            Box::leak(Box::new([(Target::LinuxX86_64Gnu, url_static, sha_static)]));
+        let mut entry = fake_entry(urls);
+        if let InstallMethod::BinaryDownload {
+            ref mut binary_path,
+            ..
+        } = entry.method
+        {
+            *binary_path = "bin/fakelsp";
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dl = StubDownloader {
+            payload: bytes::Bytes::from(archive),
+        };
+        let outcome = install_binary_entry(&entry, Target::LinuxX86_64Gnu, tmp.path(), &dl, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(outcome.installed_at, tmp.path().join("fakelsp/bin/fakelsp"));
+        assert_eq!(std::fs::read(&outcome.installed_at).unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn zip_extract_writes_binary_at_top_level() {
+        let payload = b"binary-bytes";
+        let archive = zipped_with("fakelsp", payload);
+        let sha = hex::encode(Sha256::digest(&archive));
+        let url_static: &'static str = Box::leak(
+            "https://example.test/fakelsp.zip"
+                .to_string()
+                .into_boxed_str(),
+        );
+        let sha_static: &'static str = Box::leak(sha.into_boxed_str());
+        let urls: &'static [(Target, &'static str, &'static str)] =
+            Box::leak(Box::new([(Target::LinuxX86_64Gnu, url_static, sha_static)]));
+        let entry = fake_entry(urls);
+        let tmp = tempfile::tempdir().unwrap();
+        let dl = StubDownloader {
+            payload: bytes::Bytes::from(archive),
+        };
+        let outcome = install_binary_entry(&entry, Target::LinuxX86_64Gnu, tmp.path(), &dl, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(outcome.installed_at, tmp.path().join("fakelsp/fakelsp"));
+        assert_eq!(std::fs::read(&outcome.installed_at).unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn reinstall_wipes_existing_install_dir() {
+        let payload = b"#!/bin/sh\necho v2\n";
+        let archive = gzipped(payload);
+        let sha = hex::encode(Sha256::digest(&archive));
+        let url_static: &'static str = Box::leak(
+            "https://example.test/fakelsp.gz"
+                .to_string()
+                .into_boxed_str(),
+        );
+        let sha_static: &'static str = Box::leak(sha.into_boxed_str());
+        let urls: &'static [(Target, &'static str, &'static str)] =
+            Box::leak(Box::new([(Target::LinuxX86_64Gnu, url_static, sha_static)]));
+        let entry = fake_entry(urls);
+
+        // Pre-populate the install dir with a sentinel from a "previous
+        // install" — different version's auxiliary files that must be
+        // cleared on reinstall.
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path().join("fakelsp");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let sentinel = install_dir.join("leftover-from-v1.txt");
+        std::fs::write(&sentinel, b"stale state from a previous install").unwrap();
+        assert!(sentinel.exists());
+
+        let dl = StubDownloader {
+            payload: bytes::Bytes::from(archive),
+        };
+        let outcome = install_binary_entry(&entry, Target::LinuxX86_64Gnu, tmp.path(), &dl, |_| {})
+            .await
+            .unwrap();
+        assert!(outcome.installed_at.exists(), "fresh binary present");
+        assert!(
+            !sentinel.exists(),
+            "previous install must be wiped on reinstall"
+        );
     }
 
     #[tokio::test]

@@ -114,9 +114,7 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::builtin::lsp_installer::catalog::{
-        InstallMethod, LspEntryTemplate, Target,
-    };
+    use crate::plugin::builtin::lsp_installer::catalog::{InstallMethod, LspEntryTemplate, Target};
 
     fn fake_binary_entry() -> CatalogEntry {
         CatalogEntry {
