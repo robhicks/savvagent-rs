@@ -800,6 +800,112 @@ mod tests {
         assert!(toml_path.exists(), "lsp.toml must exist after merge");
     }
 
+    /// Serve a gzipped fixture over loopback, build a real
+    /// `CatalogEntry` pointing at it, and run `spawn_driver` end-to-end
+    /// against the production `ReqwestDownloader`. Asserts that:
+    ///   - `state.finished` flips true,
+    ///   - the entry lands in `Installed`,
+    ///   - `lsp.toml` was written and parses.
+    #[tokio::test]
+    async fn smoke_spawn_driver_end_to_end() {
+        use sha2::{Digest, Sha256};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+        use crate::plugin::builtin::lsp_installer::catalog::{
+            CatalogEntry, CommandTemplate, InstallMethod, LspEntryTemplate,
+        };
+        use crate::plugin::builtin::lsp_installer::installer::ReqwestDownloader;
+
+        let plain = b"#!/bin/sh\necho hi\n";
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, plain).unwrap();
+        let archive = std::sync::Arc::new(enc.finish().unwrap());
+        let sha = hex::encode(Sha256::digest(&archive[..]));
+
+        // Loopback HTTP/1.1 server, single shot.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://127.0.0.1:{port}/fake-smoke.gz");
+        let body = std::sync::Arc::clone(&archive);
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let (read, mut write) = sock.split();
+            let mut reader = BufReader::new(read);
+            let mut buf = String::new();
+            loop {
+                buf.clear();
+                let n = reader.read_line(&mut buf).await.unwrap_or(0);
+                if n == 0 || buf == "\r\n" || buf == "\n" {
+                    break;
+                }
+            }
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                body.len()
+            );
+            write.write_all(header.as_bytes()).await.unwrap();
+            write.write_all(&body).await.unwrap();
+            write.flush().await.unwrap();
+        });
+
+        let url_static: &'static str = Box::leak(url.into_boxed_str());
+        let sha_static: &'static str = Box::leak(sha.into_boxed_str());
+        let urls: &'static [(Target, &'static str, &'static str)] =
+            Box::leak(Box::new([(Target::current().expect("host target"), url_static, sha_static)]));
+
+        let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
+            id: "fake-smoke",
+            display_name: "fake-smoke",
+            language_label: "fake",
+            version: "0.0.0",
+            method: InstallMethod::BinaryDownload {
+                urls,
+                binary_path: "fake-smoke",
+            },
+            lsp_entry: LspEntryTemplate {
+                id: "fake-smoke",
+                extensions: &["fake"],
+                root_markers: &["fake.toml"],
+                command: CommandTemplate::Installed,
+                args: &[],
+            },
+        }));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_root = tmp.path().join("lsp-bin");
+        let toml = tmp.path().join("lsp.toml");
+
+        let state = Arc::new(TokioMutex::new(ProgressState {
+            entries: vec![EntryProgress {
+                id: "fake-smoke".into(),
+                display_name: "fake-smoke".into(),
+                status: EntryStatus::Queued,
+            }],
+            finished: false,
+            config_error: None,
+        }));
+
+        let dl: Arc<dyn Downloader> = Arc::new(ReqwestDownloader::new().expect("reqwest builds"));
+        let npm: Arc<dyn NpmRunner> = Arc::new(NoopNpm);
+        let handle = spawn_driver(
+            vec![entry],
+            Target::current().unwrap(),
+            bin_root,
+            toml.clone(),
+            Arc::clone(&state),
+            dl,
+            npm,
+        );
+        handle.await.expect("driver joined");
+
+        let s = state.lock().await;
+        assert!(s.finished);
+        assert!(matches!(s.entries[0].status, EntryStatus::Installed { .. }));
+        assert!(s.config_error.is_none(), "config write must succeed");
+        assert!(toml.exists(), "lsp.toml must exist on disk");
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn run_installs_non_fatal_error_continues_to_next_entry() {
         let (entry_a, archive_a) = fake_binary_entry("fake-a");
