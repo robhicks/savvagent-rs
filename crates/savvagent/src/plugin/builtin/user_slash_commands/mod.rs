@@ -4,6 +4,7 @@
 //! See `docs/superpowers/specs/2026-05-21-user-slash-commands-design.md`.
 
 mod frontmatter;
+mod name;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
