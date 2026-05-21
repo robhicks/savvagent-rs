@@ -507,6 +507,19 @@ pub struct App {
     /// streams in. Reset to `None` by `End`/`Esc` and by submitting a new
     /// prompt. Driven by `PageUp`/`PageDown`/`Home`/`End` on the home screen.
     pub log_scroll_offset_from_bottom: Option<u16>,
+
+    /// One-turn model override populated by
+    /// [`savvagent_plugin::Effect::SetNextTurnModelOverride`] and consumed
+    /// by the worker spawn at the start of the next turn (Task 14). `None`
+    /// means "use the provider's currently-active model."
+    #[allow(dead_code)] // consumed by Task 14
+    pub next_turn_model_override: Option<String>,
+    /// `(command_name, args)` that should re-dispatch after the trust
+    /// modal resolves. Set by `internal:user-slash-commands` before
+    /// emitting `Effect::OpenScreen("trust_modal")`; cleared by
+    /// `apply_effects` after the re-dispatch (or on cancel).
+    #[allow(dead_code)] // consumed by Task 17
+    pub pending_slash_after_trust: Option<(String, Vec<String>)>,
 }
 
 /// Compute the `scroll_y` value (number of wrapped rows hidden ABOVE the
@@ -632,6 +645,8 @@ impl App {
             pending_routing_show: None,
             prompt_history: PromptHistory::default(),
             log_scroll_offset_from_bottom: None,
+            next_turn_model_override: None,
+            pending_slash_after_trust: None,
         };
         app.refresh_commands();
         app
