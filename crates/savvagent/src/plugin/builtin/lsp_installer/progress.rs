@@ -133,6 +133,104 @@ pub enum EntryStatus {
     },
 }
 
+use crate::plugin::builtin::lsp_installer::catalog::{CatalogEntry, InstallMethod, Target};
+use crate::plugin::builtin::lsp_installer::installer::{
+    self, Downloader, InstallError, NpmRunner,
+};
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
+
+/// Run installs sequentially for `entries`, updating `state` after
+/// each `InstallProgress` notification and after each entry settles.
+///
+/// On `Err(InstallError::ChecksumMismatch)` the function flips that
+/// entry to `Failed { fatal: true }`, flips every remaining `Queued`
+/// entry to `Failed { reason: "batch aborted after SHA mismatch", fatal: true }`,
+/// and returns. Same security semantics as the legacy `handle_install`.
+///
+/// On any other `Err`, the entry is marked `Failed { fatal: false }`
+/// and the loop continues to the next entry.
+///
+/// Caller is responsible for setting `state.finished = true` and
+/// running the config-writer pass — those happen one level up in the
+/// driver-task constructor so this function can be tested in isolation.
+pub async fn run_installs(
+    entries: Vec<&'static CatalogEntry>,
+    target: Target,
+    lsp_bin_root: std::path::PathBuf,
+    state: Arc<TokioMutex<ProgressState>>,
+    downloader: &dyn Downloader,
+    npm: &dyn NpmRunner,
+) {
+    for entry in entries {
+        // Per-stage notifications: clone the Arc for the closure.
+        let state_for_notify = Arc::clone(&state);
+        let notify = move |progress: installer::InstallProgress| {
+            // The notify closure runs synchronously from inside the
+            // install future, which is itself on a tokio runtime. The
+            // cleanest deadlock-free way to mutate the tokio Mutex from
+            // a sync context is to spawn a one-shot task that acquires
+            // the lock asynchronously — never blocking the caller, and
+            // never holding a lock across an await.
+            let s = Arc::clone(&state_for_notify);
+            tokio::spawn(async move {
+                let mut guard = s.lock().await;
+                apply_notification(&mut *guard, progress);
+            });
+        };
+
+        let result = match entry.method {
+            InstallMethod::BinaryDownload { .. } => {
+                installer::install_binary_entry(
+                    entry,
+                    target,
+                    &lsp_bin_root,
+                    downloader,
+                    notify,
+                )
+                .await
+            }
+            InstallMethod::NpmGlobal { .. } => {
+                installer::install_npm_entry(entry, npm, notify).await
+            }
+        };
+
+        match result {
+            Ok(_outcome) => {
+                // `InstallProgress::Done` already set the status to
+                // `Installed`; nothing more to do here.
+            }
+            Err(InstallError::ChecksumMismatch { .. }) => {
+                let mut guard = state.lock().await;
+                if let Some(slot) = guard.entries.iter_mut().find(|e| e.id == entry.id) {
+                    slot.status = EntryStatus::Failed {
+                        reason: "SHA256 mismatch".into(),
+                        fatal: true,
+                    };
+                }
+                for e in guard.entries.iter_mut() {
+                    if matches!(e.status, EntryStatus::Queued) {
+                        e.status = EntryStatus::Failed {
+                            reason: "batch aborted after SHA mismatch".into(),
+                            fatal: true,
+                        };
+                    }
+                }
+                return;
+            }
+            Err(err) => {
+                let mut guard = state.lock().await;
+                if let Some(slot) = guard.entries.iter_mut().find(|e| e.id == entry.id) {
+                    slot.status = EntryStatus::Failed {
+                        reason: err.to_string(),
+                        fatal: false,
+                    };
+                }
+            }
+        }
+    }
+}
+
 /// Build the initial [`ProgressState`] for the list of catalog ids the
 /// picker confirmed. Unknown ids become pre-`Failed` entries so a typo
 /// (or a stale id from an external dispatcher) surfaces in the modal
@@ -349,5 +447,232 @@ mod tests {
         let state = initial_state_for_ids(&[b.clone(), a.clone()]);
         assert_eq!(state.entries[0].id, b);
         assert_eq!(state.entries[1].id, a);
+    }
+
+    use crate::plugin::builtin::lsp_installer::catalog::Target;
+    use crate::plugin::builtin::lsp_installer::installer::{
+        Downloader, InstallError, NpmRunner,
+    };
+    use std::sync::Arc;
+    use tokio::sync::Mutex as TokioMutex;
+
+    struct CountingDownloader {
+        payload: bytes::Bytes,
+    }
+    #[async_trait::async_trait]
+    impl Downloader for CountingDownloader {
+        async fn fetch(&self, _url: &str) -> Result<bytes::Bytes, InstallError> {
+            Ok(self.payload.clone())
+        }
+    }
+
+    struct NoopNpm;
+    #[async_trait::async_trait]
+    impl NpmRunner for NoopNpm {
+        async fn install_global(
+            &self,
+            _package: &str,
+            _version: &str,
+            _on_line: &(dyn Fn(String) + Send + Sync),
+        ) -> Result<(), String> {
+            unreachable!("happy-path test only schedules a binary entry")
+        }
+        async fn root_global(&self) -> Result<std::path::PathBuf, String> {
+            unreachable!()
+        }
+    }
+
+    /// Build a minimal catalog entry that points at a gzipped fixture
+    /// URL whose sha matches the supplied bytes. Returns the leaked
+    /// 'static `CatalogEntry` (acceptable for tests) and the bytes.
+    fn fake_binary_entry(id: &'static str) -> (&'static crate::plugin::builtin::lsp_installer::catalog::CatalogEntry, bytes::Bytes) {
+        use crate::plugin::builtin::lsp_installer::catalog::{
+            CatalogEntry, CommandTemplate, InstallMethod, LspEntryTemplate,
+        };
+        use flate2::{Compression, write::GzEncoder};
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+
+        let plain = b"#!/bin/sh\necho fake\n";
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(plain).unwrap();
+        let archive = enc.finish().unwrap();
+        let sha = hex::encode(Sha256::digest(&archive));
+        let url: &'static str = Box::leak(
+            format!("https://example.test/{id}.gz").into_boxed_str(),
+        );
+        let sha_static: &'static str = Box::leak(sha.into_boxed_str());
+        let urls: &'static [(Target, &'static str, &'static str)] =
+            Box::leak(Box::new([(Target::LinuxX86_64Gnu, url, sha_static)]));
+        let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
+            id,
+            display_name: id,
+            language_label: "fake",
+            version: "0.0.0",
+            method: InstallMethod::BinaryDownload {
+                urls,
+                binary_path: id,
+            },
+            lsp_entry: LspEntryTemplate {
+                id,
+                extensions: &["fake"],
+                root_markers: &["fake.toml"],
+                command: CommandTemplate::Installed,
+                args: &[],
+            },
+        }));
+        (entry, bytes::Bytes::from(archive))
+    }
+
+    #[tokio::test]
+    async fn run_installs_marks_each_entry_installed() {
+        let (entry_a, archive_a) = fake_binary_entry("fake-a");
+        let (entry_b, _archive_b) = fake_binary_entry("fake-b");
+        // Same payload for both — keeps the sha + downloader simple.
+        let dl = CountingDownloader { payload: archive_a };
+        let npm = NoopNpm;
+        let state = Arc::new(TokioMutex::new(ProgressState {
+            entries: vec![
+                EntryProgress { id: "fake-a".into(), display_name: "fake-a".into(), status: EntryStatus::Queued },
+                EntryProgress { id: "fake-b".into(), display_name: "fake-b".into(), status: EntryStatus::Queued },
+            ],
+            finished: false,
+            config_error: None,
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+
+        run_installs(
+            vec![entry_a, entry_b],
+            Target::LinuxX86_64Gnu,
+            tmp.path().to_path_buf(),
+            Arc::clone(&state),
+            &dl,
+            &npm,
+        )
+        .await;
+
+        tokio::task::yield_now().await;
+        let s = state.lock().await;
+        assert!(matches!(s.entries[0].status, EntryStatus::Installed { .. }));
+        assert!(matches!(s.entries[1].status, EntryStatus::Installed { .. }));
+    }
+
+    /// A Downloader that returns garbage so the SHA check always fails.
+    struct GarbageDownloader;
+    #[async_trait::async_trait]
+    impl Downloader for GarbageDownloader {
+        async fn fetch(&self, _url: &str) -> Result<bytes::Bytes, InstallError> {
+            Ok(bytes::Bytes::from_static(b"definitely-not-the-archive"))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_installs_checksum_mismatch_aborts_remaining_queued() {
+        let (entry_a, _archive_a) = fake_binary_entry("fake-a");
+        let (entry_b, _archive_b) = fake_binary_entry("fake-b");
+        let dl = GarbageDownloader;
+        let npm = NoopNpm;
+        let state = Arc::new(TokioMutex::new(ProgressState {
+            entries: vec![
+                EntryProgress { id: "fake-a".into(), display_name: "fake-a".into(), status: EntryStatus::Queued },
+                EntryProgress { id: "fake-b".into(), display_name: "fake-b".into(), status: EntryStatus::Queued },
+            ],
+            finished: false,
+            config_error: None,
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+
+        run_installs(
+            vec![entry_a, entry_b],
+            Target::LinuxX86_64Gnu,
+            tmp.path().to_path_buf(),
+            Arc::clone(&state),
+            &dl,
+            &npm,
+        )
+        .await;
+
+        let s = state.lock().await;
+        match &s.entries[0].status {
+            EntryStatus::Failed { fatal, .. } => assert!(*fatal),
+            other => panic!("expected entry 0 fatal-failed, got {other:?}"),
+        }
+        match &s.entries[1].status {
+            EntryStatus::Failed { fatal, reason } => {
+                assert!(*fatal);
+                assert!(reason.to_lowercase().contains("aborted"));
+            }
+            other => panic!("expected entry 1 batch-aborted, got {other:?}"),
+        }
+    }
+
+    /// A Downloader that errors with a non-checksum error so we can
+    /// exercise the non-fatal continue-to-next-entry path.
+    struct ErroringDownloader;
+    #[async_trait::async_trait]
+    impl Downloader for ErroringDownloader {
+        async fn fetch(&self, _url: &str) -> Result<bytes::Bytes, InstallError> {
+            Err(InstallError::Download("network down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn run_installs_non_fatal_error_continues_to_next_entry() {
+        let (entry_a, archive_a) = fake_binary_entry("fake-a");
+        let (entry_b, _archive_b) = fake_binary_entry("fake-b");
+
+        // entry_a fails (download error), entry_b succeeds. We achieve
+        // that by using a downloader that returns Err for any url
+        // containing "fake-a" and the good archive for "fake-b".
+        struct Mixed { good: bytes::Bytes }
+        #[async_trait::async_trait]
+        impl Downloader for Mixed {
+            async fn fetch(&self, url: &str) -> Result<bytes::Bytes, InstallError> {
+                if url.contains("fake-a") {
+                    // Yield before returning Err so that any spawned
+                    // notification tasks (e.g. the Downloading { 0, None }
+                    // fired before this fetch call) can drain from the
+                    // scheduler before `run_installs` writes Failed.
+                    tokio::task::yield_now().await;
+                    Err(InstallError::Download("network down".into()))
+                } else {
+                    Ok(self.good.clone())
+                }
+            }
+        }
+        let dl = Mixed { good: archive_a };
+        let npm = NoopNpm;
+        let state = Arc::new(TokioMutex::new(ProgressState {
+            entries: vec![
+                EntryProgress { id: "fake-a".into(), display_name: "fake-a".into(), status: EntryStatus::Queued },
+                EntryProgress { id: "fake-b".into(), display_name: "fake-b".into(), status: EntryStatus::Queued },
+            ],
+            finished: false,
+            config_error: None,
+        }));
+        let tmp = tempfile::tempdir().unwrap();
+
+        run_installs(
+            vec![entry_a, entry_b],
+            Target::LinuxX86_64Gnu,
+            tmp.path().to_path_buf(),
+            Arc::clone(&state),
+            &dl,
+            &npm,
+        )
+        .await;
+
+        // Yield so that any in-flight spawned notification tasks (including
+        // the Done notification for entry_b) can settle before we read.
+        tokio::task::yield_now().await;
+        let s = state.lock().await;
+        match &s.entries[0].status {
+            EntryStatus::Failed { fatal, reason } => {
+                assert!(!*fatal);
+                assert!(reason.contains("network down"));
+            }
+            other => panic!("expected entry 0 non-fatal failed, got {other:?}"),
+        }
+        assert!(matches!(s.entries[1].status, EntryStatus::Installed { .. }));
     }
 }
