@@ -375,8 +375,10 @@ impl NpmRunner for SystemNpmRunner {
         version: &str,
         on_line: &(dyn Fn(String) + Send + Sync),
     ) -> Result<(), String> {
+        use std::collections::VecDeque;
         use tokio::io::{AsyncBufReadExt, BufReader};
         use tokio::process::Command;
+
         let mut child = Command::new("npm")
             .args(["i", "-g", &format!("{package}@{version}")])
             .stdout(std::process::Stdio::piped())
@@ -387,21 +389,49 @@ impl NpmRunner for SystemNpmRunner {
         let stderr = child.stderr.take().expect("stderr was piped");
         let mut out_lines = BufReader::new(stdout).lines();
         let mut err_lines = BufReader::new(stderr).lines();
+
+        // Drain both streams independently; one of them closing first
+        // must not abandon the other (npm's stderr typically carries the
+        // failure summary AFTER stdout has already EOF'd). Also keep a
+        // small rolling tail so a non-zero exit can surface the actual
+        // diagnostic rather than just "exit status 1".
+        const TAIL_CAP: usize = 20;
+        let mut tail: VecDeque<String> = VecDeque::with_capacity(TAIL_CAP);
+        let mut out_done = false;
+        let mut err_done = false;
         loop {
             tokio::select! {
-                line = out_lines.next_line() => match line {
-                    Ok(Some(l)) => on_line(l),
-                    _ => break,
+                line = out_lines.next_line(), if !out_done => match line {
+                    Ok(Some(l)) => {
+                        if tail.len() == TAIL_CAP { tail.pop_front(); }
+                        tail.push_back(l.clone());
+                        on_line(l);
+                    }
+                    _ => out_done = true,
                 },
-                line = err_lines.next_line() => match line {
-                    Ok(Some(l)) => on_line(l),
-                    _ => break,
+                line = err_lines.next_line(), if !err_done => match line {
+                    Ok(Some(l)) => {
+                        if tail.len() == TAIL_CAP { tail.pop_front(); }
+                        tail.push_back(l.clone());
+                        on_line(l);
+                    }
+                    _ => err_done = true,
                 },
+                else => break,
+            }
+            if out_done && err_done {
+                break;
             }
         }
+
         let status = child.wait().await.map_err(|e| format!("wait npm: {e}"))?;
         if !status.success() {
-            return Err(format!("npm exited with status {status}"));
+            let suffix = if tail.is_empty() {
+                String::new()
+            } else {
+                format!(" — last output:\n{}", tail.into_iter().collect::<Vec<_>>().join("\n"))
+            };
+            return Err(format!("npm exited with status {status}{suffix}"));
         }
         Ok(())
     }
