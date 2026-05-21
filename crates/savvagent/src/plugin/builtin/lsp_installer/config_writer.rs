@@ -101,7 +101,14 @@ async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = PathBuf::from(dir).join(format!(".lsp.toml.savvagent.{}.tmp", std::process::id()));
     tokio::fs::write(&tmp, bytes).await?;
-    tokio::fs::rename(&tmp, path).await
+    // If rename fails (cross-device, EACCES, Windows lock), the temp
+    // file would otherwise linger forever. Best-effort cleanup before
+    // propagating the original error.
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
