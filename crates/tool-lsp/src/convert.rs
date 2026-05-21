@@ -62,14 +62,48 @@ pub struct LocationOut {
 /// `../../../etc/passwd` segments.
 pub fn location_to_out(loc: Location, workspace_root: &Path) -> Result<LocationOut> {
     let path = uri_to_path(&loc.uri)?;
-    let display = match path.strip_prefix(workspace_root) {
-        Ok(rel) => rel.display().to_string(),
-        Err(_) => path.display().to_string(),
-    };
     Ok(LocationOut {
-        path: display,
+        path: relativize_against_root(&path, workspace_root),
         range: loc.range.into(),
     })
+}
+
+/// Relativize `path` against `workspace_root`, returning a forward-slash
+/// rendering. Falls back to `path`'s absolute display when the path sits
+/// outside the root.
+///
+/// On Windows, `Path::strip_prefix` is byte-wise: `\\?\C:\foo` (the UNC
+/// long-path form `canonicalize` returns) does NOT match `C:\foo` (the
+/// form `url::Url::to_file_path` yields). We strip the `\\?\` (and
+/// `\\?\UNC\` server prefix) before comparing so both sides share the
+/// same shape. On non-Windows, `strip_unc_prefix` is a no-op.
+fn relativize_against_root(path: &Path, workspace_root: &Path) -> String {
+    let normalized_root = strip_unc_prefix(workspace_root);
+    let normalized_path = strip_unc_prefix(path);
+    match normalized_path.strip_prefix(&normalized_root) {
+        Ok(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => normalized_path.display().to_string(),
+    }
+}
+
+#[cfg(windows)]
+fn strip_unc_prefix(p: &Path) -> std::path::PathBuf {
+    let s = p.as_os_str().to_string_lossy().into_owned();
+    let stripped = s
+        .strip_prefix(r"\\?\UNC\")
+        .map(|rest| format!(r"\\{rest}"))
+        .or_else(|| s.strip_prefix(r"\\?\").map(str::to_string))
+        .unwrap_or(s);
+    std::path::PathBuf::from(stripped)
+}
+
+#[cfg(not(windows))]
+fn strip_unc_prefix(p: &Path) -> std::path::PathBuf {
+    p.to_path_buf()
 }
 
 /// MCP-friendly diagnostic shape. Used in tool replies and in the
@@ -128,10 +162,7 @@ pub fn restrict_workspace_edit(
                 let mut out = Vec::new();
                 for e in edits {
                     let path = uri_to_path(&e.text_document.uri)?;
-                    let display = match path.strip_prefix(workspace_root) {
-                        Ok(rel) => rel.display().to_string(),
-                        Err(_) => path.display().to_string(),
-                    };
+                    let display = relativize_against_root(&path, workspace_root);
                     let mut edits = Vec::new();
                     for one in e.edits {
                         let lsp_types::OneOf::Left(te) = one else {
@@ -157,10 +188,7 @@ pub fn restrict_workspace_edit(
         let mut out = Vec::new();
         for (uri, edits) in changes {
             let path = uri_to_path(&uri)?;
-            let display = match path.strip_prefix(workspace_root) {
-                Ok(rel) => rel.display().to_string(),
-                Err(_) => path.display().to_string(),
-            };
+            let display = relativize_against_root(&path, workspace_root);
             out.push(FileEditOut {
                 path: display,
                 edits: edits
