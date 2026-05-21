@@ -36,6 +36,17 @@ pub fn apply_notification(state: &mut ProgressState, ev: InstallProgress) {
     let Some(entry) = state.entries.iter_mut().find(|e| e.id == *id) else {
         return;
     };
+    // Don't let a late-arriving in-flight notification overwrite a
+    // terminal state. The spawn-per-notify pattern in `run_installs`
+    // means a `Downloading`/`Verifying` task can race against the
+    // `Err` arm's `Failed` write; without this guard, the spawned
+    // task wins and the UI silently un-fails the row.
+    if matches!(
+        entry.status,
+        EntryStatus::Failed { .. } | EntryStatus::Installed { .. }
+    ) {
+        return;
+    }
     match ev {
         InstallProgress::Started { .. } => { /* no-op; see doc */ }
         InstallProgress::Downloading {
@@ -175,7 +186,7 @@ pub async fn run_installs(
             let s = Arc::clone(&state_for_notify);
             tokio::spawn(async move {
                 let mut guard = s.lock().await;
-                apply_notification(&mut *guard, progress);
+                apply_notification(&mut guard, progress);
             });
         };
 
@@ -411,12 +422,67 @@ mod tests {
         assert_eq!(s.entries[0].status, EntryStatus::Queued);
     }
 
+    #[test]
+    fn apply_notification_skips_when_entry_is_already_failed() {
+        let mut s = ProgressState {
+            entries: vec![EntryProgress {
+                id: "a".into(),
+                display_name: "a".into(),
+                status: EntryStatus::Failed {
+                    reason: "boom".into(),
+                    fatal: false,
+                },
+            }],
+            finished: false,
+            config_error: None,
+        };
+        apply_notification(
+            &mut s,
+            InstallProgress::Downloading {
+                entry_id: "a".into(),
+                bytes_so_far: 1024,
+                total: Some(2048),
+            },
+        );
+        assert!(
+            matches!(s.entries[0].status, EntryStatus::Failed { .. }),
+            "Failed must not be reverted by a late Downloading notification, got {:?}",
+            s.entries[0].status
+        );
+    }
+
+    #[test]
+    fn apply_notification_skips_when_entry_is_already_installed() {
+        let mut s = ProgressState {
+            entries: vec![EntryProgress {
+                id: "a".into(),
+                display_name: "a".into(),
+                status: EntryStatus::Installed {
+                    installed_at: PathBuf::from("/tmp/done"),
+                },
+            }],
+            finished: false,
+            config_error: None,
+        };
+        apply_notification(
+            &mut s,
+            InstallProgress::Verifying {
+                entry_id: "a".into(),
+            },
+        );
+        assert!(
+            matches!(s.entries[0].status, EntryStatus::Installed { .. }),
+            "Installed must not be reverted, got {:?}",
+            s.entries[0].status
+        );
+    }
+
     use crate::plugin::builtin::lsp_installer::catalog::CATALOG;
 
     #[test]
     fn initial_state_for_known_id_is_queued() {
         let known = CATALOG[0].id.to_string();
-        let state = initial_state_for_ids(&[known.clone()]);
+        let state = initial_state_for_ids(std::slice::from_ref(&known));
         assert_eq!(state.entries.len(), 1);
         assert_eq!(state.entries[0].id, known);
         assert_eq!(state.entries[0].status, EntryStatus::Queued);
@@ -629,11 +695,6 @@ mod tests {
         impl Downloader for Mixed {
             async fn fetch(&self, url: &str) -> Result<bytes::Bytes, InstallError> {
                 if url.contains("fake-a") {
-                    // Yield before returning Err so that any spawned
-                    // notification tasks (e.g. the Downloading { 0, None }
-                    // fired before this fetch call) can drain from the
-                    // scheduler before `run_installs` writes Failed.
-                    tokio::task::yield_now().await;
                     Err(InstallError::Download("network down".into()))
                 } else {
                     Ok(self.good.clone())
