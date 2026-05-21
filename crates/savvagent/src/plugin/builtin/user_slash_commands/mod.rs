@@ -513,4 +513,69 @@ mod tests {
             "expected PromptSend, got: {effs:?}"
         );
     }
+
+    /// Task 22: end-to-end — discovery via manifest() then dispatch via handle_slash.
+    #[tokio::test]
+    async fn end_to_end_review_command() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("review.md"),
+            "---\ndescription: Review the current diff\nargument-hint: <range>\n---\nReview $ARGUMENTS\n",
+        )
+        .unwrap();
+
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            empty_trust(),
+        );
+
+        // 1. Discovery via manifest()
+        let m = p.manifest();
+        let entry = m
+            .contributions
+            .slash_commands
+            .iter()
+            .find(|s| s.name == "review")
+            .expect("review command discovered in manifest");
+        assert_eq!(entry.summary, "Review the current diff");
+        assert_eq!(entry.args_hint.as_deref(), Some("<range>"));
+
+        // 2. Dispatch via handle_slash
+        let effs = p.handle_slash("review", vec!["HEAD~3..".into()]).await.unwrap();
+        let prompt = effs
+            .iter()
+            .find_map(|e| match e {
+                savvagent_plugin::Effect::PromptSend { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("dispatch emits PromptSend");
+        assert!(prompt.contains("Review HEAD~3.."));
+    }
+
+    /// Task 22: trust gate — project-local shell command with empty trust map
+    /// must stash + open modal, never emit PromptSend.
+    #[tokio::test]
+    async fn end_to_end_untrusted_shell_does_not_send_prompt() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        // A command with a line-leading shell substitution token, in a project-local dir.
+        fs::write(dir.join("danger.md"), "!echo X").unwrap();
+
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            empty_trust(),
+        );
+        let effs = p.handle_slash("danger", vec![]).await.unwrap();
+        // Expect stash + modal, NOT PromptSend (untrusted).
+        assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::StashPendingSlash { .. })));
+        assert!(effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::OpenScreen { id, .. } if id == "trust.modal")));
+        assert!(!effs.iter().any(|e| matches!(e, savvagent_plugin::Effect::PromptSend { .. })));
+    }
 }
