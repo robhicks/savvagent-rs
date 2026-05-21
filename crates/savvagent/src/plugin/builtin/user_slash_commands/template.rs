@@ -126,7 +126,7 @@ use tokio::process::Command;
 /// caller surfaces the error in the conversation log and does NOT
 /// submit the prompt. The shell is `sh -c <cmd>`.
 pub async fn expand_shell(body: &str) -> Result<Expanded, String> {
-    let warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     // Pass 1: inline backtick form `!`...`
     let mut after_inline = String::new();
@@ -136,15 +136,22 @@ pub async fn expand_shell(body: &str) -> Result<Expanded, String> {
         after_inline.push_str(&body[cursor..abs]);
         let cmd_start = abs + 2;
         let Some(close) = body[cmd_start..].find('`') else {
-            // Unmatched backtick — leave the rest as-is and stop the
-            // pass.
+            // Unmatched backtick — leave the rest as-is, emit a warning,
+            // and stop the pass.
             after_inline.push_str(&body[abs..]);
             cursor = body.len();
+            warnings.push("unmatched backtick after `!\\``; leaving as literal".to_string());
             break;
         };
         let cmd = &body[cmd_start..cmd_start + close];
         let stdout = run_shell(cmd).await?;
-        after_inline.push_str(&stdout);
+        // Trim a single trailing newline (with optional \r) so the
+        // substitution doesn't split surrounding text onto a new line.
+        let trimmed = stdout
+            .strip_suffix('\n')
+            .map(|s| s.strip_suffix('\r').unwrap_or(s))
+            .unwrap_or(&stdout);
+        after_inline.push_str(trimmed);
         cursor = cmd_start + close + 1;
     }
     after_inline.push_str(&body[cursor..]);
@@ -183,7 +190,7 @@ async fn run_shell(cmd: &str) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!("!{cmd}: exited {code} — {stderr}"));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]
@@ -264,5 +271,23 @@ mod tests {
     async fn shell_substitution_inline_form() {
         let exp = expand_shell("before !`echo X` after").await.unwrap();
         assert!(exp.text.contains("X"));
+    }
+
+    #[tokio::test]
+    async fn inline_backtick_does_not_split_surrounding_line() {
+        // Regression for C-1: echo always emits a trailing newline.
+        // The inline substitution must NOT propagate that newline so
+        // "before X after" stays on one line.
+        let exp = expand_shell("before !`echo X` after").await.unwrap();
+        assert_eq!(exp.text, "before X after");
+    }
+
+    #[tokio::test]
+    async fn unmatched_inline_backtick_emits_warning() {
+        let exp = expand_shell("text !`incomplete with no close").await.unwrap();
+        assert_eq!(exp.warnings.len(), 1);
+        assert!(exp.warnings[0].contains("unmatched"));
+        // The original characters are still in the output (left as literal).
+        assert!(exp.text.contains("!`incomplete"));
     }
 }
