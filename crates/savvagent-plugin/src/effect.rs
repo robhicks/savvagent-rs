@@ -138,10 +138,12 @@ pub enum Effect {
     /// [`Effect::PromptSend`]. Cleared after the turn completes. Used by
     /// user-defined slash commands whose frontmatter contains `model:`.
     SetNextTurnModelOverride {
-        /// Bare model id (e.g. `"claude-sonnet-4-6"`). The runtime looks
-        /// the id up against the active provider's catalog; unknown ids
-        /// are warn-logged and ignored, leaving the active model in
-        /// place.
+        /// Bare model id (e.g. `"claude-sonnet-4-6"`). Applied directly
+        /// to the host via `Host::set_model` before the turn starts; no
+        /// pre-flight catalog validation is performed. The provider may
+        /// reject an unknown id during the turn, surfaced as the turn's
+        /// normal failure mode. After the turn the prior model is
+        /// restored.
         id: String,
     },
     /// Result of a trust prompt. Emitted by the trust modal screen and
