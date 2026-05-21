@@ -1,0 +1,1210 @@
+# Inline HTML canvas — design
+
+Date: 2026-05-21
+Status: draft, pending review
+Supersedes: nothing
+Related: v0.9.0 plugin system (`2026-05-12-v0.9.0-plugin-system-design.md`); SPP wire format (`crates/savvagent-protocol/SPEC.md`)
+Inspiration: ["How I AI: HTML is the new markdown"](https://www.lennysnewsletter.com/p/how-i-ai-html-is-the-new-markdown)
+
+## Problem
+
+Markdown is the default medium for model output and humans struggle with
+it. Plans grow to thousands of lines, specs interleave dense code blocks
+with prose, review docs have structure that markdown can hint at but not
+*render*. The reader's failure mode is not "can't decode the syntax" —
+it's "loses the thread." Information density without visual hierarchy
+turns into a wall of text that gets skimmed instead of read.
+
+The article cited above argues for **HTML as the medium of AI output**.
+Interactive, scrollable plans. Status updates that get opened instead of
+ignored. Specs with collapsible sections, side-by-side diffs, callouts
+with semantic emphasis. The model still does the cognition; HTML carries
+the result in a shape humans actually engage with.
+
+Savvagent today renders model output as plain text into a ratatui
+`Paragraph`. There is no path for the model to express structure beyond
+ASCII art. This spec adds one: the model emits HTML in a recognized
+content block, savvagent renders it **inline in the conversation
+transcript** with full mouse and keyboard interaction, without becoming
+a GUI app and without executing model-authored Rust or JavaScript.
+
+## Goals
+
+1. **Inline in the chat transcript.** Rendered HTML appears mixed with
+   text turns in the conversation log, like images in a chat UI. Not in
+   a side pane, not a separate window.
+2. **Real in-pane interaction.** Mouse-click focuses a block; mouse-move
+   produces hover; scroll wheel scrolls overflow containers; keyboard
+   Tab/Shift-Tab walks focusable elements within the focused block;
+   dedicated chord (Ctrl-J/Ctrl-K) jumps between blocks. No
+   model-in-the-loop round-trips for interaction.
+3. **Subset of HTML/CSS.** Pin a concrete subset (§ "HTML+CSS subset")
+   that the model is prompted to use. The subset is the contract; the
+   renderer is permitted to be lenient outside it but the prompt does
+   not advertise it.
+4. **Soft freeze on focus loss.** When focus leaves a block, the
+   renderer stops dispatching events and stops re-rendering but retains
+   DOM state. Refocus thaws losslessly.
+5. **Pragmatic streaming.** While the HTML is streaming from the model,
+   show the source typewriter-style (syntax-highlighted code preview)
+   inline where the rendered block will appear. On stream complete,
+   swap the source preview for the rendered canvas in place.
+6. **Stay a TUI app.** No new window, no GUI shell. The terminal is
+   still the only chrome.
+7. **No WASM, no runtime rustc.** The model emits HTML, not Rust or
+   JS. The renderer is an in-process Rust library compiled into the
+   savvagent binary.
+
+## Non-goals
+
+- **Become a GUI application.** Even hybrid in-window/in-terminal modes
+  are out of scope.
+- **Run JavaScript.** No `<script>` execution, no DOM events from JS, no
+  network access from rendered docs.
+- **Render arbitrary internet HTML.** The subset is what the model is
+  prompted to emit and what we promise to render. Pasting a random web
+  page is undefined behavior.
+- **Pixel-perfect parity with a real browser.** We render via Blitz on
+  a constrained subset; visual fidelity is "good enough that humans
+  prefer it to markdown," not "matches Chrome exactly."
+- **Terminal-widget fallback rendering** (mapping HTML to ratatui
+  widgets). v1 requires a terminal with an image protocol; degraded
+  terminals show source code with a banner. Path A from brainstorming
+  is deferred to a future spec if there is demand.
+- **Streaming layout.** Re-laying-out the doc on every chunk is
+  expensive and visually jumpy; we use the source-preview-then-swap
+  pattern instead (§ Streaming).
+- **Cross-block focus persistence after restart.** Interactive state
+  (form values, scroll position, expanded `<details>`) lives in
+  memory; saved transcripts re-render from source on load with no
+  interactive state.
+
+## Approach
+
+A new content block type `Html { source }` in SPP. Providers extract it
+from a sentinel-fenced code block in the model's text response. A new
+in-process crate `savvagent-canvas` wraps [Blitz] (Servo-derived layout
++ Stylo + Markup5ever) and exposes a WIT-portable interface for
+"render HTML to pixel buffer + dispatch events + report focus state."
+The conversation log gains a new item variant for HTML blocks; rendered
+output goes inline via [`ratatui-image`] (Kitty / iTerm2 / WezTerm /
+Ghostty / sixel). The v0.9.0 plugin trait surface is extended with a
+`ContentRenderer` contribution kind; the HTML canvas ships as the
+first built-in plugin against that surface (`internal:html-canvas`).
+
+[Blitz]: https://github.com/DioxusLabs/blitz
+[`ratatui-image`]: https://crates.io/crates/ratatui-image
+
+Approach risks called out up front:
+
+- **Blitz's event-dispatch surface is the load-bearing assumption.**
+  Layout + paint are well-supported in Blitz's headless mode; the
+  "send a click at (x,y) and get back the updated DOM" path is less
+  battle-tested for embedders outside Dioxus. Phase 0 of the
+  implementation plan is a spike that proves out the eventing path
+  against a pinned Blitz version. If it's rough, we ship Phase 1
+  (static rendering) on schedule and the spike's findings shape
+  whether Phase 2 (interaction) needs a savvagent-side event router
+  layered on top of Blitz.
+- **Image-protocol bandwidth.** Hover means re-uploading the frame on
+  mouse-move. Mitigated by re-render only on state change and by
+  Kitty's incremental frame update support; spec calls out tmux as a
+  known degraded case.
+
+## Architecture overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Provider (anthropic/openai/gemini/local)                            │
+│   - Parses model text response for ```html-canvas``` fenced blocks  │
+│   - Emits SPP `Html { source }` content blocks alongside `Text`     │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │ SPP CompleteResponse / StreamEvent
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ savvagent-host                                                       │
+│   - Forwards content blocks to TUI without inspecting Html source    │
+│   - Persists `Html { source }` blocks in transcript JSON unchanged   │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │ StreamEvent / TurnComplete
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ savvagent (TUI)                                                      │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │ Conversation log                                             │    │
+│  │   Vec<LogItem { Text | ToolCall | Canvas(BlockId) }>          │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │ CanvasRegistry: HashMap<BlockId, Box<dyn ContentRenderer>>   │    │
+│  │   - Soft-freeze state (Active / Frozen)                      │    │
+│  │   - Image protocol cache IDs                                 │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │ FocusManager:                                                │    │
+│  │   enum AppFocus { ChatInput | ScreenStack | Canvas(BlockId) }│    │
+│  └──────────────────────────────────────────────────────────────┘    │
+│  ┌──────────────────────────────────────────────────────────────┐    │
+│  │ savvagent-canvas crate (ContentRenderer impl)                │    │
+│  │   - Owns Blitz instance per BlockId                          │    │
+│  │   - render() → Frame { width, height, format, bytes }        │    │
+│  │   - dispatch(InputEvent) → InputOutcome { effects, dirty }   │    │
+│  │   - freeze() / thaw()                                         │    │
+│  └──────────────────────────────────────────────────────────────┘    │
+│                                                                      │
+│  ratatui-image places Frame buffers into the transcript cells via    │
+│  the terminal's image protocol (Kitty/iTerm2/WezTerm/Ghostty/sixel). │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+## SPP wire protocol changes
+
+Add a new content block variant:
+
+```jsonc
+{ "type": "html", "source": "<!doctype html>...</html>" }
+```
+
+Acceptable in `messages[].content[]` (request — for round-tripping a
+prior turn's HTML back into context) and in `CompleteResponse.content[]`
+(response — primary case).
+
+Mirroring streaming, add to `StreamEvent`:
+
+```text
+content_block_start { index: 2, block: html("") }
+content_block_delta { index: 2, delta: html_source_delta("<!doctype html>") }
+content_block_delta { index: 2, delta: html_source_delta("<head>...") }
+content_block_stop  { index: 2 }
+```
+
+`html_source_delta` carries raw HTML text fragments. The TUI's streaming
+preview reassembles these into the visible source-code-preview shown in
+place of the eventual rendered canvas.
+
+SPP version bump to v0.2.0. Providers that do not produce HTML blocks
+remain conformant — the field is additive.
+
+### Provider-side extraction
+
+Models are prompted to emit HTML inside a sentinel-fenced block in their
+text output:
+
+````
+Here's the plan you asked for:
+
+```html-canvas
+<!doctype html>
+<html>
+  <head><style>...</style></head>
+  <body>...</body>
+</html>
+```
+
+That should give you a structured view.
+````
+
+The provider crate (each of `provider-anthropic`, `provider-openai`,
+`provider-gemini`, `provider-local`) parses the streaming text for
+` ```html-canvas` opening fences and ` ``` ` closing fences, splitting
+the streamed content into `Text` and `Html` content blocks in order.
+
+Sentinel choice rationale: `html-canvas` is unambiguous, won't collide
+with code samples about HTML, and survives intact through providers
+that emit code blocks natively. The same provider parses other
+existing fence languages (`rust`, `python`, etc.) without ambiguity.
+
+The extraction logic lives in a shared crate (`savvagent-fence`,
+created in this work) so all four providers reuse the same parser
+state machine. Providers that gain "native" HTML blocks (multi-modal
+output) in the future can bypass the parser and emit `Html` blocks
+directly.
+
+## Plugin trait extension
+
+The v0.9.0 plugin trait surface (`savvagent-plugin`) is extended with a
+new contribution kind: **content renderers**. This is the *only* shape
+plugins can use to render non-text content into the conversation log.
+The HTML canvas is the first built-in plugin against this kind.
+
+### New types in `savvagent-plugin`
+
+```rust
+// crates/savvagent-plugin/src/content.rs (new)
+
+/// A WIT-portable image frame produced by a ContentRenderer.
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub format: PixelFormat,
+    pub bytes: Vec<u8>,
+}
+
+pub enum PixelFormat { Rgba8, Bgra8 }
+
+pub struct PixelSize { pub width: u32, pub height: u32 }
+
+pub struct ContentBlockId(pub u32);
+
+pub enum InputEvent {
+    Key(KeyEventPortable),
+    Mouse(MouseEventPortable),
+    Focus(FocusKind),
+}
+
+pub enum FocusKind { Gained, Lost }
+
+pub struct MouseEventPortable {
+    pub kind: MouseEventKind,
+    pub button: Option<MouseButton>,
+    pub x_pixel: u32,    // pixel offset within the rendered frame
+    pub y_pixel: u32,
+    pub modifiers: KeyMods,
+}
+
+pub enum MouseEventKind { Press, Release, Move, ScrollUp, ScrollDown }
+pub enum MouseButton { Left, Middle, Right }
+
+/// Outcome of dispatching an input event to a ContentRenderer.
+pub struct InputOutcome {
+    /// Effects the host should apply (e.g., `OpenUrl` when a link is
+    /// clicked, `PromptSend` if the model offered a "send this back"
+    /// affordance).
+    pub effects: Vec<Effect>,
+    /// True iff the renderer's frame needs re-rendering.
+    pub dirty: bool,
+}
+
+pub struct FocusableElement {
+    /// Opaque plugin-defined identifier (e.g., DOM node ID).
+    pub id: String,
+    /// Bounding box within the rendered frame, for the host to draw
+    /// focus chrome if desired.
+    pub bounds: Rect,
+}
+
+pub struct Rect { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
+
+/// New `Effect` variants needed for canvas interactions:
+//   Effect::OpenUrl { url: String, target: UrlTarget }
+pub enum UrlTarget {
+    /// Hand off to the user's system browser via `open` / `xdg-open`.
+    SystemBrowser,
+    /// Send the URL to the model as a new prompt (e.g., "open this
+    /// file in savvagent: <url>").
+    ContinueConversation,
+}
+```
+
+### New trait
+
+```rust
+// crates/savvagent-plugin/src/content.rs (continued)
+
+#[async_trait::async_trait]
+pub trait ContentRenderer: Send {
+    /// Stable identifier for this renderer instance (matches the
+    /// `ContentBlockId` the host assigned).
+    fn id(&self) -> ContentBlockId;
+
+    /// Render the current state at the given size. Returns the
+    /// content's natural height in pixels at the requested width.
+    fn render(&mut self, size: PixelSize) -> Frame;
+
+    /// Dispatch an input event. Returns side effects + dirty bit.
+    async fn dispatch(
+        &mut self,
+        event: InputEvent,
+    ) -> Result<InputOutcome, PluginError>;
+
+    /// Soft-freeze: stop dispatching events, keep DOM state.
+    fn freeze(&mut self);
+
+    /// Resume from soft freeze. After thaw, the next `render` call
+    /// should produce a frame consistent with the pre-freeze state.
+    fn thaw(&mut self);
+
+    /// Current focusable elements, in tab order. Host uses this for
+    /// focus traversal (Tab / Shift-Tab) and for drawing focus
+    /// indicators around the active element.
+    fn focusable_elements(&self) -> Vec<FocusableElement>;
+
+    /// Current focused element index into `focusable_elements()`, or
+    /// `None` if nothing is focused.
+    fn focused_index(&self) -> Option<u32>;
+
+    /// Move focus to the element at the given index. The host calls
+    /// this when the user Tabs through elements.
+    fn set_focus(&mut self, index: Option<u32>);
+}
+```
+
+### Plugin manifest extension
+
+```rust
+// crates/savvagent-plugin/src/manifest.rs
+
+pub struct Contributions {
+    pub slash_commands: Vec<SlashSpec>,
+    pub screens:        Vec<ScreenSpec>,
+    pub themes:         Vec<ThemeEntry>,
+    pub providers:      Vec<ProviderSpec>,
+    pub hooks:          Vec<HookKind>,
+    pub slots:          Vec<SlotSpec>,
+    pub keybindings:    Vec<KeybindingSpec>,
+    pub content_renderers: Vec<ContentRendererSpec>,     // NEW
+    pub prompt_segments:   Vec<SystemPromptSegment>,     // NEW (see § Prompt contention)
+}
+
+pub struct ContentRendererSpec {
+    /// Content block type tag this renderer handles, e.g., "html".
+    /// Matches the SPP `type` discriminator.
+    pub block_type: String,
+    /// Whether this renderer is the canonical handler for the block
+    /// type. Two plugins both claiming canonical is a startup error.
+    pub canonical: bool,
+}
+
+pub struct SystemPromptSegment {
+    /// Stable identifier of the form `<plugin_id>:<segment_name>`,
+    /// used by `SlashSpec::suppress_prompt_segments` to drop the
+    /// segment for a specific slash command's turn.
+    pub id: String,
+    /// The prompt text. Concatenated with other segments + the host
+    /// default in the order plugins were registered.
+    pub text: String,
+}
+
+// SlashSpec gains an optional suppression list:
+pub struct SlashSpec {
+    pub name: String,
+    pub summary: String,
+    pub args_hint: Option<String>,
+    /// Prompt segment IDs to drop from the system prompt when this
+    /// slash is invoked. Empty by default.
+    pub suppress_prompt_segments: Vec<String>,
+}
+```
+
+### Plugin trait additions
+
+```rust
+// crates/savvagent-plugin/src/plugin.rs
+
+#[async_trait::async_trait]
+pub trait Plugin: Send + Sync {
+    // ... existing methods unchanged ...
+
+    /// Factory for a content renderer instance. Called when the
+    /// conversation log encounters a content block whose `type`
+    /// matches one of this plugin's `ContentRendererSpec`s.
+    fn create_renderer(
+        &self,
+        block_type: &str,
+        id: ContentBlockId,
+        source: &str,
+    ) -> Result<Box<dyn ContentRenderer>, PluginError> {
+        let _ = (block_type, id, source);
+        Err(PluginError::ContentRendererNotFound(block_type.to_string()))
+    }
+}
+```
+
+### WIT portability
+
+All new types follow v0.9.0's rules: owned data only, explicit-width
+numerics, closed enums, async restricted to `async_trait`. The `Frame`
+buffer is `Vec<u8>` which is WIT-portable as `list<u8>` (the v1.0 WIT
+port will accept the copy cost; for the in-process path in v0.X.0
+there's no copy).
+
+`savvagent-plugin/Cargo.toml` continues to omit ratatui/crossterm/
+tokio-runtime/anyhow.
+
+## savvagent-canvas crate
+
+```
+crates/savvagent-canvas/
+    Cargo.toml          # blitz; ratatui-image NOT here (TUI owns that)
+    src/
+        lib.rs
+        canvas.rs       # HtmlCanvas impl ContentRenderer
+        plugin.rs       # HtmlCanvasPlugin impl Plugin
+        subset.rs       # Subset validator + lint warnings
+        coords.rs       # Cell ↔ pixel coordinate translation helpers
+```
+
+Dependencies:
+
+```toml
+[dependencies]
+savvagent-plugin = { workspace = true }
+blitz = { workspace = true }                # version pin TBD by spike
+async-trait = { workspace = true }
+tracing = { workspace = true }
+```
+
+`HtmlCanvas` owns a single Blitz instance for one HTML doc. Its state:
+
+```rust
+pub struct HtmlCanvas {
+    id: ContentBlockId,
+    source: String,
+    renderer: blitz::Renderer,         // exact API TBD by spike
+    dom_state: blitz::DocumentState,
+    frozen: bool,
+    last_frame_size: Option<PixelSize>,
+    focused_node: Option<NodeId>,
+}
+```
+
+`HtmlCanvasPlugin` is a stateless factory exposing the `Plugin` trait:
+
+```rust
+pub struct HtmlCanvasPlugin;
+
+#[async_trait::async_trait]
+impl Plugin for HtmlCanvasPlugin {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            id: PluginId("internal:html-canvas".to_string()),
+            name: "HTML canvas".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            description: "Renders model-authored HTML inline.".to_string(),
+            kind: PluginKind::Optional,
+            contributions: Contributions {
+                content_renderers: vec![ContentRendererSpec {
+                    block_type: "html".to_string(),
+                    canonical: true,
+                }],
+                ..Default::default()
+            },
+        }
+    }
+
+    fn create_renderer(
+        &self,
+        block_type: &str,
+        id: ContentBlockId,
+        source: &str,
+    ) -> Result<Box<dyn ContentRenderer>, PluginError> {
+        match block_type {
+            "html" => Ok(Box::new(HtmlCanvas::new(id, source)?)),
+            other => Err(PluginError::ContentRendererNotFound(other.to_string())),
+        }
+    }
+}
+```
+
+## TUI integration
+
+### Conversation log items
+
+```rust
+// crates/savvagent/src/app.rs (modified)
+
+pub enum LogItem {
+    Text(StyledText),
+    ToolCall(ToolCallView),
+    Canvas {
+        id: ContentBlockId,
+        source_preview: Option<String>,  // Some() while streaming
+    },
+}
+```
+
+The existing `App` owns a `Vec<LogItem>` (currently a `Vec<StyledText>`).
+The `CanvasRegistry` lives alongside:
+
+```rust
+pub struct CanvasRegistry {
+    renderers: HashMap<ContentBlockId, CanvasEntry>,
+    next_id: u32,
+    image_picker: Option<ratatui_image::Picker>,
+}
+
+pub struct CanvasEntry {
+    renderer: Box<dyn ContentRenderer>,
+    image: Option<ratatui_image::StatefulImage>,
+    last_size: PixelSize,
+    state: CanvasState,
+}
+
+pub enum CanvasState { Streaming, Active, Frozen }
+```
+
+### Image protocol emission
+
+The conversation log render path:
+
+1. Walk visible `LogItem`s.
+2. For `LogItem::Text` / `LogItem::ToolCall` — render as today.
+3. For `LogItem::Canvas { id, source_preview }`:
+   - If `source_preview.is_some()`: render as a syntax-highlighted code
+     block (re-use the existing markdown renderer's code-block path).
+   - Else: look up `canvas_registry.renderers[id]`. If absent
+     (renderer dropped or disabled), render the source as code.
+     If present, ask the renderer for a `Frame` at the current width
+     (cell-width × cell-pixel-width), upload to `ratatui-image`, and
+     render the `StatefulImage` at the computed cell region.
+
+`ratatui-image::Picker::from_query_stdio()` is invoked once at startup
+to detect protocol support. Without a working protocol, `image_picker`
+is `None` and all canvases render as source code with a one-line
+warning banner.
+
+### Focus model
+
+```rust
+pub enum AppFocus {
+    ChatInput,
+    ScreenStack,                  // existing v0.9.0 screens take input
+    Canvas(ContentBlockId),
+}
+```
+
+Transitions:
+
+| From → To | Trigger |
+|-----------|---------|
+| ChatInput → Canvas | Mouse click within a canvas region |
+| ChatInput → Canvas | Ctrl-J (jump to next canvas in log) |
+| Canvas(a) → Canvas(b) | Mouse click in another canvas; Ctrl-J / Ctrl-K |
+| Canvas → ChatInput | Esc |
+| Any → ScreenStack | `Effect::OpenScreen` |
+| ScreenStack → previous | `Effect::CloseScreen` |
+
+On `Canvas(a) → *` the registry calls `renderer.freeze()` on `a`. On
+`* → Canvas(b)` it calls `thaw()` if previously frozen.
+
+### Keyboard routing
+
+When `AppFocus == Canvas(id)`:
+
+- `Tab` / `Shift-Tab` → `renderer.set_focus(next/prev index of focusable_elements())`.
+- `Enter` / `Space` on a focused link/button → dispatch as
+  `InputEvent::Key`, plugin returns `Effect::OpenUrl` etc. if a link.
+- `Arrow keys` → `InputEvent::Key`; renderer scrolls overflow
+  containers or moves caret in inputs.
+- `Esc` → unfocus (`AppFocus = ChatInput`).
+- `Ctrl-J` / `Ctrl-K` → jump to next/prev canvas (host-level, not
+  routed into the renderer).
+
+### Mouse routing
+
+Crossterm mouse mode is enabled at startup (already set up for
+ratatui-image's mouse interaction in v0.9.0+). On each mouse event:
+
+1. Cell coordinates from crossterm.
+2. The TUI knows the cell rect each visible canvas occupies (computed
+   during render). If the cell is inside a canvas:
+   - Translate cell-rel coord → pixel-rel coord using the canvas's
+     `last_size` and the cell-pixel ratio reported by
+     `ratatui-image::Picker`.
+   - If the event is a `Press` and the canvas is not focused, transition
+     `AppFocus = Canvas(id)`.
+   - Dispatch `InputEvent::Mouse(MouseEventPortable { ... })`.
+   - If `InputOutcome::dirty`, re-render the frame and re-emit via
+     `ratatui-image` (Kitty's image-replace path keeps the image ID).
+3. If not in any canvas: pass through to chat input / transcript scroll.
+
+### Focus chrome
+
+The host draws a 1-cell-wide border around the focused canvas using
+ratatui. The renderer's frame stays unchanged; the chrome is painted by
+the TUI in the cells immediately surrounding the canvas. This avoids
+re-rendering the frame just for focus state.
+
+Within the canvas, the renderer draws focus on the focused element
+itself (via `:focus` CSS), as a browser would.
+
+## HTML+CSS subset
+
+The model is prompted to emit HTML using *only* the elements and
+properties in this list. The renderer is lenient — out-of-subset
+content may render correctly or may render degraded, but the prompt
+contract does not advertise it.
+
+### Document structure
+
+`<!doctype html>`, `<html>`, `<head>`, `<title>`, `<meta charset>`,
+`<style>`, `<body>`.
+
+### Block-level elements
+
+`<h1>`–`<h6>`, `<p>`, `<blockquote>`, `<pre>`, `<hr>`, `<div>`,
+`<section>`, `<article>`, `<header>`, `<footer>`, `<main>`, `<nav>`,
+`<aside>`, `<figure>`, `<figcaption>`.
+
+### Inline elements
+
+`<span>`, `<a href>`, `<em>`, `<strong>`, `<code>`, `<kbd>`, `<mark>`,
+`<small>`, `<sub>`, `<sup>`, `<br>`, `<time>`, `<abbr>`, `<dfn>`,
+`<q>`, `<cite>`.
+
+### Lists & tables
+
+`<ul>`, `<ol>`, `<li>`; `<dl>`, `<dt>`, `<dd>`; `<table>`, `<thead>`,
+`<tbody>`, `<tfoot>`, `<tr>`, `<th>`, `<td>`, `<caption>`,
+`<colgroup>`, `<col>`.
+
+### Interactive elements
+
+`<a href>` — link follow via `Effect::OpenUrl` (target chosen at
+host-config time; default `SystemBrowser`).
+
+`<details>` / `<summary>` — expand/collapse via Enter or click.
+
+`<button>` — focusable; click dispatches `Effect::OpenUrl` only if its
+`data-href` attribute is present (the "actionable button" pattern). All
+other buttons are visual.
+
+`<form>`, `<input>` (text/number/email/url/password/checkbox/radio),
+`<textarea>`, `<select>` / `<option>`, `<label>`, `<fieldset>`,
+`<legend>`. Form submission emits an `Effect::OpenUrl` with a
+synthesized URL embedding form values if the form has an `action`
+attribute; otherwise form state is local-only.
+
+### Media
+
+`<img src>` — `data:` URIs only in v1. Network URIs are *rejected*
+(the renderer paints a placeholder with the URL printed inside);
+local file URIs may be supported in a follow-on spec.
+
+`<svg>` — supported as inline SVG via Blitz's existing SVG path.
+
+### Styling
+
+`<style>` blocks within `<head>`; inline `style="..."` attributes on
+any element. **No `<link rel="stylesheet">`** — external stylesheets
+are not loaded.
+
+CSS properties: whatever Blitz handles in its current release. The
+prompt advertises a conservative subset (display, flex/grid,
+padding/margin, color, background, border, font-*, line-height,
+overflow:auto, border-radius, box-shadow, opacity, position:relative,
+transform: translate/scale, transition on `:hover`/`:focus`/`:active`,
+the four pseudo-classes, `::before`/`::after`). Media queries are not
+in scope in v1 (canvas size is fixed at terminal width).
+
+### Excluded
+
+`<script>`, `<iframe>`, `<object>`, `<embed>`, `<video>`, `<audio>`,
+`<canvas>` (the element — not to be confused with this feature's
+"canvas"), `<link rel="stylesheet">`, `<style>` with `@import`,
+network-fetched fonts (`@font-face` with remote `src`). Anything
+requiring JavaScript execution.
+
+### Subset validator (advisory)
+
+`savvagent-canvas::subset` walks the parsed DOM and emits warnings
+(via `tracing::warn!`) for out-of-subset elements/attributes/properties.
+Not a render error — the canvas still draws. Warnings surface in the
+log for developers debugging model output.
+
+## Streaming
+
+While the model is streaming the HTML source:
+
+1. On `content_block_start { type: "html" }`: TUI appends a
+   `LogItem::Canvas { id, source_preview: Some(String::new()) }`. No
+   renderer is created yet.
+2. On each `content_block_delta { html_source_delta(s) }`: append `s` to
+   `source_preview`. The TUI re-renders the source-preview block: a
+   monospace code block with syntax highlighting (re-using the
+   existing markdown code-fence path), styled with a colored left
+   border to signal "rendering pending."
+3. On `content_block_stop`:
+   - The TUI moves the accumulated `source_preview` text into the
+     persistent transcript as the canvas's `source`.
+   - It calls `canvas_registry.create(id, source)` which asks the
+     `internal:html-canvas` plugin to construct a renderer.
+   - `LogItem::Canvas { id, source_preview: None }` replaces the entry.
+   - Next render frame swaps the source-preview code block for the
+     rendered image.
+
+This means time-to-first-pixel is `time_to_first_token` (the user sees
+the source appearing token-by-token). Time-to-rendered-canvas is
+`time_to_stream_complete + render_latency`. Render latency is the
+single Blitz layout+paint pass for the finished doc.
+
+Future work (not v1): mid-stream layout passes on a debounce.
+
+## Lifecycle and soft freeze
+
+- **Creation:** `content_block_stop` on a streaming HTML block.
+- **Active:** receives all input events; re-renders on dirty.
+- **Frozen:** `AppFocus` left this canvas. Renderer stops dispatching
+  events. The image stays in the terminal's image protocol cache
+  unchanged. DOM state (form values, scroll offsets, expanded
+  `<details>`, etc.) is retained in the Blitz instance.
+- **Active (resumed):** `AppFocus` returned. `renderer.thaw()` is
+  called; events resume.
+- **Memory note:** a frozen canvas holds its Blitz instance — DOM,
+  style tree, layout tree, paint commands. For a typical spec/plan
+  doc this is on the order of single-digit MB. Hard cap deferred to
+  observation; if memory becomes an issue, a future patch can drop
+  the rendered paint surface (keep DOM) and re-paint on thaw.
+
+### Cross-restart behavior
+
+Transcripts persist `Html { source }` blocks verbatim in the on-disk
+JSON. On `/resume`, the TUI re-creates canvases from source — DOM
+state from the prior session is *not* restored. This is acceptable
+because interactive state (forms, scroll positions) was ephemeral
+anyway; nobody expects "what I typed into the form three days ago" to
+survive a restart.
+
+## Terminal compatibility
+
+At startup, `ratatui-image::Picker::from_query_stdio()` runs a probe
+against the terminal. Outcomes:
+
+| Outcome | Behavior |
+|---------|----------|
+| Kitty graphics protocol available | Use Kitty path; image-replace updates |
+| iTerm2 inline images available | Use iTerm2 path |
+| sixel available | Use sixel path; full-frame updates |
+| None of the above | All canvases render as source code with one-line banner: "Inline rendering requires kitty / WezTerm / Ghostty / iTerm2." |
+
+Known degraded cases:
+
+- **tmux without `set -g allow-passthrough on`:** image escape
+  sequences are eaten by tmux. We do not auto-detect this; the user
+  sees rendering glitches. Documented as a known caveat in
+  `README.md`; configuration snippet provided.
+- **SSH sessions:** image protocols work when the local terminal
+  supports them and the connection forwards escape sequences. No
+  special handling.
+
+## Provider prompting
+
+The `internal:html-canvas` plugin contributes a `SystemPromptSegment`
+(id `internal:html-canvas:default`) that is composed into the host's
+system prompt when the plugin is enabled:
+
+```
+When responding to the user with a structured document — plan, spec,
+status update, design review, comparison table, anything where visual
+hierarchy and scannability matter — prefer HTML over markdown. Wrap
+the HTML in a ```html-canvas fenced block. The user's terminal
+renders it inline as an interactive document with mouse and keyboard
+support.
+
+For code samples, terse replies, error messages, or output that is
+destined for another system (commit messages, PR comments, files on
+disk), use plain text or markdown — those are not rendered as
+canvases.
+
+Supported tags and styles: <subset description>.
+Do not include <script> tags. Do not reference external stylesheets
+or fonts. Use only data: URIs for images.
+```
+
+The subset description in the prompt is a curated subset of the full
+subset (§ HTML+CSS subset) — favors the elements models reliably
+produce well. The full subset is the renderer's compatibility surface;
+the prompt advertises a tighter circle.
+
+The precise scoping language ("structured document … *vs.* output
+destined for another system") is the first line of defense against
+contention with slash commands and agents whose work product is
+markdown by nature. The per-slash suppression mechanism (§ Prompt
+contention) is the explicit second line.
+
+## Reviewing existing artifacts
+
+This feature renders HTML the *model emits*, not HTML it reads from
+disk. There is no automatic "render any markdown file as HTML" path —
+that would be a separate plugin (deferred; see § Out of scope).
+
+For reviewing file-based artifacts (specs, plans, code, ADRs) the
+intended flow is:
+
+1. User asks "review `docs/superpowers/specs/2026-05-21-foo.md`".
+2. Model reads the file with the `read_file` tool.
+3. Model emits the *review* as an HTML canvas — sections by severity,
+   quoted snippets with `<pre><code>` blocks, side-by-side comparisons
+   via flex/grid, callouts for blocking issues. The model is *not*
+   asked to re-render the source file; it produces a review document
+   that happens to be HTML.
+4. User reads the review inline. The original file on disk is
+   unchanged.
+
+For *writing* new specs/plans where both a chat-time canvas view and
+an on-disk markdown file are wanted, the model uses both surfaces:
+emit the markdown via the `write_file` tool (canonical artifact on
+disk) *and* render an HTML canvas view inline for the user to grok in
+the conversation. The system-prompt segment can include guidance to
+this effect; the model is otherwise free to decide.
+
+A future `/view-as-html <path>` slash command (a separate plugin)
+would let users open arbitrary markdown files in a canvas without an
+LLM round-trip. Out of scope for this spec.
+
+## Viewing canvases outside the TUI
+
+Three escape hatches let canvases leave the TUI for the user's real
+browser or for sharing:
+
+### Auto-export (Phase 1)
+
+By default, every rendered HTML block is also written to disk at:
+
+```
+~/.savvagent/canvases/<unix-ts>-<turn_id>-<block_id>.html
+```
+
+The file is self-contained: it includes the HTML source verbatim with
+no rewriting. Auto-export is **on by default**. A `plugins.toml` flag
+disables it:
+
+```toml
+[plugins."internal:html-canvas"]
+enabled = true
+auto_export = false
+```
+
+The transcript JSON remains the source of truth — the on-disk
+`.html` is a convenience copy. Deleting the files does not corrupt
+the transcript; re-opening the transcript via `/resume` re-creates
+the files (if auto-export is on).
+
+The directory is created with `0o700`, files `0o600`, matching the
+existing `~/.savvagent/` permission discipline.
+
+### `/save-canvas <path>` (Phase 1)
+
+The `internal:html-canvas` plugin contributes a `save-canvas` slash
+command. Arguments:
+
+```
+/save-canvas                              # saves the most recent canvas to a default path
+/save-canvas ./my-spec.html               # explicit path
+/save-canvas ./spec.html --block 3        # specific canvas by index in current transcript
+```
+
+Emits `Effect::PushNote` confirming the path, plus an `Effect::OpenUrl
+{ url: "file://...", target: SystemBrowser }` if the user adds
+`--open`.
+
+### Open-in-browser keybinding (Phase 2)
+
+When focus is on a canvas, **Ctrl-O** writes the canvas to a temp
+file (`/tmp/savvagent-canvas-<id>.html`) and shells out to
+`xdg-open` / `open` / Windows `start`. The user's actual browser
+renders it with full fidelity — useful for sharing, printing, or for
+canvases that hit the edges of Blitz's subset support.
+
+The keybinding is contributed via `KeybindingSpec` with
+`KeyScope::OnFocusedCanvas` (a new scope variant; see § Plugin trait
+extension).
+
+## Prompt contention and suppression
+
+Different parts of savvagent will reasonably want different output
+formats. The HTML-canvas system prompt is opt-in by plugin enable
+state and *scoped* by per-slash suppression.
+
+### How segments compose
+
+When constructing the system prompt for a turn, the host:
+
+1. Starts with the default savvagent system prompt.
+2. Appends project context (`SAVVAGENT.md` if present).
+3. Iterates enabled plugins in registration order. For each, appends
+   any contributed `SystemPromptSegment.text`.
+4. If the turn is the dispatch of a `SlashSpec` and the spec lists
+   `suppress_prompt_segments`, those segment IDs are filtered out.
+5. The result is the final `system` field in the `CompleteRequest`.
+
+This means:
+
+- **Globally turning off canvas guidance:** disable
+  `internal:html-canvas` in `plugins.toml`.
+- **Turning off canvas guidance for one slash command:** that slash's
+  `SlashSpec::suppress_prompt_segments` includes
+  `"internal:html-canvas:default"`.
+- **Mixed conversations:** a user can chat normally (HTML canvas on),
+  then invoke `/review-pr` (canvas suppressed; model emits markdown
+  for GitHub comments), then resume chatting (canvas back on for the
+  next user turn).
+
+### Built-in markdown-required slashes
+
+The spec assumes a few built-in slash commands will suppress the
+canvas segment because their output flows to systems that consume
+markdown verbatim:
+
+- `/commit` — commit messages
+- `/pr` — PR titles and bodies
+- (future) `/review-pr` — GitHub PR comment bodies
+
+These are *not* shipped as part of this spec; if a slash command
+already exists that conflicts, its `SlashSpec` is updated to include
+the suppression in the same PR that introduces this feature.
+
+### Agent contention (future)
+
+When savvagent grows a sub-agent concept, each agent declares its
+own `system` field that overrides the host's plugin-composed prompt
+for the duration of the sub-agent's turn. Plugin-contributed segments
+do *not* leak into sub-agent prompts by default. The agent's
+declaration can opt in by referencing a segment ID. Mechanism deferred
+to whenever the sub-agent feature lands.
+
+### Multiple prompt-contributing plugins
+
+If two plugins both contribute segments and one's instructions
+contradict the other, behavior is undefined — the host concatenates
+them and trusts the model. Plugin authors are expected to scope their
+language precisely. Conflict detection is out of scope; this is a
+"plugins-are-trust" situation in v0.9.0+ generally.
+
+## Error handling
+
+| Failure | Behavior |
+|---------|----------|
+| HTML doesn't parse (truly malformed) | html5ever auto-recovers; we render best-effort. Subset validator logs warnings. |
+| Unsupported element / property | Blitz renders what it can; subset validator logs warnings. |
+| `<img src="https://...">` (network URI) | Renderer paints a placeholder showing the URL in monospace. |
+| Image protocol failure (terminal disconnects, IO error) | Canvas falls back to rendering source as code with a one-line error banner. Failure logged. |
+| Renderer panic | Caught at the canvas boundary. Affected canvas converts to source-code fallback. Other canvases unaffected. Bug-style `tracing::error!` with stack. |
+| Blitz API change at compile time | Pinned Blitz version in `[workspace.dependencies]`. Upgrades go through the same review cycle as any dep bump. |
+
+## Persistence
+
+- Transcripts JSON gains the new `Html` content block type. The block
+  carries `{ type: "html", source: "..." }`. Existing transcripts
+  load unchanged (no `Html` blocks present).
+- The on-disk schema version of transcripts (if any) is bumped to
+  signal the new block type. Older builds loading newer transcripts
+  log a warning and render `Html` blocks as raw source.
+- Active interactive state (form values, scroll, focus, expanded
+  details) is NOT persisted in v1. Re-rendered from source on load.
+
+## Testing strategy
+
+### Unit tests
+
+In `crates/savvagent-canvas/src/`:
+
+- `subset` validator: known good docs produce zero warnings; known bad
+  docs produce expected warnings.
+- Coordinate translation (`coords.rs`): cell-pixel ratio computations;
+  edge cases at canvas boundary.
+- `HtmlCanvas::dispatch` for synthetic events: focus traversal Tab/
+  Shift-Tab walks `focusable_elements` in order; `set_focus` updates
+  `focused_index`; mouse-press at a known pixel coord lands on the
+  expected element.
+
+In `crates/savvagent-plugin/src/`:
+
+- New types compile under WIT portability rules (no ratatui/crossterm
+  imports added).
+- `Plugin::create_renderer` default impl returns the expected error
+  variant.
+
+In `crates/savvagent/src/`:
+
+- `CanvasRegistry`: create → freeze → thaw → drop lifecycle.
+- `AppFocus` transitions: mouse click in canvas region focuses;
+  Esc unfocuses; Ctrl-J/Ctrl-K jumps in correct order.
+- Streaming: `content_block_start` → deltas → `content_block_stop`
+  produces a `Canvas` LogItem with the rendered source.
+
+### Integration tests
+
+- **Headless render snapshot.** A small set of canonical HTML docs
+  (one spec-shaped doc, one diff view, one expandable plan, one form,
+  one with `<details>`) renders to a frame; the frame is captured
+  and snapshot-tested. Run on CI with a feature flag that enables a
+  software rasterizer for Blitz to keep results deterministic.
+- **Mouse round-trip.** Drive a fake terminal: receive a mouse press
+  at cell coords, assert the right canvas was focused, assert
+  `InputEvent::Mouse` reached the renderer with the right pixel
+  coords. (No actual image-protocol emission; the bytes are
+  swallowed.)
+
+### Manual cross-terminal verification
+
+A test matrix run before each release:
+
+| Terminal | Protocol | Expected |
+|----------|----------|----------|
+| Kitty | kitty graphics | full render + interaction |
+| WezTerm | iTerm2 protocol | full render + interaction |
+| iTerm2 | iTerm2 protocol | full render + interaction |
+| Ghostty | kitty graphics | full render + interaction |
+| WezTerm under tmux + `allow-passthrough on` | kitty graphics | full render + interaction |
+| Alacritty | none | source-code fallback with banner |
+| Tmux without passthrough | varies | known-degraded; banner suggests config |
+
+Documented in `docs/canvas-terminal-compat.md`.
+
+## Acceptance criteria
+
+**SPP & host.**
+
+1. SPP v0.2.0: `Html { source }` content block defined; `html_source_delta` stream delta defined.
+2. All four provider crates (`provider-anthropic`, `provider-openai`, `provider-gemini`, `provider-local`) recognize and extract `html-canvas` fenced blocks during streaming.
+3. `savvagent-host` forwards `Html` blocks through `run_turn_streaming` unchanged.
+4. Transcripts JSON round-trips `Html` blocks losslessly.
+
+**Renderer.**
+
+5. `savvagent-canvas` crate builds in the workspace; depends on `savvagent-plugin` + Blitz.
+6. `HtmlCanvas` implements `ContentRenderer`: renders the spec's HTML+CSS subset to a pixel buffer; dispatches mouse and keyboard events; soft-freezes losslessly.
+
+**Plugin integration.**
+
+7. `savvagent-plugin` gains `ContentRenderer` trait, `ContentRendererSpec`, `Frame`, `InputEvent`, `MouseEventPortable`, `UrlTarget`, `Effect::OpenUrl`, `SystemPromptSegment`, `SlashSpec::suppress_prompt_segments`. All new types pass the existing CI WIT-portability grep.
+8. `internal:html-canvas` plugin is registered in `register_builtins()` as Optional (toggleable via `plugins.toml`).
+9. Disabling the plugin: HTML blocks render as source code; no system prompt segment composed; no Blitz instance created; no auto-export.
+10. Enabled plugin's `SystemPromptSegment` (`internal:html-canvas:default`) is composed into the system prompt by the host's prompt composition step.
+11. A `SlashSpec` listing `internal:html-canvas:default` in `suppress_prompt_segments` invokes the model without that segment for that turn.
+
+**Persistence & export.**
+
+12. Transcript JSON round-trips `Html { source }` blocks losslessly.
+13. Auto-export on by default: each rendered HTML block writes to `~/.savvagent/canvases/<unix-ts>-<turn>-<block>.html` with `0o600`. The directory is created with `0o700` if missing.
+14. `auto_export = false` in `plugins.toml` disables the auto-write without affecting in-TUI rendering.
+15. `/save-canvas` writes the chosen canvas to a user-specified path; `--open` opens it in the system browser.
+16. Phase 2: Ctrl-O while focused on a canvas opens it in the system browser via `xdg-open` / `open`.
+
+**TUI.**
+
+10. Conversation log renders mixed `Text` / `ToolCall` / `Canvas` items. Canvases appear inline at their conversation position.
+11. Mouse click inside a canvas region focuses it; subsequent mouse events route to the renderer with correctly-translated pixel coordinates.
+12. Ctrl-J / Ctrl-K jumps between visible canvases. Esc returns focus to chat input.
+13. Tab / Shift-Tab traverses focusable elements within the focused canvas.
+14. Streaming: the source appears typewriter-style during stream; on `content_block_stop`, the source is replaced by the rendered canvas in place.
+15. Soft freeze: focus leaving a canvas pauses it; refocus resumes form values, scroll positions, expanded `<details>`.
+
+**Terminal compat.**
+
+16. Image-protocol detection at startup chooses Kitty / iTerm2 / WezTerm / Ghostty / sixel based on the terminal probe.
+17. In unsupported terminals, HTML blocks render as source code with a banner; no rendering errors propagate to the user.
+
+## Phasing
+
+Two shippable releases.
+
+### Phase 1 — Static rendering + export (one release)
+
+- SPP v0.2.0 wire changes.
+- Provider-side fence extraction (`savvagent-fence` crate).
+- `savvagent-plugin` trait extensions: `ContentRenderer` trait, `Frame`, `ContentRendererSpec`, `SystemPromptSegment`, `SlashSpec::suppress_prompt_segments`, `Effect::OpenUrl`.
+- Host prompt composition step that gathers `SystemPromptSegment`s from enabled plugins and honors per-slash suppression.
+- `savvagent-canvas` crate with Blitz integration; `HtmlCanvas` renders to pixel buffer (no event dispatch yet).
+- `internal:html-canvas` plugin registered with its default prompt segment.
+- TUI: `LogItem::Canvas`, conversation log inline rendering via `ratatui-image`, source-code fallback for unsupported terminals.
+- Streaming source preview → swap on stream complete.
+- Auto-export to `~/.savvagent/canvases/`, configurable via `plugins.toml`.
+- `/save-canvas` slash command.
+- Cross-terminal test matrix run.
+
+After Phase 1 the user gets: rich rendered HTML inline in the
+transcript, with every canvas also available as a standalone `.html`
+file in `~/.savvagent/canvases/` for opening in a real browser or
+sharing. No interaction inside the TUI yet. This alone solves a big
+chunk of the "I don't read markdown plans" problem.
+
+### Phase 2 — Interaction (one release)
+
+- `InputEvent`, `MouseEventPortable`, `InputOutcome`, `FocusableElement` types.
+- `ContentRenderer::dispatch`, `freeze`, `thaw`, `focusable_elements`, `set_focus`, `focused_index`.
+- `HtmlCanvas` implements the eventing surface against Blitz.
+- TUI: `AppFocus::Canvas`, mouse-routing, keyboard routing, Ctrl-J/K block traversal, Tab/Shift-Tab element traversal, Esc to unfocus, focus chrome.
+- New keybinding scope `KeyScope::OnFocusedCanvas` for canvas-specific shortcuts.
+- Ctrl-O "open in browser" keybinding while focused on a canvas.
+- Soft freeze on focus loss; thaw on refocus.
+- Link follow via `Effect::OpenUrl` (default `SystemBrowser`).
+- `<details>` expand/collapse interaction.
+- Form input (text/checkbox/radio/select).
+
+### Phase 0 (spike, before Phase 1 implementation begins)
+
+- Pin a Blitz version, build a minimal example that:
+  - Parses an HTML doc.
+  - Lays it out at a fixed size.
+  - Paints to an RGBA buffer.
+  - Dispatches a synthetic click at pixel coords.
+  - Reports which element was hit and any DOM state change.
+- Document the actual Blitz API and any deltas from this spec's
+  assumed surface. If material divergence, revise this spec before
+  Phase 1 planning.
+
+## Risk register
+
+- **Blitz event dispatch path.** Mitigated by Phase 0 spike before
+  Phase 2 planning.
+- **Image-protocol bandwidth on rapid mouse-move events.** Mitigated by
+  re-render only on `InputOutcome::dirty`, by Kitty's image-replace
+  semantics, and by debouncing mouse-move events at the TUI layer
+  (16 ms / ~60 Hz).
+- **Provider parser ambiguity.** A model emitting `\`\`\`html` (without
+  `-canvas`) when it means a code sample, vs.  `\`\`\`html-canvas`
+  when it means a rendered doc. Mitigation: only the explicit
+  `html-canvas` sentinel triggers extraction; plain `html` stays a
+  code sample.
+- **WIT portability of `Frame::bytes`.** A multi-MB `Vec<u8>` crossing
+  the plugin boundary is fine in-process but lossy under WIT. v0.X.0
+  ships in-process; the WIT port is the v1.0 problem. Spec calls this
+  out so future-us doesn't claim WIT-portability without nuance.
+- **Memory growth from frozen canvases.** Acknowledged; observation-
+  driven cap deferred to a follow-on patch if it becomes an issue.
+- **Tmux passthrough discoverability.** Many users will hit tmux
+  passthrough as a footgun. Mitigation: README section + a startup
+  hint when we detect tmux but no passthrough.
+- **Prompt contention across plugins.** Multiple plugins with
+  contradictory `SystemPromptSegment`s could confuse the model. v1
+  trusts plugin authors to scope language precisely and provides no
+  static analysis or runtime conflict detection. Mitigation: the
+  built-in segment's wording is precise about *when* HTML applies vs.
+  doesn't ("destined for another system → plain text/markdown"),
+  reducing the conflict surface for the cases we control.
+
+## Out of scope (deferred)
+
+- Terminal-widget rendering fallback (path A from brainstorming).
+  Future spec if there's demand for low-fidelity-but-universal mode.
+- Streaming layout (mid-stream re-render).
+- Script execution.
+- Network resources (external stylesheets, fonts, images via
+  http/https URIs).
+- Multi-page / paginated HTML docs.
+- Cross-restart interactive state.
+- WASM-loaded `ContentRenderer` plugins. The trait surface is
+  WIT-portable in shape; the loader is the v1.0+ problem.
+- Themes that style the canvas chrome differently per app theme.
+  v1 uses one focus-chrome style.
+- Deterministic markdown-file viewer (`/view-as-html <path>`). A
+  separate plugin spec; would let users render existing `.md` files
+  as canvases without an LLM round-trip.
+- Cross-plugin prompt-segment conflict detection. Plugin authors are
+  expected to scope their language precisely; the host concatenates
+  and trusts the model.
+- Sub-agent prompt-segment inheritance. Mechanism deferred to whenever
+  the sub-agent feature lands.
+
+## Open questions
+
+- **Crate version of Blitz** to pin. Decided in Phase 0 spike.
+- **Default `UrlTarget`** for `<a href>` follow: `SystemBrowser` vs.
+  `ContinueConversation`. Lean: `SystemBrowser` for absolute URLs;
+  `ContinueConversation` for relative paths (model probably means
+  "look at this file in the project"). Final decision in plan.
+- **Whether `internal:html-canvas` is Core or Optional.** Lean:
+  Optional in v1 (allow users to turn it off if Blitz misbehaves on
+  their setup); promote to Core in a later release once stable.
+- **System prompt subset advertisement** — how tight to make it. Lean:
+  one paragraph + a short tag list, not the full subset table. Final
+  wording decided when writing prompt copy.
+
+## Implementation order (high-level — full plan in writing-plans output)
+
+Phase 0 spike → Phase 1 (SPP, provider extract, canvas crate static
+render, plugin trait extension, TUI integration, streaming preview) →
+Phase 2 (eventing, freeze/thaw, focus, mouse/kb routing). Each phase
+ships as its own release with notes, README/CHANGELOG update, and
+GitHub issue closure per the project's existing release discipline.
