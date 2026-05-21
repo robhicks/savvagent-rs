@@ -3709,6 +3709,7 @@ version = "0.16.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "crossterm",
  "dirs",
  "dotenvy",
@@ -3738,6 +3739,7 @@ dependencies = [
  "sha2",
  "tar",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml",
  "tool-bash",

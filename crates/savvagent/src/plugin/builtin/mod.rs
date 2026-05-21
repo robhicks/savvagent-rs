@@ -45,6 +45,7 @@ pub mod language;
 /// `/lsp` slash command: multi-select picker over a curated LSP catalog,
 /// downloads pinned binaries (or `npm i -g`s), then merges entries into
 /// `~/.savvagent/lsp.toml`.
+#[allow(dead_code)]
 pub mod lsp_installer;
 
 /// Cycles to the next model on the active provider; registered as `/model`.

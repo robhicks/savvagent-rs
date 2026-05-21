@@ -1,8 +1,12 @@
 //! Per-entry installer: binary download/verify/extract or npm i -g.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
+
+use super::catalog::{ArchiveKind, CatalogEntry, InstallMethod, Target};
 
 /// Streaming progress emitted by the install path via its `notify`
 /// callback. Each variant maps roughly to one stage of the install
@@ -123,9 +127,355 @@ pub enum InstallError {
     Io(#[from] std::io::Error),
 }
 
+/// Thin abstraction over an HTTP client so tests can substitute a
+/// fixture without spinning up a real server.
+#[async_trait::async_trait]
+pub trait Downloader: Send + Sync {
+    /// Fetch `url` and return its body bytes.
+    async fn fetch(&self, url: &str) -> Result<bytes::Bytes, InstallError>;
+}
+
+/// Production [`Downloader`] backed by `reqwest`. Sets the
+/// `User-Agent: savvagent/<version>` header so GitHub's asset CDN logs
+/// us as a known client.
+pub struct ReqwestDownloader {
+    /// The underlying client. Reused across fetches.
+    pub client: reqwest::Client,
+}
+
+impl ReqwestDownloader {
+    /// Build a default client. Returns `None` if `reqwest::Client::builder().build()`
+    /// fails (network stack misconfigured); callers fall back to a
+    /// PushNote error.
+    pub fn new() -> Option<Self> {
+        reqwest::Client::builder()
+            .build()
+            .ok()
+            .map(|client| Self { client })
+    }
+}
+
+#[async_trait::async_trait]
+impl Downloader for ReqwestDownloader {
+    async fn fetch(&self, url: &str) -> Result<bytes::Bytes, InstallError> {
+        let resp = self
+            .client
+            .get(url)
+            .header(
+                reqwest::header::USER_AGENT,
+                concat!("savvagent/", env!("CARGO_PKG_VERSION")),
+            )
+            .send()
+            .await
+            .map_err(|e| InstallError::Download(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(InstallError::Download(format!(
+                "HTTP {}: {}",
+                resp.status(),
+                url
+            )));
+        }
+        resp.bytes()
+            .await
+            .map_err(|e| InstallError::Download(e.to_string()))
+    }
+}
+
+/// Install a single `BinaryDownload` catalog entry: download from the
+/// pinned URL, verify SHA256, extract into
+/// `<lsp_bin_root>/<entry.id>/`, set the executable bit on Unix.
+///
+/// `notify` receives one `InstallProgress` per stage; the wrapping
+/// plugin pumps these into the conversation log.
+pub async fn install_binary_entry(
+    entry: &CatalogEntry,
+    target: Target,
+    lsp_bin_root: &Path,
+    downloader: &dyn Downloader,
+    notify: impl Fn(InstallProgress) + Send + Sync,
+) -> Result<InstallOutcome, InstallError> {
+    let InstallMethod::BinaryDownload {
+        urls,
+        archive: _,
+        binary_path,
+    } = entry.method
+    else {
+        return Err(InstallError::Download(format!(
+            "{}: install_binary_entry called on a non-Binary entry",
+            entry.id
+        )));
+    };
+
+    let (_, url, expected_sha) = urls
+        .iter()
+        .find(|(t, _, _)| *t == target)
+        .ok_or_else(|| InstallError::UnsupportedTarget(format!("{target:?}")))?;
+
+    notify(InstallProgress::Started {
+        entry_id: entry.id.into(),
+    });
+
+    notify(InstallProgress::Downloading {
+        entry_id: entry.id.into(),
+        bytes_so_far: 0,
+        total: None,
+    });
+    let bytes = downloader.fetch(url).await?;
+    notify(InstallProgress::Downloading {
+        entry_id: entry.id.into(),
+        bytes_so_far: bytes.len() as u64,
+        total: Some(bytes.len() as u64),
+    });
+
+    notify(InstallProgress::Verifying {
+        entry_id: entry.id.into(),
+    });
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual = hex::encode(hasher.finalize());
+    if actual != *expected_sha {
+        return Err(InstallError::ChecksumMismatch {
+            entry_id: entry.id.into(),
+            expected: (*expected_sha).into(),
+            actual,
+        });
+    }
+
+    notify(InstallProgress::Extracting {
+        entry_id: entry.id.into(),
+    });
+    let install_dir = lsp_bin_root.join(entry.id);
+    if install_dir.exists() {
+        tokio::fs::remove_dir_all(&install_dir).await?;
+    }
+    tokio::fs::create_dir_all(&install_dir).await?;
+    let installed_at = extract_one(&bytes, url, binary_path, &install_dir, entry.id).await?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&installed_at)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&installed_at, perms)?;
+    }
+
+    notify(InstallProgress::Done {
+        entry_id: entry.id.into(),
+        installed_at: installed_at.clone(),
+    });
+    Ok(InstallOutcome {
+        entry_id: entry.id.into(),
+        installed_at,
+    })
+}
+
+/// Extract `bytes` into `install_dir`, choosing the extractor by `url`'s
+/// suffix (`.gz` / `.tar.gz` / `.zip`). Returns the absolute path to
+/// the binary inside the install dir (with `.exe` appended on Windows
+/// if the catalog template omitted it).
+async fn extract_one(
+    bytes: &bytes::Bytes,
+    url: &str,
+    binary_path: &str,
+    install_dir: &Path,
+    entry_id: &str,
+) -> Result<PathBuf, InstallError> {
+    let extract_kind = if url.ends_with(".tar.gz") || url.ends_with(".tgz") {
+        ArchiveKind::TarGz
+    } else if url.ends_with(".zip") {
+        ArchiveKind::Zip
+    } else if url.ends_with(".gz") {
+        ArchiveKind::GzipOnly
+    } else {
+        return Err(InstallError::Extract {
+            entry_id: entry_id.into(),
+            reason: format!("unrecognised archive suffix in {url}"),
+        });
+    };
+
+    match extract_kind {
+        ArchiveKind::TarGz => {
+            let dec = flate2::read::GzDecoder::new(&bytes[..]);
+            let mut ar = tar::Archive::new(dec);
+            ar.unpack(install_dir).map_err(|e| InstallError::Extract {
+                entry_id: entry_id.into(),
+                reason: e.to_string(),
+            })?;
+        }
+        ArchiveKind::Zip => {
+            let reader = std::io::Cursor::new(&bytes[..]);
+            let mut zip = zip::ZipArchive::new(reader).map_err(|e| InstallError::Extract {
+                entry_id: entry_id.into(),
+                reason: e.to_string(),
+            })?;
+            zip.extract(install_dir).map_err(|e| InstallError::Extract {
+                entry_id: entry_id.into(),
+                reason: e.to_string(),
+            })?;
+        }
+        ArchiveKind::GzipOnly => {
+            let bin_in_dir = install_dir.join(resolve_binary_path(binary_path));
+            let mut dec = flate2::read::GzDecoder::new(&bytes[..]);
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut dec, &mut buf).map_err(InstallError::Io)?;
+            let mut out = tokio::fs::File::create(&bin_in_dir).await?;
+            out.write_all(&buf).await?;
+            out.flush().await?;
+        }
+    }
+
+    let bin_in_dir = install_dir.join(resolve_binary_path(binary_path));
+    if !bin_in_dir.exists() {
+        return Err(InstallError::Extract {
+            entry_id: entry_id.into(),
+            reason: format!("binary not found at {} after extract", bin_in_dir.display()),
+        });
+    }
+    Ok(bin_in_dir)
+}
+
+/// Append `.exe` to `binary_path` on Windows when the catalog template
+/// omitted it. The catalog deliberately keeps `binary_path` Unix-style
+/// so a single literal works across targets.
+fn resolve_binary_path(binary_path: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if !binary_path.ends_with(".exe") {
+            return PathBuf::from(format!("{binary_path}.exe"));
+        }
+    }
+    PathBuf::from(binary_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::builtin::lsp_installer::catalog::{
+        ArchiveKind, Category, InstallMethod, LspEntryTemplate,
+    };
+
+    fn fake_entry(urls: &'static [(Target, &'static str, &'static str)]) -> CatalogEntry {
+        CatalogEntry {
+            id: "fakelsp",
+            display_name: "fakelsp",
+            language_label: "fake",
+            version: "0.0.0",
+            category: Category::Binary,
+            method: InstallMethod::BinaryDownload {
+                urls,
+                archive: ArchiveKind::GzipOnly,
+                binary_path: "fakelsp",
+            },
+            lsp_entry: LspEntryTemplate {
+                id: "fake",
+                extensions: &["fake"],
+                root_markers: &["fake.toml"],
+                command: "{{BIN}}",
+                args: &[],
+            },
+        }
+    }
+
+    struct StubDownloader {
+        payload: bytes::Bytes,
+    }
+
+    #[async_trait::async_trait]
+    impl Downloader for StubDownloader {
+        async fn fetch(&self, _url: &str) -> Result<bytes::Bytes, InstallError> {
+            Ok(self.payload.clone())
+        }
+    }
+
+    fn gzipped(plain: &[u8]) -> Vec<u8> {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(plain).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn binary_download_happy_path_writes_executable() {
+        let plain = b"#!/bin/sh\necho fakelsp\n";
+        let archive = gzipped(plain);
+        let sha = hex::encode(Sha256::digest(&archive));
+        let url_static: &'static str =
+            Box::leak("https://example.test/fakelsp.gz".to_string().into_boxed_str());
+        let sha_static: &'static str = Box::leak(sha.into_boxed_str());
+        let urls: &'static [(Target, &'static str, &'static str)] = Box::leak(Box::new([(
+            Target::LinuxX86_64Gnu,
+            url_static,
+            sha_static,
+        )]));
+
+        let entry = fake_entry(urls);
+        let tmp = tempfile::tempdir().unwrap();
+        let dl = StubDownloader {
+            payload: bytes::Bytes::from(archive),
+        };
+        let outcome =
+            install_binary_entry(&entry, Target::LinuxX86_64Gnu, tmp.path(), &dl, |_| {})
+                .await
+                .unwrap();
+        assert!(outcome.installed_at.exists(), "binary must exist on disk");
+        let written = std::fs::read(&outcome.installed_at).unwrap();
+        assert_eq!(written, plain, "binary contents must match");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&outcome.installed_at)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o111,
+                0o111,
+                "binary must be executable, got {mode:o}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_returns_error() {
+        let archive = gzipped(b"not-the-payload-we-expected");
+        let urls: &'static [(Target, &'static str, &'static str)] = &[(
+            Target::LinuxX86_64Gnu,
+            "https://example.test/fakelsp.gz",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )];
+        let entry = fake_entry(urls);
+        let tmp = tempfile::tempdir().unwrap();
+        let dl = StubDownloader {
+            payload: bytes::Bytes::from(archive),
+        };
+        let err = install_binary_entry(&entry, Target::LinuxX86_64Gnu, tmp.path(), &dl, |_| {})
+            .await
+            .unwrap_err();
+        match err {
+            InstallError::ChecksumMismatch { .. } => (),
+            other => panic!("expected ChecksumMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_target_returns_error() {
+        let urls: &'static [(Target, &'static str, &'static str)] = &[(
+            Target::LinuxX86_64Gnu,
+            "https://example.test/fakelsp.gz",
+            "0",
+        )];
+        let entry = fake_entry(urls);
+        let tmp = tempfile::tempdir().unwrap();
+        let dl = StubDownloader {
+            payload: bytes::Bytes::new(),
+        };
+        let err = install_binary_entry(&entry, Target::MacosAarch64, tmp.path(), &dl, |_| {})
+            .await
+            .unwrap_err();
+        assert!(matches!(err, InstallError::UnsupportedTarget(_)));
+    }
 
     #[test]
     fn tool_not_found_display_mentions_tool_and_action() {
