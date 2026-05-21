@@ -146,8 +146,9 @@ pub enum EntryStatus {
 
 use crate::plugin::builtin::lsp_installer::catalog::{CatalogEntry, InstallMethod, Target};
 use crate::plugin::builtin::lsp_installer::installer::{
-    self, Downloader, InstallError, NpmRunner,
+    self, Downloader, InstallError, InstallOutcome, NpmRunner,
 };
+use crate::plugin::builtin::lsp_installer::config_writer;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -240,6 +241,80 @@ pub async fn run_installs(
             }
         }
     }
+}
+
+/// Spawn the install-driver task. Returns the `JoinHandle` so callers
+/// (production: the screen) can choose whether to await it; the screen
+/// just drops the handle since it polls the shared state instead.
+///
+/// The task:
+///   1. Calls [`run_installs`] to drive each entry's install.
+///   2. Collects every entry that ended in `EntryStatus::Installed`
+///      into an upsert list.
+///   3. Calls `config_writer::merge_into_user_config` to merge those
+///      entries into `lsp.toml`.
+///   4. Sets `state.finished = true` and writes any config-writer
+///      error to `state.config_error`.
+pub fn spawn_driver(
+    entries: Vec<&'static CatalogEntry>,
+    target: Target,
+    lsp_bin_root: std::path::PathBuf,
+    lsp_toml: std::path::PathBuf,
+    state: Arc<TokioMutex<ProgressState>>,
+    downloader: Arc<dyn Downloader>,
+    npm: Arc<dyn NpmRunner>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let entries_for_run = entries.clone();
+        run_installs(
+            entries_for_run,
+            target,
+            lsp_bin_root,
+            Arc::clone(&state),
+            downloader.as_ref(),
+            npm.as_ref(),
+        )
+        .await;
+
+        // Yield once to let any in-flight spawned notification tasks
+        // (most importantly the `Done` → `Installed` flip) settle before
+        // we read the state to build the config-writer upsert list.
+        tokio::task::yield_now().await;
+
+        // Collect successful outcomes for the config-writer.
+        let outcomes: Vec<(&'static CatalogEntry, InstallOutcome)> = {
+            let guard = state.lock().await;
+            entries
+                .iter()
+                .copied()
+                .filter_map(|entry| {
+                    let slot = guard.entries.iter().find(|e| e.id == entry.id)?;
+                    match &slot.status {
+                        EntryStatus::Installed { installed_at } => Some((
+                            entry,
+                            InstallOutcome {
+                                entry_id: entry.id.to_string(),
+                                installed_at: installed_at.clone(),
+                            },
+                        )),
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+
+        if !outcomes.is_empty() {
+            let upserts: Vec<(&CatalogEntry, &InstallOutcome)> =
+                outcomes.iter().map(|(e, o)| (*e, o)).collect();
+            if let Err(err) = config_writer::merge_into_user_config(&lsp_toml, &upserts).await {
+                let mut guard = state.lock().await;
+                guard.config_error = Some(err.to_string());
+            }
+        }
+
+        let mut guard = state.lock().await;
+        guard.finished = true;
+    })
 }
 
 /// Build the initial [`ProgressState`] for the list of catalog ids the
@@ -680,6 +755,43 @@ mod tests {
         async fn fetch(&self, _url: &str) -> Result<bytes::Bytes, InstallError> {
             Err(InstallError::Download("network down".into()))
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_driver_finishes_and_writes_config() {
+        let (entry_a, archive_a) = fake_binary_entry("fake-cfg-a");
+        let dl: Arc<dyn Downloader> = Arc::new(CountingDownloader { payload: archive_a });
+        let npm: Arc<dyn NpmRunner> = Arc::new(NoopNpm);
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_root = tmp.path().join("lsp-bin");
+        let toml_path = tmp.path().join("lsp.toml");
+
+        let state = Arc::new(TokioMutex::new(ProgressState {
+            entries: vec![EntryProgress {
+                id: "fake-cfg-a".into(),
+                display_name: "fake-cfg-a".into(),
+                status: EntryStatus::Queued,
+            }],
+            finished: false,
+            config_error: None,
+        }));
+
+        let join = spawn_driver(
+            vec![entry_a],
+            Target::LinuxX86_64Gnu,
+            bin_root,
+            toml_path.clone(),
+            Arc::clone(&state),
+            dl,
+            npm,
+        );
+        join.await.expect("driver task joined");
+
+        let s = state.lock().await;
+        assert!(s.finished, "finished flag must be set");
+        assert!(s.config_error.is_none(), "config write must succeed");
+        assert!(matches!(s.entries[0].status, EntryStatus::Installed { .. }));
+        assert!(toml_path.exists(), "lsp.toml must exist after merge");
     }
 
     #[tokio::test]
