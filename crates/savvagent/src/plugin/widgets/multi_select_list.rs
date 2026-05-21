@@ -91,8 +91,23 @@ impl<T: Clone> MultiSelectList<T> {
             KeyCode::Enter => MultiSelectOutcome::Confirm(self.confirm_selection()),
             KeyCode::Down => self.move_cursor(1),
             KeyCode::Up => self.move_cursor(-1),
+            KeyCode::Char(' ') => self.toggle_cursor(),
             _ => MultiSelectOutcome::Stay,
         }
+    }
+
+    fn toggle_cursor(&mut self) -> MultiSelectOutcome<T> {
+        let (id, item_clone) = {
+            let filtered = self.filtered();
+            let Some(item) = filtered.get(self.cursor) else {
+                return MultiSelectOutcome::Stay;
+            };
+            ((self.id_fn)(item), (*item).clone())
+        };
+        if !self.selected_ids.remove(&id) {
+            self.selected_ids.insert(id);
+        }
+        MultiSelectOutcome::Toggle(item_clone)
     }
 
     fn move_cursor(&mut self, delta: isize) -> MultiSelectOutcome<T> {
@@ -199,5 +214,38 @@ mod tests {
         let outcome = l.on_key(key(KeyCode::Up));
         assert_eq!(l.cursor(), 0);
         assert!(matches!(outcome, MultiSelectOutcome::Preview(Item { id: "a", .. })));
+    }
+
+    #[test]
+    fn space_toggles_cursor_item() {
+        let mut l = list();
+        let out = l.on_key(key(KeyCode::Char(' ')));
+        assert!(matches!(out, MultiSelectOutcome::Toggle(Item { id: "a", .. })));
+        assert!(l.selected().contains("a"));
+
+        let out = l.on_key(key(KeyCode::Char(' ')));
+        assert!(matches!(out, MultiSelectOutcome::Toggle(Item { id: "a", .. })));
+        assert!(!l.selected().contains("a"));
+    }
+
+    #[test]
+    fn confirm_returns_items_in_catalog_order_not_selection_order() {
+        let mut l = list();
+        // Select c first (cursor=2), then a (cursor=0).
+        l.on_key(key(KeyCode::Down));
+        l.on_key(key(KeyCode::Down));
+        l.on_key(key(KeyCode::Char(' '))); // select c
+        l.on_key(key(KeyCode::Up));
+        l.on_key(key(KeyCode::Up));
+        l.on_key(key(KeyCode::Char(' '))); // select a
+
+        let out = l.on_key(key(KeyCode::Enter));
+        match out {
+            MultiSelectOutcome::Confirm(items) => {
+                let ids: Vec<&str> = items.iter().map(|i| i.id).collect();
+                assert_eq!(ids, vec!["a", "c"], "must be catalog order, not selection order");
+            }
+            other => panic!("expected Confirm, got {other:?}"),
+        }
     }
 }
