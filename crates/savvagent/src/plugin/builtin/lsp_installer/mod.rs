@@ -202,6 +202,22 @@ impl LspInstallerPlugin {
                     )));
                     outcomes.push((entry, outcome));
                 }
+                Err(installer::InstallError::ChecksumMismatch {
+                    entry_id,
+                    expected,
+                    actual,
+                }) => {
+                    // Hard stop. A SHA mismatch means either the catalog
+                    // is out of date or someone is serving us a different
+                    // binary than we expect — security signal, not a
+                    // continuable error. Abort the batch before any
+                    // remaining entries (which would share the same
+                    // network/upstream-trust assumption) execute.
+                    effs.push(push_note(format!(
+                        "[lsp-installer] {entry_id}: SHA256 mismatch — expected {expected}, got {actual}. Batch aborted; refresh the catalog or report this if it persists."
+                    )));
+                    return Ok(effs);
+                }
                 Err(e) => effs.push(push_note(format!(
                     "[lsp-installer] {}: failed — {e}",
                     entry.id
