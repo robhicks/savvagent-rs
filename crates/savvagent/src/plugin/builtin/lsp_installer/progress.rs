@@ -208,9 +208,21 @@ pub async fn run_installs(
         };
 
         match result {
-            Ok(_outcome) => {
-                // `InstallProgress::Done` already set the status to
-                // `Installed`; nothing more to do here.
+            Ok(outcome) => {
+                // Write Installed directly here rather than waiting for the
+                // spawned `InstallProgress::Done` notification task to run.
+                // The spawned task is decoupled from the install future and
+                // may not be polled by the time `spawn_driver`'s outcomes
+                // collection runs — on a multi-threaded runtime that is a
+                // race. The terminal-state guard in `apply_notification`
+                // ensures the later-arriving spawned `Done` task no-ops
+                // against the already-Installed state.
+                let mut guard = state.lock().await;
+                if let Some(slot) = guard.entries.iter_mut().find(|e| e.id == entry.id) {
+                    slot.status = EntryStatus::Installed {
+                        installed_at: outcome.installed_at,
+                    };
+                }
             }
             Err(InstallError::ChecksumMismatch { .. }) => {
                 let mut guard = state.lock().await;
@@ -275,11 +287,6 @@ pub fn spawn_driver(
             npm.as_ref(),
         )
         .await;
-
-        // Yield once to let any in-flight spawned notification tasks
-        // (most importantly the `Done` → `Installed` flip) settle before
-        // we read the state to build the config-writer upsert list.
-        tokio::task::yield_now().await;
 
         // Collect successful outcomes for the config-writer.
         let outcomes: Vec<(&'static CatalogEntry, InstallOutcome)> = {
@@ -692,7 +699,6 @@ mod tests {
         )
         .await;
 
-        tokio::task::yield_now().await;
         let s = state.lock().await;
         assert!(matches!(s.entries[0].status, EntryStatus::Installed { .. }));
         assert!(matches!(s.entries[1].status, EntryStatus::Installed { .. }));
@@ -835,9 +841,6 @@ mod tests {
         )
         .await;
 
-        // Yield so that any in-flight spawned notification tasks (including
-        // the Done notification for entry_b) can settle before we read.
-        tokio::task::yield_now().await;
         let s = state.lock().await;
         match &s.entries[0].status {
             EntryStatus::Failed { fatal, reason } => {
