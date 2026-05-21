@@ -7,10 +7,17 @@ use thiserror::Error;
 
 use super::catalog::{CatalogEntry, InstallMethod, Target};
 
-/// Streaming progress emitted by the install path via its `notify`
-/// callback. Each variant maps roughly to one stage of the install
-/// pipeline; the wrapping plugin pumps these into the conversation log
-/// as styled notes.
+/// Per-stage progress observation emitted via the install path's
+/// `notify` callback. Each variant marks the start of one stage; the
+/// install path returns `Result<InstallOutcome, InstallError>` to
+/// communicate terminal status, so there is no `Failed` variant here.
+///
+/// Today the only consumer is a `tracing::info!` sink in
+/// [`super::LspInstallerPlugin::handle_install`] — these events are
+/// **not** routed to the conversation log. Wiring them through the
+/// `PushNote` channel for live progress is a planned follow-up
+/// (requires either a `HostEvent` plumbing or an mpsc seam back into
+/// the plugin event loop).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallProgress {
     /// Install task started for `entry_id`. Fired once per entry.
@@ -18,10 +25,11 @@ pub enum InstallProgress {
         /// Catalog id (matches `CatalogEntry::id`).
         entry_id: String,
     },
-    /// HTTP download in flight. `total` is `None` if the server didn't
-    /// send `Content-Length`. v1 emits this with the final byte count
-    /// only (no streaming chunk progress); the field is shaped for a
-    /// follow-up streaming implementation.
+    /// HTTP download in flight. The current implementation fires this
+    /// twice — once before the request with `(0, None)` and once after
+    /// the body has been buffered with `(final_size, Some(final_size))`.
+    /// The shape supports per-chunk streaming if a future consumer
+    /// wants it.
     Downloading {
         /// Catalog id.
         entry_id: String,
@@ -30,8 +38,7 @@ pub enum InstallProgress {
         /// Total size in bytes, if the server reported it.
         total: Option<u64>,
     },
-    /// SHA256 verification in progress. Absence of a subsequent
-    /// `Failed` means it passed.
+    /// SHA256 verification in progress.
     Verifying {
         /// Catalog id.
         entry_id: String,
@@ -56,13 +63,6 @@ pub enum InstallProgress {
         entry_id: String,
         /// Absolute path to the installed binary.
         installed_at: PathBuf,
-    },
-    /// Install failed (terminal for this entry; the batch continues).
-    Failed {
-        /// Catalog id.
-        entry_id: String,
-        /// Human-readable reason.
-        reason: String,
     },
 }
 
@@ -517,10 +517,11 @@ pub async fn install_npm_entry(
             reason,
         })?;
     // `npm root -g` returns `<prefix>/lib/node_modules`. Bins live at
-    // `<prefix>/bin/<binary>` on Unix, `<prefix>\<binary>.cmd` on
-    // Windows. v1 supports Unix layout; Windows users typically have
-    // npm putting bins on `$PATH` directly so the literal `command`
-    // in the lsp.toml entry resolves regardless of this path.
+    // `<prefix>/bin/<binary>` on Unix; the installer surfaces that
+    // path back to the caller. On Windows npm normally puts the bin on
+    // `$PATH` directly, so the literal `command` in the catalog's
+    // `lsp.toml` entry resolves without depending on the path we
+    // compute here — this derivation is best-effort.
     let installed_at = root
         .parent()
         .and_then(|p| p.parent())
