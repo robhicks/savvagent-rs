@@ -14,9 +14,6 @@ pub enum TrustLevel {
     /// User chose "block shell, allow text-only this session" —
     /// in-memory only; not persisted.
     SessionTextOnly,
-    /// User cancelled the prompt — dispatch aborted.
-    #[allow(dead_code)] // pending refactor: replace with Option<TrustLevel>
-    Cancelled,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -55,8 +52,8 @@ pub fn load(home: &Path) -> (BTreeMap<PathBuf, TrustLevel>, Option<String>) {
     (out, None)
 }
 
-/// Persist the `Always` entries to disk. `SessionTextOnly` and
-/// `Cancelled` are skipped.
+/// Persist the `Always` entries to disk. `SessionTextOnly` is skipped
+/// (in-memory only).
 pub fn save(home: &Path, levels: &BTreeMap<PathBuf, TrustLevel>) -> Result<(), String> {
     let mut schema = FileSchema::default();
     for (k, v) in levels {

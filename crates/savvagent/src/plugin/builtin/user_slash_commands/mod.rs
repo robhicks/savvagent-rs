@@ -180,19 +180,19 @@ impl Plugin for UserSlashCommandsPlugin {
         // trust decision for this project root (the map contains an entry).
         // Without an explicit decision the project is implicitly untrusted
         // and the modal must be shown so the user can decide.
-        let (trust, has_explicit_trust) = if needs_shell && project_local {
+        let (trust, has_explicit_trust): (Option<TrustLevel>, bool) = if needs_shell && project_local {
             let map = self.trust_levels.read().await;
             match map.get(&self.project_root).copied() {
-                Some(t) => (t, true),
-                None => (TrustLevel::SessionTextOnly, false),
+                Some(t) => (Some(t), true),
+                None => (Some(TrustLevel::SessionTextOnly), false),
             }
         } else {
-            (TrustLevel::Always, true)
+            (Some(TrustLevel::Always), true)
         };
         // Open the trust modal only when the project has NO explicit trust
-        // decision yet.  If the user already chose "session-text-only" or
-        // "cancelled", let the call fall through to `expand_all` which will
-        // return an error for shell tokens — surfaced as a PushNote.
+        // decision yet.  If the user already chose "session-text-only",
+        // let the call fall through to `expand_all` which will return an
+        // error for shell tokens — surfaced as a PushNote.
         if needs_shell && project_local && !has_explicit_trust {
             return Ok(vec![
                 Effect::StashPendingSlash {
