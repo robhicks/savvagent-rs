@@ -78,6 +78,13 @@ keyring.workspace = true
 reqwest.workspace = true
 self_update.workspace = true
 semver.workspace = true
+# `/lsp` installer
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true
+sha2.workspace = true
+hex.workspace = true
+which.workspace = true
 
 [dev-dependencies]
 rmcp.workspace = true
