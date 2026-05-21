@@ -520,12 +520,18 @@ pub struct App {
     #[allow(dead_code)] // consumed by Task 17
     pub pending_slash_after_trust: Option<(String, Vec<String>)>,
 
-    /// In-memory trust state for the session. Loaded from
+    /// In-memory trust state for the session, shared with the
+    /// `internal:user-slash-commands` plugin so `handle_slash` can
+    /// read trust without going through `App`. Loaded from
     /// `~/.savvagent/trusted-projects.json` at startup; `Always`
     /// decisions persist back via `Effect::SetTrustLevel`.
-    pub trust_levels: std::collections::BTreeMap<
-        std::path::PathBuf,
-        crate::plugin::builtin::user_slash_commands::trust::TrustLevel,
+    pub trust_levels: std::sync::Arc<
+        tokio::sync::RwLock<
+            std::collections::BTreeMap<
+                std::path::PathBuf,
+                crate::plugin::builtin::user_slash_commands::trust::TrustLevel,
+            >,
+        >,
     >,
 }
 
@@ -654,18 +660,22 @@ impl App {
             log_scroll_offset_from_bottom: None,
             next_turn_model_override: None,
             pending_slash_after_trust: None,
-            trust_levels: std::collections::BTreeMap::new(),
+            trust_levels: {
+                // Load persisted trust decisions from disk. Missing file is OK —
+                // `trust::load` returns an empty map in that case.
+                let loaded = if let Some(home) = dirs::home_dir() {
+                    let (map, warn) =
+                        crate::plugin::builtin::user_slash_commands::trust::load(&home);
+                    if let Some(w) = warn {
+                        tracing::warn!("user-slash-commands: {w}");
+                    }
+                    map
+                } else {
+                    std::collections::BTreeMap::new()
+                };
+                std::sync::Arc::new(tokio::sync::RwLock::new(loaded))
+            },
         };
-        // Load persisted trust decisions from disk. Missing file is OK —
-        // `trust::load` returns an empty map in that case.
-        if let Some(home) = dirs::home_dir() {
-            let (loaded, warn) =
-                crate::plugin::builtin::user_slash_commands::trust::load(&home);
-            if let Some(w) = warn {
-                tracing::warn!("user-slash-commands: {w}");
-            }
-            app.trust_levels = loaded;
-        }
         app.refresh_commands();
         app
     }

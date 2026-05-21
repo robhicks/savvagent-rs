@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         use crate::plugin::registry::PluginRegistry;
         use savvagent_plugin::PluginKind;
 
-        let set = plugin::register_builtins();
+        let set = plugin::register_builtins(app.trust_levels.clone());
         let mut registry = PluginRegistry::new(set);
 
         // Apply persisted Optional-plugin enabled state from

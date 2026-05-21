@@ -10,44 +10,57 @@ mod template;
 pub(crate) mod trust;
 mod trust_modal;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, ScreenArgs,
     ScreenLayout, ScreenSpec, SlashSpec,
 };
+use tokio::sync::RwLock;
 
 use crate::plugin::builtin::user_slash_commands::discovery::{walk_all, Index};
+use crate::plugin::builtin::user_slash_commands::trust::TrustLevel;
+
+/// Shared trust-level map type — cloned from `App::trust_levels` at startup
+/// so `handle_slash` can read the current trust state without going through App.
+pub type TrustMap = Arc<RwLock<BTreeMap<PathBuf, TrustLevel>>>;
 
 /// Built-in plugin that exposes user-authored slash commands.
 pub struct UserSlashCommandsPlugin {
     project_root: PathBuf,
     home: PathBuf,
     cache: Mutex<Option<Index>>,
+    /// Shared with `App::trust_levels`; read under a read-lock in `handle_slash`.
+    trust_levels: TrustMap,
 }
 
 impl UserSlashCommandsPlugin {
     /// Default constructor used by `register_builtins`: resolves
     /// `project_root` from cwd and `home` from `dirs::home_dir()`.
-    pub fn new() -> Self {
+    /// Accepts the shared trust map cloned from `App::trust_levels`.
+    pub fn new(trust_levels: TrustMap) -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         Self {
             project_root,
             home,
             cache: Mutex::new(None),
+            trust_levels,
         }
     }
 
     /// Override the search roots; used by tests and `/reload-commands` (Task 20).
+    /// Accepts an explicit trust map (pass `empty_trust()` in unit tests).
     #[allow(dead_code)]
-    pub fn with_roots(project_root: PathBuf, home: PathBuf) -> Self {
+    pub fn with_roots(project_root: PathBuf, home: PathBuf, trust_levels: TrustMap) -> Self {
         Self {
             project_root,
             home,
             cache: Mutex::new(None),
+            trust_levels,
         }
     }
 
@@ -63,7 +76,7 @@ impl UserSlashCommandsPlugin {
 
 impl Default for UserSlashCommandsPlugin {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(RwLock::new(BTreeMap::new())))
     }
 }
 
@@ -146,10 +159,40 @@ impl Plugin for UserSlashCommandsPlugin {
         let Some(d) = idx.commands.get(name) else {
             return Ok(vec![]);
         };
-        // Task 21 adds the trust check; for now assume Always.
-        let trust = crate::plugin::builtin::user_slash_commands::trust::TrustLevel::Always;
         let body = d.body.clone();
         let frontmatter_model = d.frontmatter.model.clone();
+        let needs_shell =
+            crate::plugin::builtin::user_slash_commands::template::contains_shell_token(&body);
+        let project_local = d.origin.is_project();
+        // Only project-local commands with shell tokens need a trust check.
+        // User-scoped commands (home dir) always proceed — the user owns them.
+        let trust = if needs_shell && project_local {
+            let map = self.trust_levels.read().await;
+            map.get(&self.project_root)
+                .copied()
+                .unwrap_or(TrustLevel::SessionTextOnly)
+        } else {
+            TrustLevel::Always
+        };
+        // If the project is untrusted and shell substitution is needed, stash
+        // the pending command and open the trust modal.
+        if needs_shell
+            && project_local
+            && matches!(trust, TrustLevel::SessionTextOnly | TrustLevel::Cancelled)
+        {
+            return Ok(vec![
+                Effect::StashPendingSlash {
+                    name: name.into(),
+                    args,
+                },
+                Effect::OpenScreen {
+                    id: "trust.modal".into(),
+                    args: ScreenArgs::TrustModal {
+                        project_root: self.project_root.clone(),
+                    },
+                },
+            ]);
+        }
         let expanded = match crate::plugin::builtin::user_slash_commands::template::expand_all(
             &body, &args, trust,
         )
@@ -183,9 +226,15 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// Convenience: an empty trust map used by tests that don't pre-populate
+    /// trust (i.e. project is untrusted from the start).
+    fn empty_trust() -> TrustMap {
+        Arc::new(RwLock::new(BTreeMap::new()))
+    }
+
     #[test]
     fn manifest_has_reload_commands() {
-        let p = UserSlashCommandsPlugin::new();
+        let p = UserSlashCommandsPlugin::default();
         let m = p.manifest();
         assert_eq!(m.id.as_str(), "internal:user-slash-commands");
         let names: Vec<_> = m
@@ -199,7 +248,7 @@ mod tests {
 
     #[test]
     fn manifest_registers_trust_modal_screen() {
-        let p = UserSlashCommandsPlugin::new();
+        let p = UserSlashCommandsPlugin::default();
         let m = p.manifest();
         assert_eq!(
             m.contributions.screens.len(),
@@ -224,6 +273,7 @@ mod tests {
         let p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
+            empty_trust(),
         );
         let m = p.manifest();
         let names: Vec<_> = m
@@ -258,6 +308,7 @@ mod tests {
         let mut p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
+            empty_trust(),
         );
         let effs = p
             .handle_slash("hello", vec!["world".into()])
@@ -276,6 +327,7 @@ mod tests {
         let mut p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
+            empty_trust(),
         );
         let effs = p.handle_slash("does-not-exist", vec![]).await.unwrap();
         assert!(effs.is_empty());
@@ -295,6 +347,7 @@ mod tests {
         let mut p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
+            empty_trust(),
         );
         let effs = p.handle_slash("h", vec![]).await.unwrap();
         assert!(effs.iter().any(|e| matches!(
@@ -311,6 +364,7 @@ mod tests {
         let mut p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
+            empty_trust(),
         );
 
         // Initially empty: only the static `/reload-commands` entry should appear.
@@ -353,6 +407,7 @@ mod tests {
         let mut p = UserSlashCommandsPlugin::with_roots(
             proj.path().to_path_buf(),
             home.path().to_path_buf(),
+            empty_trust(),
         );
         let effs = p.handle_slash("f", vec![]).await.unwrap();
         // Expect one PushNote with the warning and one PromptSend with the
@@ -364,5 +419,98 @@ mod tests {
         }).unwrap();
         assert_eq!(warn_count, 1);
         assert!(prompt.contains("@/no/such/file"));
+    }
+
+    /// Task 21: project-local command with shell token, untrusted project →
+    /// must emit StashPendingSlash + OpenScreen("trust.modal"), NOT PromptSend.
+    #[tokio::test]
+    async fn untrusted_project_with_shell_opens_modal() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("danger.md"), "!echo evil").unwrap();
+
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            empty_trust(),
+        );
+        let effs = p.handle_slash("danger", vec![]).await.unwrap();
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, Effect::OpenScreen { id, .. } if id == "trust.modal")),
+            "expected OpenScreen(trust.modal), got: {effs:?}"
+        );
+        assert!(
+            effs.iter().any(|e| matches!(e, Effect::StashPendingSlash { .. })),
+            "expected StashPendingSlash, got: {effs:?}"
+        );
+        // No PromptSend before trust is granted.
+        assert!(
+            !effs.iter().any(|e| matches!(e, Effect::PromptSend { .. })),
+            "PromptSend must NOT fire when project is untrusted"
+        );
+    }
+
+    /// Task 21: project-local command with shell token, project is trusted →
+    /// must run shell and emit PromptSend, NOT open the modal.
+    #[tokio::test]
+    async fn trusted_project_with_shell_runs_directly() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("ok.md"), "!echo hello").unwrap();
+
+        // Pre-populate trust as Always for the project root.
+        let trust = empty_trust();
+        trust
+            .write()
+            .await
+            .insert(proj.path().to_path_buf(), TrustLevel::Always);
+
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            trust,
+        );
+        let effs = p.handle_slash("ok", vec![]).await.unwrap();
+        // Shell ran; expect PromptSend containing "hello".
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, Effect::PromptSend { text } if text.contains("hello"))),
+            "expected PromptSend with shell output, got: {effs:?}"
+        );
+        // No modal.
+        assert!(
+            !effs.iter().any(|e| matches!(e, Effect::OpenScreen { .. })),
+            "OpenScreen must NOT fire when project is trusted"
+        );
+    }
+
+    /// Task 21: non-shell body → trust check is skipped entirely, command runs.
+    #[tokio::test]
+    async fn no_shell_body_skips_trust_check() {
+        let proj = tempfile::TempDir::new().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = proj.path().join(".savvagent/commands");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("safe.md"), "Hello $1").unwrap();
+
+        let mut p = UserSlashCommandsPlugin::with_roots(
+            proj.path().to_path_buf(),
+            home.path().to_path_buf(),
+            empty_trust(),
+        );
+        let effs = p
+            .handle_slash("safe", vec!["world".into()])
+            .await
+            .unwrap();
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, Effect::PromptSend { text } if text.contains("Hello world"))),
+            "expected PromptSend, got: {effs:?}"
+        );
     }
 }

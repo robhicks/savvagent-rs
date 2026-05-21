@@ -77,7 +77,9 @@ pub(crate) use registry::BuiltinSet;
 /// `take_client` map, so both code paths mutate the same state — the
 /// dual-instance bug that previously broke `/connect <provider>` is now
 /// architecturally impossible.
-pub(crate) fn register_builtins() -> BuiltinSet {
+pub(crate) fn register_builtins(
+    trust_levels: builtin::user_slash_commands::TrustMap,
+) -> BuiltinSet {
     use builtin::provider_common::ProviderEntry;
 
     let providers: Vec<ProviderEntry> = vec![
@@ -109,7 +111,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
-        Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new()),
+        Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(trust_levels)),
         Box::new(builtin::tool_fs_summary::ToolFsSummaryPlugin::new()),
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
@@ -126,7 +128,9 @@ mod tests {
 
     #[tokio::test]
     async fn register_builtins_pr8_complete() {
-        let set = register_builtins();
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
         // Non-provider plugins from PR 1..PR 5 + themes (PR 6) + plugins-manager (PR 8)
         // + migration-picker (Task 9).
         let plugin_ids: Vec<_> = set

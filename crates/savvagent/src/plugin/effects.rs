@@ -294,14 +294,17 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             };
             match level {
                 Some(l) => {
-                    app.trust_levels.insert(project_root.clone(), l);
-                    if matches!(l, TrustLevel::Always) {
-                        if let Some(home) = dirs::home_dir() {
-                            if let Err(e) = trust::save(&home, &app.trust_levels) {
-                                tracing::warn!("trust file save: {e}");
+                    {
+                        let mut map = app.trust_levels.write().await;
+                        map.insert(project_root.clone(), l);
+                        if matches!(l, TrustLevel::Always) {
+                            if let Some(home) = dirs::home_dir() {
+                                if let Err(e) = trust::save(&home, &map) {
+                                    tracing::warn!("trust file save: {e}");
+                                }
                             }
                         }
-                    }
+                    } // drop the write guard before any re-dispatch
                     // Re-dispatch pending slash command, if any. Runs at
                     // depth + 1 so the shared MAX_DISPATCH_DEPTH cap is
                     // respected and we don't spin unboundedly.
@@ -325,7 +328,7 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                     // Cancelled or unknown — drop the pending entry and
                     // remove the project from the in-memory map.
                     app.pending_slash_after_trust = None;
-                    app.trust_levels.remove(&project_root);
+                    app.trust_levels.write().await.remove(&project_root);
                 }
             }
         }
@@ -2019,11 +2022,13 @@ mod tests {
     /// `spec.requires_arg`, which is `false` for those slashes.
     #[tokio::test]
     async fn palette_commands_use_requires_arg_not_args_hint() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
         use crate::plugin::manifests::Indexes;
         use crate::plugin::register_builtins;
         use crate::plugin::registry::PluginRegistry;
 
-        let set = register_builtins();
+        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
@@ -2063,11 +2068,13 @@ mod tests {
     /// providers appear regardless of credential state.
     #[tokio::test]
     async fn connect_picker_lists_all_provider_plugins() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
         use crate::plugin::manifests::Indexes;
         use crate::plugin::register_builtins;
         use crate::plugin::registry::PluginRegistry;
 
-        let set = register_builtins();
+        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
         let registry = PluginRegistry::new(set);
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
         let candidates = build_connect_candidates(&registry).await;
@@ -2152,7 +2159,7 @@ mod tests {
 
         // Verify trust map updated.
         assert!(
-            app.trust_levels.contains_key(&std::path::PathBuf::from("/proj/x")),
+            app.trust_levels.read().await.contains_key(&std::path::PathBuf::from("/proj/x")),
             "trust_levels must contain the resolved project root after 'always'"
         );
 
@@ -2239,7 +2246,7 @@ mod tests {
         .expect("apply_effects must succeed");
 
         // Trust map and persistence.
-        assert!(app.trust_levels.contains_key(&std::path::PathBuf::from("/proj/x")));
+        assert!(app.trust_levels.read().await.contains_key(&std::path::PathBuf::from("/proj/x")));
         assert!(app.pending_slash_after_trust.is_none(), "pending must be consumed");
 
         // The slash was re-dispatched.
@@ -2261,7 +2268,7 @@ mod tests {
         let mut app = fresh_app();
         app.pending_slash_after_trust = Some(("x".into(), vec![]));
         // Pre-populate so we can assert removal.
-        app.trust_levels.insert(
+        app.trust_levels.write().await.insert(
             std::path::PathBuf::from("/proj/x"),
             crate::plugin::builtin::user_slash_commands::trust::TrustLevel::Always,
         );
@@ -2281,7 +2288,7 @@ mod tests {
             "cancelled must clear pending_slash_after_trust"
         );
         assert!(
-            !app.trust_levels.contains_key(&std::path::PathBuf::from("/proj/x")),
+            !app.trust_levels.read().await.contains_key(&std::path::PathBuf::from("/proj/x")),
             "cancelled must remove project from trust_levels"
         );
     }
@@ -2307,7 +2314,7 @@ mod tests {
 
         // In-memory map has the entry.
         assert!(
-            app.trust_levels.contains_key(&std::path::PathBuf::from("/proj/y")),
+            app.trust_levels.read().await.contains_key(&std::path::PathBuf::from("/proj/y")),
             "session-text-only must be present in the in-memory trust map"
         );
         // Disk file must NOT exist (SessionTextOnly is never persisted).
