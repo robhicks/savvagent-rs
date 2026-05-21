@@ -295,6 +295,13 @@ pub enum ScreenArgs {
         /// Provider ids that have stored keyring credentials.
         detected: Vec<ProviderId>,
     },
+    /// Open the trust prompt modal for a project-local command directory
+    /// that contains shell substitutions. The modal asks the user
+    /// `y / n / q` and emits `Effect::SetTrustLevel` when resolved.
+    TrustModal {
+        /// Canonical project root the trust decision applies to.
+        project_root: std::path::PathBuf,
+    },
 }
 
 impl ScreenArgs {
@@ -323,6 +330,7 @@ impl ScreenArgs {
             ScreenArgs::ModelPicker { .. } => Some("model.picker"),
             ScreenArgs::Changelog => Some("changelog"),
             ScreenArgs::MigrationPicker { .. } => Some("migration.picker"),
+            ScreenArgs::TrustModal { .. } => Some("trust.modal"),
         }
     }
 }
