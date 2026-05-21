@@ -111,6 +111,81 @@ pub fn expand_args(body: &str, args: &[String]) -> String {
     out
 }
 
+use tokio::process::Command;
+
+/// Expand `!<cmd>` tokens by running the shell and inlining stdout.
+///
+/// Two forms accepted:
+///
+/// - **Line-leading:** A line whose first non-whitespace char is `!`
+///   treats the rest of the line as the command.
+/// - **Inline backtick:** `` !` `` followed by the command followed by
+///   `` ` `` substitutes stdout in place.
+///
+/// Non-zero exit aborts expansion and returns `Err(summary)`. The
+/// caller surfaces the error in the conversation log and does NOT
+/// submit the prompt. The shell is `sh -c <cmd>`.
+pub async fn expand_shell(body: &str) -> Result<Expanded, String> {
+    let warnings: Vec<String> = Vec::new();
+
+    // Pass 1: inline backtick form `!`...`
+    let mut after_inline = String::new();
+    let mut cursor = 0usize;
+    while let Some(pos) = body[cursor..].find("!`") {
+        let abs = cursor + pos;
+        after_inline.push_str(&body[cursor..abs]);
+        let cmd_start = abs + 2;
+        let Some(close) = body[cmd_start..].find('`') else {
+            // Unmatched backtick — leave the rest as-is and stop the
+            // pass.
+            after_inline.push_str(&body[abs..]);
+            cursor = body.len();
+            break;
+        };
+        let cmd = &body[cmd_start..cmd_start + close];
+        let stdout = run_shell(cmd).await?;
+        after_inline.push_str(&stdout);
+        cursor = cmd_start + close + 1;
+    }
+    after_inline.push_str(&body[cursor..]);
+
+    // Pass 2: line-leading `!cmd` form (whitespace before `!` allowed).
+    let mut final_out = String::new();
+    for line in after_inline.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix('!') {
+            let cmd = rest.trim_end_matches('\n').trim_end_matches('\r');
+            if cmd.is_empty() {
+                final_out.push_str(line);
+                continue;
+            }
+            let stdout = run_shell(cmd).await?;
+            final_out.push_str(&stdout);
+            if !stdout.ends_with('\n') && line.ends_with('\n') {
+                final_out.push('\n');
+            }
+        } else {
+            final_out.push_str(line);
+        }
+    }
+    Ok(Expanded { text: final_out, warnings })
+}
+
+async fn run_shell(cmd: &str) -> Result<String, String> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .await
+        .map_err(|e| format!("!{cmd}: spawn failed: {e}"))?;
+    if !output.status.success() {
+        let code = output.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("!{cmd}: exited {code} — {stderr}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +245,24 @@ mod tests {
         let exp = expand_files(body);
         assert_eq!(exp.text, body);
         assert!(exp.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shell_substitution_inlines_stdout() {
+        let exp = expand_shell("hello\n!echo from-shell\nworld").await.unwrap();
+        assert!(exp.text.contains("from-shell"));
+        assert!(exp.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shell_substitution_nonzero_exit_is_error() {
+        let err = expand_shell("!false").await.unwrap_err();
+        assert!(err.contains("exit"));
+    }
+
+    #[tokio::test]
+    async fn shell_substitution_inline_form() {
+        let exp = expand_shell("before !`echo X` after").await.unwrap();
+        assert!(exp.text.contains("X"));
     }
 }
