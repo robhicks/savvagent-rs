@@ -16,6 +16,80 @@ pub struct Expanded {
     pub warnings: Vec<String>,
 }
 
+/// Expand `@<path>` tokens by inlining the file contents.
+///
+/// Token shape: `@` (in a valid position — start of string, after
+/// whitespace, or after one of `( [ { , ' "`) followed by a contiguous
+/// run of non-whitespace characters.
+///
+/// Missing files leave the literal `@<path>` in place and emit a
+/// warning. Single-pass: included files are NOT re-expanded.
+pub fn expand_files(body: &str) -> Expanded {
+    let mut out = String::with_capacity(body.len());
+    let mut warnings = Vec::new();
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c != b'@' {
+            // Push one UTF-8 char.
+            let ch_end = utf8_char_end(bytes, i);
+            out.push_str(&body[i..ch_end]);
+            i = ch_end;
+            continue;
+        }
+        // Position check: previous byte must be absent, whitespace,
+        // newline, or one of ( [ { , ' "
+        let valid_position = i == 0
+            || matches!(
+                bytes[i - 1],
+                b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b'{' | b',' | b'\'' | b'"'
+            );
+        if !valid_position {
+            out.push('@');
+            i += 1;
+            continue;
+        }
+        // Find the path: from i+1 until next whitespace or EOF.
+        let start = i + 1;
+        let mut end = start;
+        while end < bytes.len() && !bytes[end].is_ascii_whitespace() {
+            end = utf8_char_end(bytes, end);
+        }
+        let path = &body[start..end];
+        if path.is_empty() {
+            out.push('@');
+            i += 1;
+            continue;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(contents) => out.push_str(&contents),
+            Err(_) => {
+                warnings.push(format!("@{path}: file not found"));
+                out.push('@');
+                out.push_str(path);
+            }
+        }
+        i = end;
+    }
+    Expanded { text: out, warnings }
+}
+
+/// Return the byte index just past the UTF-8 character starting at `i`.
+fn utf8_char_end(bytes: &[u8], i: usize) -> usize {
+    let b = bytes[i];
+    let len = if b & 0x80 == 0 {
+        1
+    } else if b & 0xE0 == 0xC0 {
+        2
+    } else if b & 0xF0 == 0xE0 {
+        3
+    } else {
+        4
+    };
+    (i + len).min(bytes.len())
+}
+
 /// Substitute `$ARGUMENTS` and `$1`/`$2`/… in `body`.
 ///
 /// `$ARGUMENTS` becomes the raw argument string (`args.join(" ")`).
@@ -67,5 +141,34 @@ mod tests {
     fn no_args_is_identity_modulo_blanking_positionals() {
         assert_eq!(expand_args("plain body", &[]), "plain body");
         assert_eq!(expand_args("hi $1", &[]), "hi ");
+    }
+
+    #[test]
+    fn at_path_inlines_file_contents() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "INSIDE").unwrap();
+        let path = f.path().to_string_lossy().to_string();
+        let body = format!("before\n@{path}\nafter");
+        let exp = expand_files(&body);
+        assert!(exp.text.contains("INSIDE"));
+        assert!(exp.warnings.is_empty());
+    }
+
+    #[test]
+    fn at_path_missing_warns_and_keeps_literal() {
+        let body = "see @/no/such/file/exists.txt please";
+        let exp = expand_files(body);
+        assert!(exp.text.contains("@/no/such/file/exists.txt"));
+        assert_eq!(exp.warnings.len(), 1);
+    }
+
+    #[test]
+    fn at_in_email_like_position_is_not_expanded() {
+        // `name@host` — the @ has a word-char immediately before; not a path token.
+        let body = "ping me at name@host for details";
+        let exp = expand_files(body);
+        assert_eq!(exp.text, body);
+        assert!(exp.warnings.is_empty());
     }
 }
