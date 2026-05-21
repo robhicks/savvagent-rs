@@ -9,6 +9,7 @@ pub mod config_writer;
 pub mod installer;
 pub mod picker;
 pub mod progress;
+pub mod progress_screen;
 pub mod screen;
 
 use async_trait::async_trait;
