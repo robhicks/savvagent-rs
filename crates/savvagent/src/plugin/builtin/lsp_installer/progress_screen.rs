@@ -39,10 +39,14 @@ impl Screen for LspProgressScreen {
     }
 
     fn render(&self, _region: Region) -> Vec<StyledLine> {
-        // Acquire the lock with `blocking_lock` — render() is sync,
-        // and the writer side never holds the lock across an await,
-        // so contention windows are sub-microsecond. Acceptable.
-        let state = self.state.blocking_lock();
+        // try_lock keeps the render hot path non-blocking — if the
+        // driver task is mid-write we skip this frame; the next frame
+        // will catch up. This matches the convention in
+        // ChangelogScreen::render and SelfUpdatePlugin::render_slot.
+        let state = match self.state.try_lock() {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
         let mut lines: Vec<StyledLine> = Vec::new();
         lines.push(StyledLine::plain(format!(
             "Installing {} language server(s)…",
