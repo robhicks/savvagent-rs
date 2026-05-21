@@ -7,4 +7,7 @@
 
 pub mod multi_select_list;
 
+// Re-exported for the upcoming `internal:lsp-installer` plugin; once
+// that plugin lands, the `#[allow]` is no longer needed.
+#[allow(unused_imports)]
 pub use multi_select_list::{MultiSelectList, MultiSelectOutcome};

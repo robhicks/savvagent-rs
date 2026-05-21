@@ -23,9 +23,19 @@ pub struct MultiSelectList<T> {
     filter: String,
     cursor: usize,
     selected_ids: BTreeSet<String>,
-    filter_fn: Box<dyn Fn(&T, &str) -> bool + Send>,
-    id_fn: Box<dyn Fn(&T) -> String + Send>,
+    filter_fn: FilterFn<T>,
+    id_fn: IdFn<T>,
 }
+
+/// Heap-allocated closure that decides whether an item matches the
+/// current filter substring. Boxed so [`MultiSelectList`] isn't
+/// generic over the closure type.
+type FilterFn<T> = Box<dyn Fn(&T, &str) -> bool + Send>;
+
+/// Heap-allocated closure that extracts a stable string id from an
+/// item. The id is the unit of selection tracking — see
+/// [`MultiSelectList`].
+type IdFn<T> = Box<dyn Fn(&T) -> String + Send>;
 
 impl<T> std::fmt::Debug for MultiSelectList<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,7 +103,10 @@ impl<T> MultiSelectList<T> {
         if f.is_empty() {
             self.items.iter().collect()
         } else {
-            self.items.iter().filter(|i| (self.filter_fn)(i, f)).collect()
+            self.items
+                .iter()
+                .filter(|i| (self.filter_fn)(i, f))
+                .collect()
         }
     }
 }
@@ -228,9 +241,18 @@ mod tests {
 
     fn items() -> Vec<Item> {
         vec![
-            Item { id: "a", label: "alpha" },
-            Item { id: "b", label: "bravo" },
-            Item { id: "c", label: "charlie" },
+            Item {
+                id: "a",
+                label: "alpha",
+            },
+            Item {
+                id: "b",
+                label: "bravo",
+            },
+            Item {
+                id: "c",
+                label: "charlie",
+            },
         ]
     }
 
@@ -260,7 +282,10 @@ mod tests {
     #[test]
     fn esc_emits_cancel() {
         let mut l = list();
-        assert!(matches!(l.on_key(key(KeyCode::Esc)), MultiSelectOutcome::Cancel));
+        assert!(matches!(
+            l.on_key(key(KeyCode::Esc)),
+            MultiSelectOutcome::Cancel
+        ));
     }
 
     #[test]
@@ -286,7 +311,10 @@ mod tests {
         let mut l = list();
         let outcome = l.on_key(key(KeyCode::Down));
         assert_eq!(l.cursor(), 1);
-        assert!(matches!(outcome, MultiSelectOutcome::Preview(Item { id: "b", .. })));
+        assert!(matches!(
+            outcome,
+            MultiSelectOutcome::Preview(Item { id: "b", .. })
+        ));
     }
 
     #[test]
@@ -296,7 +324,10 @@ mod tests {
         l.on_key(key(KeyCode::Down));
         let outcome = l.on_key(key(KeyCode::Down));
         assert_eq!(l.cursor(), 2);
-        assert!(matches!(outcome, MultiSelectOutcome::Preview(Item { id: "c", .. })));
+        assert!(matches!(
+            outcome,
+            MultiSelectOutcome::Preview(Item { id: "c", .. })
+        ));
     }
 
     #[test]
@@ -304,18 +335,27 @@ mod tests {
         let mut l = list();
         let outcome = l.on_key(key(KeyCode::Up));
         assert_eq!(l.cursor(), 0);
-        assert!(matches!(outcome, MultiSelectOutcome::Preview(Item { id: "a", .. })));
+        assert!(matches!(
+            outcome,
+            MultiSelectOutcome::Preview(Item { id: "a", .. })
+        ));
     }
 
     #[test]
     fn space_toggles_cursor_item() {
         let mut l = list();
         let out = l.on_key(key(KeyCode::Char(' ')));
-        assert!(matches!(out, MultiSelectOutcome::Toggle(Item { id: "a", .. })));
+        assert!(matches!(
+            out,
+            MultiSelectOutcome::Toggle(Item { id: "a", .. })
+        ));
         assert!(l.selected().contains("a"));
 
         let out = l.on_key(key(KeyCode::Char(' ')));
-        assert!(matches!(out, MultiSelectOutcome::Toggle(Item { id: "a", .. })));
+        assert!(matches!(
+            out,
+            MultiSelectOutcome::Toggle(Item { id: "a", .. })
+        ));
         assert!(!l.selected().contains("a"));
     }
 
@@ -332,9 +372,13 @@ mod tests {
     fn backspace_pops_filter_and_reclamps_cursor() {
         let mut l = list();
         l.on_key(key(KeyCode::Char('l'))); // narrows to [a, c]; cursor 0
-        l.on_key(key(KeyCode::Down));      // cursor → 1
+        l.on_key(key(KeyCode::Down)); // cursor → 1
         l.on_key(key(KeyCode::Char('p'))); // narrows to [a]; cursor must clamp to 0
-        assert_eq!(l.cursor(), 0, "cursor must clamp when filter shrinks past it");
+        assert_eq!(
+            l.cursor(),
+            0,
+            "cursor must clamp when filter shrinks past it"
+        );
         l.on_key(key(KeyCode::Backspace)); // back to [a, c]
         assert_eq!(l.filter(), "l");
     }
@@ -342,11 +386,14 @@ mod tests {
     #[test]
     fn selection_survives_filter_changes() {
         let mut l = list();
-        l.on_key(key(KeyCode::Char(' ')));  // select a
-        l.on_key(key(KeyCode::Char('b')));  // filter narrows so 'a' is hidden
+        l.on_key(key(KeyCode::Char(' '))); // select a
+        l.on_key(key(KeyCode::Char('b'))); // filter narrows so 'a' is hidden
         assert!(l.filtered().iter().all(|i| i.id != "a"));
-        assert!(l.selected().contains("a"), "selection persists across filter");
-        l.on_key(key(KeyCode::Backspace));  // restore visibility
+        assert!(
+            l.selected().contains("a"),
+            "selection persists across filter"
+        );
+        l.on_key(key(KeyCode::Backspace)); // restore visibility
         let out = l.on_key(key(KeyCode::Enter));
         match out {
             MultiSelectOutcome::Confirm(items) => {
@@ -371,7 +418,11 @@ mod tests {
         match out {
             MultiSelectOutcome::Confirm(items) => {
                 let ids: Vec<&str> = items.iter().map(|i| i.id).collect();
-                assert_eq!(ids, vec!["a", "c"], "must be catalog order, not selection order");
+                assert_eq!(
+                    ids,
+                    vec!["a", "c"],
+                    "must be catalog order, not selection order"
+                );
             }
             other => panic!("expected Confirm, got {other:?}"),
         }
