@@ -56,6 +56,12 @@ impl FenceParser {
     }
 
     /// Feed a chunk of text; returns any complete chunks parsable so far.
+    ///
+    /// The parser walks line-by-line because fence markers are line-anchored.
+    /// The trailing partial line (post-last-`\n` bytes) stays buffered only
+    /// while it could still extend into a fence marker; if the partial tail
+    /// has already diverged from any possible fence-marker shape, it's
+    /// flushed eagerly so streaming UX isn't held until the next newline.
     pub fn push(&mut self, fragment: &str) -> Vec<FenceChunk> {
         let mut out = Vec::new();
         self.buf.push_str(fragment);
@@ -70,6 +76,21 @@ impl FenceParser {
                 None => break,
             }
         }
+
+        // Eagerly flush any safe prefix of the partial-line tail so per-token
+        // streaming doesn't stall until a newline. The tail must continue to
+        // hold any bytes that could still extend into a fence marker.
+        let tail = std::mem::take(&mut self.buf);
+        let (flushable, hold) = split_safe_flush(&tail, self.inside_canvas);
+        if !flushable.is_empty() {
+            if self.inside_canvas {
+                append_html(&mut out, flushable);
+            } else {
+                append_text(&mut out, flushable);
+            }
+        }
+        self.buf.push_str(hold);
+
         out
     }
 
@@ -125,6 +146,46 @@ fn append_html(out: &mut Vec<FenceChunk>, s: &str) {
     }
 }
 
+/// Given a partial-line tail (no `\n`), split it into a prefix that's
+/// definitely-not-a-fence-marker and can be flushed immediately, and a
+/// suffix that might still extend into a fence marker and must be held
+/// for the next push.
+///
+/// The fence markers we care about are:
+/// - Outside canvas: `` "```html-canvas" `` after optional leading whitespace.
+/// - Inside canvas: `` "```" `` after optional leading whitespace.
+///
+/// As long as the *trimmed-start* of the tail is a prefix of the marker
+/// shape, we hold; once the tail diverges (extra chars, wrong char), we
+/// can flush everything safely as text/html.
+fn split_safe_flush(tail: &str, inside_canvas: bool) -> (&str, &str) {
+    // Anything is allowed to be preceded by horizontal whitespace; once the
+    // first non-whitespace char appears, the tail commits to either being a
+    // fence marker or not.
+    let ws_len: usize = tail
+        .chars()
+        .take_while(|c| matches!(c, ' ' | '\t'))
+        .map(|c| c.len_utf8())
+        .sum();
+
+    let body = &tail[ws_len..];
+    let target = if inside_canvas {
+        "```"
+    } else {
+        "```html-canvas"
+    };
+
+    // If the trimmed body is still a prefix of the marker (including the
+    // empty case where we only have leading whitespace), keep buffering.
+    // Otherwise, the partial line is committed to be content and is safe
+    // to flush.
+    if target.starts_with(body) {
+        ("", tail)
+    } else {
+        (tail, "")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,10 +194,7 @@ mod tests {
     fn no_fence_is_pure_text() {
         let mut p = FenceParser::new();
         let chunks = p.push("hello\nworld\n");
-        assert_eq!(
-            chunks,
-            vec![FenceChunk::Text("hello\nworld\n".into())]
-        );
+        assert_eq!(chunks, vec![FenceChunk::Text("hello\nworld\n".into())]);
         let fin = p.finish();
         assert!(fin.chunks.is_empty());
         assert!(!fin.unclosed_fence);
@@ -188,20 +246,85 @@ mod tests {
     #[test]
     fn split_across_pushes() {
         let mut p = FenceParser::new();
-        let mut chunks = p.push("```ht");
-        chunks.extend(p.push("ml-canvas\n<b>"));
-        chunks.extend(p.push("hi</b>\n```\n"));
-        assert_eq!(chunks, vec![FenceChunk::Html("<b>hi</b>\n".into())]);
+        // First push: partial fence-opener prefix; nothing emitted yet —
+        // the tail "```ht" could still grow into "```html-canvas".
+        let chunks_1 = p.push("```ht");
+        assert!(chunks_1.is_empty(), "partial opener must buffer");
+
+        // Second push: opener completes on the `\n`, then "<b>" is
+        // flushed eagerly because it can't extend into the closing fence.
+        let chunks_2 = p.push("ml-canvas\n<b>");
+        assert_eq!(chunks_2, vec![FenceChunk::Html("<b>".into())]);
+
+        // Third push: rest of the html body + closing fence.
+        let chunks_3 = p.push("hi</b>\n```\n");
+        assert_eq!(chunks_3, vec![FenceChunk::Html("hi</b>\n".into())]);
+
+        // The concatenation of all chunks reconstructs the html body in order.
+        let mut all = chunks_1;
+        all.extend(chunks_2);
+        all.extend(chunks_3);
+        let html: String = all
+            .iter()
+            .map(|c| match c {
+                FenceChunk::Html(s) => s.as_str(),
+                FenceChunk::Text(_) => "",
+            })
+            .collect();
+        assert_eq!(html, "<b>hi</b>\n");
     }
 
     #[test]
     fn unclosed_fence_flushed_at_finish() {
         let mut p = FenceParser::new();
+        // The html body "<body>" can't extend into the closing "```" fence
+        // marker, so it's flushed eagerly on the push that produces it
+        // (after the opener line is consumed).
         let chunks = p.push("```html-canvas\n<body>");
-        assert!(chunks.is_empty());
+        assert_eq!(chunks, vec![FenceChunk::Html("<body>".into())]);
         let fin = p.finish();
-        assert_eq!(fin.chunks, vec![FenceChunk::Html("<body>".into())]);
+        assert!(
+            fin.chunks.is_empty(),
+            "body was already flushed during push; finish has nothing left"
+        );
         assert!(fin.unclosed_fence);
+    }
+
+    /// Eager flush regression: when streaming token-by-token sub-line text,
+    /// the parser must not buffer the partial line if it has already
+    /// committed to being content (not a fence marker). The TUI relies on
+    /// seeing each token chunk as it arrives.
+    #[test]
+    fn partial_line_text_flushes_eagerly() {
+        let mut p = FenceParser::new();
+        let chunks_1 = p.push("hel");
+        assert_eq!(chunks_1, vec![FenceChunk::Text("hel".into())]);
+        let chunks_2 = p.push("lo");
+        assert_eq!(chunks_2, vec![FenceChunk::Text("lo".into())]);
+        // No newline arrived — but each token was flushed independently.
+        let fin = p.finish();
+        assert!(fin.chunks.is_empty());
+        assert!(!fin.unclosed_fence);
+    }
+
+    /// A partial line that *could* still become a fence opener must
+    /// stay buffered until either it diverges from the opener shape or
+    /// a newline arrives.
+    #[test]
+    fn partial_fence_opener_prefix_is_buffered() {
+        let mut p = FenceParser::new();
+        // Each of these is a prefix of "```html-canvas" — all must buffer.
+        for &prefix in &["`", "``", "```", "```h", "```html-canva"] {
+            let mut q = FenceParser::new();
+            let chunks = q.push(prefix);
+            assert!(
+                chunks.is_empty(),
+                "prefix {prefix:?} must buffer (could extend to opener)"
+            );
+        }
+        // Leading whitespace before a partial opener also buffers.
+        let chunks = p.push("  ``");
+        assert!(chunks.is_empty(), "whitespace + partial opener must buffer");
     }
 
     #[test]
