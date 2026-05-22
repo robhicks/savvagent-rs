@@ -106,10 +106,9 @@ impl Plugin for LspInstallerPlugin {
             "lsp_installer.progress" => {
                 let entry_ids = match args {
                     ScreenArgs::LspInstallProgress { entry_ids } => entry_ids,
-                    ScreenArgs::None => Vec::new(),
                     other => {
                         return Err(PluginError::ScreenNotFound(format!(
-                            "lsp_installer.progress: unexpected ScreenArgs {other:?}"
+                            "lsp_installer.progress: expected ScreenArgs::LspInstallProgress, got {other:?}"
                         )));
                     }
                 };
@@ -382,5 +381,21 @@ mod tests {
             )
             .expect("create_screen must accept the progress id");
         assert_eq!(screen.id(), "lsp_installer.progress");
+    }
+
+    #[test]
+    fn create_screen_rejects_wrong_args_variant() {
+        use savvagent_plugin::ScreenArgs;
+        let p = LspInstallerPlugin::new();
+        match p.create_screen("lsp_installer.progress", ScreenArgs::None) {
+            Err(err) => {
+                let msg = format!("{err:?}");
+                assert!(
+                    msg.contains("LspInstallProgress"),
+                    "error must name the expected variant, got {msg}"
+                );
+            }
+            Ok(_) => panic!("None args must be rejected"),
+        }
     }
 }
