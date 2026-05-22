@@ -148,9 +148,13 @@ impl LspProgressScreen {
             out.push(StyledLine::plain(format!(
                 "All done — {installed} installed, {failed} failed."
             )));
-            out.push(StyledLine::plain(
-                "Press Enter to close. Restart savvagent to pick up the new servers.",
-            ));
+            if installed > 0 {
+                out.push(StyledLine::plain(
+                    "Press Enter to close. Restart savvagent to pick up the new servers.",
+                ));
+            } else {
+                out.push(StyledLine::plain("Press Enter to close."));
+            }
             if let Some(err) = &state.config_error {
                 out.push(StyledLine::plain(format!(
                     "Warning: writing lsp.toml failed: {err}"
@@ -317,11 +321,18 @@ fn close_and_summary(state: &ProgressState) -> Vec<Effect> {
             )),
         });
     }
+    let installed_count = state
+        .entries
+        .iter()
+        .filter(|e| matches!(e.status, EntryStatus::Installed { .. }))
+        .count();
+    let trailing = if installed_count > 0 {
+        "[lsp-installer] done \u{2014} restart savvagent to pick up the new servers"
+    } else {
+        "[lsp-installer] done"
+    };
     effs.push(Effect::PushNote {
-        line: StyledLine::plain(
-            "[lsp-installer] done \u{2014} restart savvagent to pick up the new servers"
-                .to_string(),
-        ),
+        line: StyledLine::plain(trailing.to_string()),
     });
     effs
 }
@@ -723,6 +734,50 @@ mod tests {
         assert!(
             !out.contains("failed:"),
             "fatal arm must not use 'failed:' prefix, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_finished_footer_omits_restart_when_nothing_installed() {
+        let s = screen_with_state(ProgressState {
+            entries: vec![EntryProgress {
+                id: "a".into(),
+                display_name: "a".into(),
+                status: EntryStatus::Failed {
+                    reason: "network down".into(),
+                    fatal: false,
+                },
+            }],
+            finished: true,
+            config_error: None,
+        });
+        let out = rendered(&s);
+        assert!(out.contains("Press Enter to close."));
+        assert!(
+            !out.contains("Restart savvagent"),
+            "no restart suggestion when zero installs succeeded, got:\n{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_and_summary_omits_restart_when_nothing_installed() {
+        let mut s = screen_with_state(ProgressState {
+            entries: vec![EntryProgress {
+                id: "a".into(),
+                display_name: "a".into(),
+                status: EntryStatus::Failed {
+                    reason: "boom".into(),
+                    fatal: false,
+                },
+            }],
+            finished: true,
+            config_error: None,
+        });
+        let effs = s.on_key(key(KeyCodePortable::Enter)).await.unwrap();
+        let body = format!("{effs:?}");
+        assert!(
+            !body.contains("restart savvagent"),
+            "no restart suggestion when zero installs succeeded, got {body}"
         );
     }
 
