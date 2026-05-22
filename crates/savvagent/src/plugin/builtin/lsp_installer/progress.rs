@@ -218,6 +218,11 @@ pub async fn run_installs(
                     slot.status = EntryStatus::Installed {
                         installed_at: outcome.installed_at,
                     };
+                } else {
+                    tracing::warn!(
+                        entry_id = entry.id,
+                        "run_installs: entry id missing from progress state after successful install — UI may show stale Queued row"
+                    );
                 }
             }
             Err(InstallError::ChecksumMismatch { .. }) => {
@@ -227,6 +232,11 @@ pub async fn run_installs(
                         reason: "SHA256 mismatch — batch aborted".into(),
                         fatal: true,
                     };
+                } else {
+                    tracing::warn!(
+                        entry_id = entry.id,
+                        "run_installs: entry id missing from progress state after ChecksumMismatch"
+                    );
                 }
                 for e in guard.entries.iter_mut() {
                     if matches!(e.status, EntryStatus::Queued) {
@@ -245,6 +255,11 @@ pub async fn run_installs(
                         reason: err.to_string(),
                         fatal: false,
                     };
+                } else {
+                    tracing::warn!(
+                        entry_id = entry.id,
+                        "run_installs: entry id missing from progress state after install error"
+                    );
                 }
             }
         }
