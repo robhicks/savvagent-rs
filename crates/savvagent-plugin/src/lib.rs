@@ -36,11 +36,15 @@ pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};
 pub mod effect;
 pub use effect::{BoundAction, Effect};
 
+/// System-prompt segment contributions.
+pub mod prompt;
+pub use prompt::SystemPromptSegment;
+
 /// Plugin manifest, contributions bundle, and per-kind spec types.
 pub mod manifest;
 pub use manifest::{
-    Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind, ProviderSpec, ScreenLayout,
-    ScreenSpec, SlashSpec, SlotSpec, ToolSummarySpec,
+    ContentRendererSpec, Contributions, KeyScope, KeybindingSpec, Manifest, PluginKind,
+    ProviderSpec, ScreenLayout, ScreenSpec, SlashSpec, SlotSpec, ToolSummarySpec,
 };
 
 /// The [`Plugin`] trait — the WIT-portable entry point each plugin implements.

@@ -2,6 +2,7 @@
 
 use crate::effect::BoundAction;
 use crate::event::HookKind;
+use crate::prompt::SystemPromptSegment;
 use crate::types::{ChordPortable, PluginId, ProviderId, ThemeEntry};
 
 /// Static metadata a plugin advertises at registration. Indexed by the
@@ -56,6 +57,14 @@ pub struct Contributions {
     /// Tool names this plugin renders summaries for via
     /// `Plugin::summarize_tool_call` / `summarize_tool_result`.
     pub tool_summaries: Vec<ToolSummarySpec>,
+    /// System-prompt segments this plugin contributes. Composed into
+    /// the model's `system` field after the host's default prompt and
+    /// project context (see `savvagent-host::default_prompt`).
+    pub prompt_segments: Vec<SystemPromptSegment>,
+    /// Content renderers this plugin provides. Each spec declares the
+    /// SPP `ContentBlock` type tag this plugin handles via
+    /// `Plugin::create_renderer`.
+    pub content_renderers: Vec<ContentRendererSpec>,
 }
 
 /// Registration descriptor for a slash command contributed by a plugin.
@@ -80,6 +89,9 @@ pub struct SlashSpec {
     /// whose no-arg behavior is meaningful (`/connect`, `/theme`,
     /// `/save`, `/language`, …).
     pub requires_arg: bool,
+    /// Prompt segment ids to drop from the system prompt when this
+    /// slash is invoked. Empty = no suppression.
+    pub suppress_prompt_segments: Vec<String>,
 }
 
 /// Registration descriptor for a screen contributed by a plugin.
@@ -162,6 +174,23 @@ pub struct ToolSummarySpec {
     pub tool_name: String,
 }
 
+/// Registration descriptor for a content-renderer contribution.
+///
+/// The plugin handles `ContentBlock` values whose `type` discriminator
+/// matches `block_type`. Two plugins both claiming `canonical = true`
+/// for the same block type is a startup error; non-canonical
+/// contributions act as fallbacks (lower-priority).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentRendererSpec {
+    /// SPP content block type tag, matching the `type` discriminator
+    /// (`"html"` for `ContentBlock::Html`).
+    pub block_type: String,
+    /// `true` if this plugin claims to be the primary renderer for
+    /// this block type. Exactly one plugin per block type should be
+    /// canonical.
+    pub canonical: bool,
+}
+
 /// Describes which screen context a keybinding is active in.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KeyScope {
@@ -188,6 +217,40 @@ mod tests {
         assert!(c.slots.is_empty());
         assert!(c.keybindings.is_empty());
         assert!(c.tool_summaries.is_empty());
+        assert!(c.prompt_segments.is_empty());
+        assert!(c.content_renderers.is_empty());
+    }
+
+    #[test]
+    fn manifest_can_carry_prompt_segments() {
+        let m = Manifest {
+            id: PluginId("internal:test-prompt".into()),
+            name: "Test prompt".into(),
+            version: "0.17.0".into(),
+            description: "Test segments".into(),
+            kind: PluginKind::Optional,
+            contributions: Contributions {
+                prompt_segments: vec![SystemPromptSegment {
+                    id: "internal:test-prompt:hello".into(),
+                    text: "Be helpful.".into(),
+                }],
+                ..Contributions::default()
+            },
+        };
+        assert_eq!(m.contributions.prompt_segments.len(), 1);
+        assert_eq!(m.contributions.prompt_segments[0].id, "internal:test-prompt:hello");
+    }
+
+    #[test]
+    fn slash_spec_carries_suppress_list() {
+        let s = SlashSpec {
+            name: "commit".into(),
+            summary: "create a commit".into(),
+            args_hint: None,
+            requires_arg: false,
+            suppress_prompt_segments: vec!["internal:html-canvas:default".into()],
+        };
+        assert_eq!(s.suppress_prompt_segments.len(), 1);
     }
 
     #[test]
