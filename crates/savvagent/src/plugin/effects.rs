@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs};
+use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs, UrlTarget};
 
 use crate::app::{App, PendingModelChange, PendingRoutingAction};
 use crate::plugin::builtin::command_palette::screen::{PaletteCommand, PaletteScreen};
@@ -252,6 +252,9 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
         Effect::Stack(children) => {
             // Recurse via Box::pin so the future has a known size.
             Box::pin(apply_effects_with_depth(app, children, depth)).await?;
+        }
+        Effect::OpenUrl { url, target } => {
+            apply_open_url(app, url, target);
         }
         // The Effect enum is #[non_exhaustive]; unhandled variants are logged
         // so implementers of future PRs can spot missing wiring.
@@ -844,6 +847,38 @@ async fn run_slash(
             .map_err(|e| e.to_string())?
     };
     Box::pin(apply_effects_with_depth(app, effs, depth)).await
+}
+
+/// Apply [`Effect::OpenUrl`]: launch the URL in the system browser or
+/// submit it as a follow-up user prompt, depending on `target`.
+///
+/// Browser launch is fire-and-forget via `std::process::Command::new(…).spawn()`.
+/// Spawn errors are logged at `warn` level and surface as a styled note so
+/// the user knows something went wrong without crashing the TUI. There is
+/// no `submit_prompt` guard here — if the URL is malformed that is the
+/// plugin author's responsibility (the `Effect` doc says plugins MUST validate
+/// URLs before emitting).
+fn apply_open_url(app: &mut App, url: String, target: UrlTarget) {
+    match target {
+        UrlTarget::SystemBrowser => {
+            let cmd = if cfg!(target_os = "macos") {
+                "open"
+            } else if cfg!(target_os = "windows") {
+                "start"
+            } else {
+                "xdg-open"
+            };
+            if let Err(err) = std::process::Command::new(cmd).arg(&url).spawn() {
+                tracing::warn!(?err, %url, "apply_open_url: failed to open URL in system browser");
+                app.push_styled_note(savvagent_plugin::StyledLine::plain(
+                    rust_i18n::t!("notes.open-url-failed", url = url).to_string(),
+                ));
+            }
+        }
+        UrlTarget::ContinueConversation => {
+            app.submit_prompt(url);
+        }
+    }
 }
 
 #[cfg(test)]
