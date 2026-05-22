@@ -61,6 +61,19 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
+
+    /// HTML source the host should render inline in the conversation
+    /// transcript via a registered `ContentRenderer` plugin. Used for
+    /// structured documents (plans, specs, status updates) where
+    /// rendered HTML is more legible than markdown.
+    ///
+    /// The source is a complete HTML document; the renderer parses it
+    /// fresh. Hosts that do not have a renderer registered render the
+    /// source as a code block.
+    Html {
+        /// Complete HTML document source.
+        source: String,
+    },
 }
 
 /// Source of image bytes in an [`ContentBlock::Image`] block.
@@ -143,5 +156,22 @@ mod tests {
             v.get("is_error").is_none(),
             "is_error=false must be omitted"
         );
+    }
+
+    #[test]
+    fn html_round_trip() {
+        let block = ContentBlock::Html {
+            source: "<!doctype html><body>hi</body>".into(),
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "type": "html",
+                "source": "<!doctype html><body>hi</body>",
+            }),
+        );
+        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        assert_eq!(back, block);
     }
 }
