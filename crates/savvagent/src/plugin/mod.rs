@@ -68,6 +68,7 @@ pub(crate) use registry::BuiltinSet;
 /// PR 6 adds: themes + 4 providers (anthropic / openai / gemini / local).
 /// PR 8 adds: plugins-manager.
 /// Task 9 adds: migration-picker.
+/// Task 13 adds: html-canvas.
 ///
 /// Provider plugins are stored exactly once per plugin in
 /// [`crate::plugin::builtin::provider_common::ProviderEntry`], which exposes
@@ -113,6 +114,7 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::tool_fs_summary::ToolFsSummaryPlugin::new()),
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
+        Box::new(builtin::html_canvas::HtmlCanvasPlugin::new()),
     ];
 
     BuiltinSet { plugins, providers }
@@ -160,13 +162,14 @@ mod tests {
             "internal:tool-fs-summary",
             "internal:tool-grep-summary",
             "internal:view-file",
+            "internal:html-canvas",
         ] {
             assert!(
                 plugin_ids.contains(&expected.to_string()),
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 25);
+        assert_eq!(set.plugins.len(), 26);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -195,12 +198,13 @@ mod tests {
         // Task 6 adds route, bringing non-provider count to 21;
         // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
         // v0.16.0 adds lsp-installer, bringing non-provider count to 25;
-        // total registry size is 25 + 4 = 29.
+        // Task 13 adds html-canvas, bringing non-provider count to 26;
+        // total registry size is 26 + 4 = 30.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            29,
-            "registry should have 25 non-provider + 4 provider plugins"
+            30,
+            "registry should have 26 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),
