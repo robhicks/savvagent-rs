@@ -3755,6 +3755,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "savvagent-fence"
+version = "0.16.1"
+
+[[package]]
 name = "savvagent-host"
 version = "0.16.1"
 dependencies = [
