@@ -51,6 +51,14 @@ pub use plugin::Plugin;
 pub mod screen;
 pub use screen::Screen;
 
+/// Content renderer trait surface (HTML canvas etc.).
+pub mod content;
+pub use content::{
+    ContentBlockId, ContentRenderer, FocusableElement, FocusKind, Frame,
+    InputEvent, InputOutcome, MouseButton, MouseEventKind,
+    MouseEventPortable, PixelFormat, PixelSize, Rect,
+};
+
 #[cfg(test)]
 mod trait_smoke {
     use super::*;
@@ -111,5 +119,20 @@ mod trait_smoke {
             p.summarize_tool_result("read_file", "{\"bytes\":12}")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn frame_round_trips_through_pixel_format() {
+        use crate::content::{Frame, PixelFormat, PixelSize};
+        let frame = Frame {
+            width: 2,
+            height: 1,
+            format: PixelFormat::Rgba8,
+            bytes: vec![255, 0, 0, 255, 0, 0, 255, 255],
+        };
+        assert_eq!(frame.width, 2);
+        assert_eq!(frame.bytes.len(), 8);
+        let size = PixelSize { width: 100, height: 50 };
+        assert_eq!(size.width * size.height, 5_000);
     }
 }

@@ -19,6 +19,9 @@ pub enum PluginError {
     InvalidArgs(String),
     /// An unexpected condition occurred inside the plugin.
     Internal(String),
+    /// No registered plugin advertises a `ContentRendererSpec` for the
+    /// given block_type. Returned by `Plugin::create_renderer` default impl.
+    ContentRendererNotFound(String),
 }
 
 impl fmt::Display for PluginError {
@@ -28,6 +31,11 @@ impl fmt::Display for PluginError {
             PluginError::SlashNotHandled(name) => write!(f, "slash not handled: /{name}"),
             PluginError::InvalidArgs(msg) => write!(f, "invalid args: {msg}"),
             PluginError::Internal(msg) => write!(f, "internal: {msg}"),
+            Self::ContentRendererNotFound(block_type) => write!(
+                f,
+                "no plugin claims content renderer for block_type '{}'",
+                block_type
+            ),
         }
     }
 }
