@@ -76,15 +76,13 @@ impl FenceParser {
     /// End of stream — flush remaining buffered content.
     pub fn finish(mut self) -> FinishResult {
         let mut chunks = Vec::new();
-        let unclosed = self.inside_canvas;
         if !self.buf.is_empty() {
-            // Flush trailing partial line.
             let line = std::mem::take(&mut self.buf);
             self.consume_line(&line, &mut chunks);
         }
         FinishResult {
             chunks,
-            unclosed_fence: unclosed,
+            unclosed_fence: self.inside_canvas,
         }
     }
 
@@ -97,6 +95,11 @@ impl FenceParser {
             }
             append_text(out, line);
         } else {
+            // TODO(canvas-phase2): handle embedded ``` inside HTML bodies
+            // (e.g., <pre><code>``` </code></pre>). Current behavior treats
+            // any line == "```" as the closing fence; the documented
+            // limitation has a regression test in
+            // `embedded_triple_backticks_close_fence_known_limitation`.
             if trimmed.trim_start() == "```" {
                 self.inside_canvas = false;
                 return; // closing fence consumed; no emission
@@ -199,5 +202,50 @@ mod tests {
         let fin = p.finish();
         assert_eq!(fin.chunks, vec![FenceChunk::Html("<body>".into())]);
         assert!(fin.unclosed_fence);
+    }
+
+    #[test]
+    fn closing_fence_without_trailing_newline_is_not_unclosed() {
+        let mut p = FenceParser::new();
+        // Open fence + html body, both terminated by \n so they're consumed.
+        let chunks_open = p.push("```html-canvas\n<p>hi</p>\n");
+        assert_eq!(chunks_open, vec![FenceChunk::Html("<p>hi</p>\n".into())]);
+        // Close fence arrives without trailing newline; stays in buf.
+        let chunks_close = p.push("```");
+        assert!(chunks_close.is_empty(), "no newline yet — nothing emitted");
+        // finish() must process the buffered closing fence and clear the
+        // unclosed flag.
+        let fin = p.finish();
+        assert!(fin.chunks.is_empty());
+        assert!(
+            !fin.unclosed_fence,
+            "closing fence in buffer at finish should close cleanly",
+        );
+    }
+
+    #[test]
+    fn embedded_triple_backticks_close_fence_known_limitation() {
+        // KNOWN LIMITATION: a literal "```" line inside the HTML body
+        // (e.g., from a <pre><code> showing markdown source) closes the
+        // fence prematurely. The parser is line-based and does not parse
+        // HTML to distinguish a code-block illustration from a real
+        // closing fence.
+        //
+        // If a future need arises (e.g., model output that quotes
+        // savvagent-canvas examples), this test should be updated to
+        // assert the correct behavior and the parser extended (e.g.,
+        // track <pre>/<code> nesting or require the closing fence to be
+        // followed by a sentinel).
+        let mut p = FenceParser::new();
+        let chunks = p.push("```html-canvas\n<pre><code>\n```\n</code></pre>\n```\n");
+        // Observed (current) behavior: the embedded ``` closes the fence
+        // after "<pre><code>\n"; the rest is plain text.
+        assert_eq!(
+            chunks,
+            vec![
+                FenceChunk::Html("<pre><code>\n".into()),
+                FenceChunk::Text("</code></pre>\n```\n".into()),
+            ],
+        );
     }
 }
