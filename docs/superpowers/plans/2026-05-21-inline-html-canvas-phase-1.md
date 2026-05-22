@@ -12,7 +12,7 @@
 
 **Spec drift note:** The spec uses the placeholder name `LogItem` for the conversation-log item type. The actual codebase uses `Entry` (`crates/savvagent/src/app.rs:212`). This plan uses `Entry` consistently. Treat any spec mention of `LogItem` as referring to `Entry`.
 
-**Release discipline:** Per the project's `feedback_phase_release_rollup` convention, this phase ends with a *scaffolding* `release(0.16.0)` commit — version bumps, CHANGELOG entries, README updates — but **no git tag is pushed**. Phase 2 ends with a `release(0.17.0)` scaffolding commit, and only after Phase 2 lands does the v0.17.0 tag get pushed (cargo-dist owns the actual release artifact build).
+**Release discipline:** Per the project's `feedback_phase_release_rollup` convention, this phase ends with a *scaffolding* `release(0.17.0)` commit — version bumps, CHANGELOG entries, README updates — but **no git tag is pushed**. Phase 2 ends with a `release(0.18.0)` scaffolding commit, and only after Phase 2 lands does the v0.18.0 tag get pushed (cargo-dist owns the actual release artifact build).
 
 ---
 
@@ -52,7 +52,7 @@
 - `crates/provider-local/src/stream.rs` — same.
 - `Cargo.toml` (workspace) — add `savvagent-fence`, `savvagent-canvas`, `blitz`, `ratatui-image` to `[workspace.dependencies]`.
 - `README.md` — feature blurb, terminal compatibility matrix, tmux passthrough note.
-- `CHANGELOG.md` — Phase 1 entry under `## [0.16.0] - unreleased`.
+- `CHANGELOG.md` — Phase 1 entry under `## [0.17.0] - unreleased`.
 
 ---
 
@@ -512,10 +512,10 @@ members = [
 
 [workspace.dependencies]
 # ... existing ...
-savvagent-fence = { path = "crates/savvagent-fence", version = "0.16.0" }
+savvagent-fence = { path = "crates/savvagent-fence", version = "0.17.0" }
 ```
 
-(The version `0.16.0` matches the post-Phase-1 workspace bump from Task 25. Until Task 25 lands, the existing workspace version is `0.15.0`; substitute that here and update in Task 25 along with the workspace literal.)
+(The version `0.17.0` matches the post-Phase-1 workspace bump from Task 22. Until Task 22 lands, the existing workspace version is `0.16.1`; substitute that here and update in Task 22 along with the workspace literal.)
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -1321,7 +1321,7 @@ Append to the existing `#[cfg(test)] mod tests` in `crates/savvagent-plugin/src/
         let m = Manifest {
             id: PluginId("internal:test-prompt".into()),
             name: "Test prompt".into(),
-            version: "0.16.0".into(),
+            version: "0.17.0".into(),
             description: "Test segments".into(),
             kind: PluginKind::Optional,
             contributions: Contributions {
@@ -1917,7 +1917,7 @@ members = [
 
 [workspace.dependencies]
 # ... existing ...
-savvagent-canvas = { path = "crates/savvagent-canvas", version = "0.16.0" }
+savvagent-canvas = { path = "crates/savvagent-canvas", version = "0.17.0" }
 blitz = "<pinned-from-Phase-0-spike>"
 ```
 
@@ -4029,7 +4029,7 @@ git commit -m "docs(canvas): terminal compatibility matrix + tmux passthrough"
 - Modify: `Cargo.toml` (workspace)
 - Modify: each crate's `Cargo.toml` literal if it doesn't inherit `version.workspace = true`
 
-Bump the workspace version from `0.15.0` → `0.16.0`. Per the project memory (`feedback_phase_release_rollup`), this is a *scaffolding* release commit — no git tag is pushed. The actual v0.17.0 tag goes up only after Phase 2 also ships.
+Bump the workspace version from `0.16.1` → `0.17.0`. Per the project memory (`feedback_phase_release_rollup`), this is a *scaffolding* release commit — no git tag is pushed. The actual v0.18.0 tag goes up only after Phase 2 also ships.
 
 - [ ] **Step 1: Bump the workspace version**
 
@@ -4037,7 +4037,7 @@ In the root `Cargo.toml`:
 
 ```toml
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 ```
 
 If individual crates carry literal versions in their own `[package]` blocks (rather than `version.workspace = true`), bump those too. Audit with:
@@ -4046,26 +4046,26 @@ If individual crates carry literal versions in their own `[package]` blocks (rat
 grep -rn '^version = ' crates/*/Cargo.toml | grep -v workspace
 ```
 
-Update any matches to `0.16.0`.
+Update any matches to `0.17.0`.
 
-Also update workspace dependency literals to `0.16.0` for the in-repo crates:
+Also update workspace dependency literals to `0.17.0` for the in-repo crates:
 
 ```bash
 grep -n 'savvagent-.*version = "0\.15\.0"' Cargo.toml
 ```
 
-For each matching workspace dependency entry, change the version to `0.16.0`.
+For each matching workspace dependency entry, change the version to `0.17.0`.
 
 - [ ] **Step 2: Update CHANGELOG**
 
 In `CHANGELOG.md`, add a new section at the top (above the most recent existing entry):
 
 ```markdown
-## [0.16.0] - unreleased
+## [0.17.0] - unreleased
 
 > This release is part of the inline HTML canvas initiative. Per the
 > repo's multi-phase release convention, **no git tag is pushed for
-> 0.16.0** — the final tag (v0.17.0) goes up after Phase 2 (mouse +
+> 0.17.0** — the final tag (v0.18.0) goes up after Phase 2 (mouse +
 > keyboard interaction) lands. See
 > `docs/superpowers/specs/2026-05-21-inline-html-canvas-design.md`.
 
@@ -4141,7 +4141,7 @@ Expected: PASS. If clippy flags anything, fix and re-run.
 
 ```bash
 git add Cargo.toml CHANGELOG.md crates/*/Cargo.toml
-git commit -m "release(0.16.0): inline HTML canvas Phase 1"
+git commit -m "release(0.17.0): inline HTML canvas Phase 1"
 ```
 
 **Do not push.** Per the memory note `feedback_cargo_dist_release` and `feedback_phase_release_rollup`, no git tag is created here — Phase 2 ships the final tag.
@@ -4167,8 +4167,8 @@ These map 1:1 to the spec's acceptance criteria (§ Acceptance criteria, items 1
 - [ ] `/save-canvas` parses flags correctly and emits an `OpenUrl` effect when `--open` is set (Task 19 tests).
 - [ ] Startup pushes `internal:html-canvas:default` segment to the host (Task 20 test).
 - [ ] Manual cross-terminal smoke: render a canvas in kitty (success), in alacritty (source fallback with banner).
-- [ ] `CHANGELOG.md` has a `[0.16.0] - unreleased` section.
-- [ ] `Cargo.toml` workspace version is `0.16.0`.
+- [ ] `CHANGELOG.md` has a `[0.17.0] - unreleased` section.
+- [ ] `Cargo.toml` workspace version is `0.17.0`.
 - [ ] `Cargo.lock` updated and committed (run `cargo update -p savvagent` if any in-repo version literal moved).
 - [ ] No commits push to remote unless explicitly authorized.
 
@@ -4190,4 +4190,4 @@ The following items are deliberately out of scope for Phase 1 and ship in the se
 - Ctrl-O "open in browser" keybinding.
 - Soft-freeze / thaw lifecycle.
 - Focus chrome (border) around the focused canvas.
-- `release(0.17.0)` scaffolding commit and v0.17.0 git tag.
+- `release(0.18.0)` scaffolding commit and v0.18.0 git tag.
