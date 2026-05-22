@@ -59,7 +59,7 @@ impl ContentRenderer for HtmlCanvas {
 fn render_html_to_rgba(source: &str, width: u32) -> Frame {
     use anyrender::{ImageRenderer as _, PaintScene as _};
     use anyrender_vello_cpu::VelloCpuImageRenderer;
-    use blitz_dom::{BaseDocument, DocumentConfig};
+    use blitz_dom::{BaseDocument, DocumentConfig, StyleThreading};
     use blitz_html::HtmlDocument;
     use blitz_paint::paint_scene;
     use blitz_traits::shell::{ColorScheme, Viewport};
@@ -67,6 +67,10 @@ fn render_html_to_rgba(source: &str, width: u32) -> Frame {
         Color, Fill,
         kurbo::{Affine, Rect},
     };
+
+    // `size.height` is ignored by design: we always return the natural height
+    // for the requested width per the trait's contract (PixelSize::height is
+    // a hint; Frame::height is authoritative).
 
     // Width must be > 0 — guard against accidental 0 by clamping to 1px.
     // (The trait contract says `size.width > 0`; we never want a panic.)
@@ -82,6 +86,10 @@ fn render_html_to_rgba(source: &str, width: u32) -> Frame {
         DocumentConfig {
             base_url: None,
             net_provider: None,
+            // Sequential: Blitz's default Parallel threading panics with
+            // `already mutably borrowed` when two HtmlCanvas instances resolve
+            // concurrently against Stylo's global thread pool (blitz #430).
+            style_threading: StyleThreading::Sequential,
             viewport: Some(Viewport::new(
                 width,
                 measure_height,
@@ -116,6 +124,23 @@ fn render_html_to_rgba(source: &str, width: u32) -> Frame {
         ));
         base.resolve(0.0);
     }
+
+    // VelloCpuImageRenderer truncates to u16 internally; warn + clamp so
+    // pathological canvases fail visibly rather than producing a buffer
+    // whose size doesn't match the renderer's expectations.
+    const MAX_DIM: u32 = u16::MAX as u32;
+    let width = if width > MAX_DIM {
+        tracing::warn!(width, max = MAX_DIM, "canvas width truncated to u16 max");
+        MAX_DIM
+    } else {
+        width
+    };
+    let natural_height = if natural_height > MAX_DIM {
+        tracing::warn!(natural_height, max = MAX_DIM, "canvas height truncated to u16 max");
+        MAX_DIM
+    } else {
+        natural_height
+    };
 
     let buffer = {
         let base: &mut BaseDocument = document.as_mut();
