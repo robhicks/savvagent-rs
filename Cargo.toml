@@ -15,6 +15,7 @@ members = [
     "crates/tool-grep",
     "crates/tool-lsp",
     "crates/savvagent-fence",
+    "crates/savvagent-canvas",
     "crates/savvagent-host/tests/fixtures/resource-tool",
     "crates/tool-lsp/tests/fixtures/fake-lsp",
 ]
@@ -42,6 +43,24 @@ tool-fs = { path = "crates/tool-fs", version = "0.16.1" }
 tool-grep = { path = "crates/tool-grep", version = "0.16.1" }
 tool-lsp = { path = "crates/tool-lsp", version = "0.16.1" }
 savvagent-fence = { path = "crates/savvagent-fence", version = "0.16.1" }
+# Forward-looking 0.17.0 because the inline-HTML-canvas series bumps the
+# workspace lockstep in Task 22. Until then this crate's package version
+# is still 0.16.1 (resolved via the path = ... entry); the version literal
+# only kicks in for crates.io publishes.
+savvagent-canvas = { path = "crates/savvagent-canvas", version = "0.17.0" }
+
+# Blitz building blocks — pinned per Phase 0 spike findings
+# (`docs/superpowers/notes/2026-05-21-blitz-spike.md`). We depend on the
+# building blocks directly rather than the umbrella `blitz` crate so we
+# don't pull in `blitz-shell` (windowing, accesskit, winit) which we don't
+# need for headless rendering.
+blitz-dom = "=0.3.0-alpha.4"
+blitz-html = "=0.3.0-alpha.4"
+blitz-paint = "=0.3.0-alpha.4"
+blitz-traits = "=0.3.0-alpha.4"
+anyrender = "0.10"
+anyrender_vello_cpu = "0.12"
+peniko = "0.6"
 
 # Async runtime + utilities
 tokio = { version = "1.52", features = ["full"] }
