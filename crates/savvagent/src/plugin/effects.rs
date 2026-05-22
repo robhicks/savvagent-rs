@@ -2177,6 +2177,15 @@ mod tests {
     /// HOME_LOCK + HomeGuard are used as in the `set_active_locale_*` tests
     /// so the `trust::save` call lands in a per-test tempdir and never
     /// touches the developer's real `~/.savvagent/`.
+    ///
+    /// Unix-only: on Windows, `dirs::home_dir()` does not consistently
+    /// respect the `USERPROFILE` env var override that `HomeGuard` sets,
+    /// so the production code under test writes to the runner's real
+    /// profile instead of the test tempdir. This pollutes sibling
+    /// tests' assumptions about disk state and poisons `HOME_LOCK`.
+    /// Tracked as a follow-up to plumb a test-injectable `home_dir`
+    /// override so disk-asserting tests can run on Windows too.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)]
     async fn set_trust_level_always_persists_and_resumes() {
@@ -2227,6 +2236,10 @@ mod tests {
     /// plugin runtime IS installed, `SetTrustLevel { "always" }` must
     /// emit `RunSlash` for the stashed command. We drive this with a
     /// real (but minimal) plugin runtime so the re-dispatch resolves.
+    ///
+    /// Unix-only — see the note on
+    /// `set_trust_level_always_persists_and_resumes`.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)]
     async fn set_trust_level_always_resumes_pending_slash() {
@@ -2355,6 +2368,11 @@ mod tests {
 
     /// `Effect::SetTrustLevel { decision: "session-text-only" }` must update
     /// the in-memory map but NOT write anything to disk (in-memory only).
+    ///
+    /// Unix-only — disk-state assertion that the `HomeGuard` sandbox
+    /// does not reliably hold on Windows. See
+    /// `set_trust_level_always_persists_and_resumes` for the rationale.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     #[allow(clippy::await_holding_lock)]
     async fn set_trust_level_session_text_only_not_persisted() {
@@ -2633,6 +2651,10 @@ mod tests {
     /// below (no await held while the std Mutex is held; we release the lock
     /// before the async assertion to satisfy the `await_holding_lock` lint in
     /// the normal multi-thread runtime flavor).
+    ///
+    /// Unix-only — see `set_trust_level_always_persists_and_resumes` for the
+    /// `dirs::home_dir()` / Windows test-isolation rationale.
+    #[cfg(unix)]
     #[tokio::test]
     async fn app_new_loads_persisted_trust_from_disk() {
         use crate::plugin::builtin::user_slash_commands::trust;
