@@ -43,11 +43,9 @@ tool-fs = { path = "crates/tool-fs", version = "0.16.1" }
 tool-grep = { path = "crates/tool-grep", version = "0.16.1" }
 tool-lsp = { path = "crates/tool-lsp", version = "0.16.1" }
 savvagent-fence = { path = "crates/savvagent-fence", version = "0.16.1" }
-# Forward-looking 0.17.0 because the inline-HTML-canvas series bumps the
-# workspace lockstep in Task 22. Until then this crate's package version
-# is still 0.16.1 (resolved via the path = ... entry); the version literal
-# only kicks in for crates.io publishes.
-savvagent-canvas = { path = "crates/savvagent-canvas", version = "0.17.0" }
+# Version aligned to workspace package version (0.16.1); bumped to 0.17.0
+# in Task 22 alongside the full workspace lockstep version bump.
+savvagent-canvas = { path = "crates/savvagent-canvas", version = "0.16.1" }
 
 # Blitz building blocks — pinned per Phase 0 spike findings
 # (`docs/superpowers/notes/2026-05-21-blitz-spike.md`). We depend on the
