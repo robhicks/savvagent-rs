@@ -102,10 +102,34 @@ Approach risks called out up front:
   "send a click at (x,y) and get back the updated DOM" path is less
   battle-tested for embedders outside Dioxus. Phase 0 of the
   implementation plan is a spike that proves out the eventing path
-  against a pinned Blitz version. If it's rough, we ship Phase 1
-  (static rendering) on schedule and the spike's findings shape
-  whether Phase 2 (interaction) needs a savvagent-side event router
-  layered on top of Blitz.
+  against a pinned Blitz version.
+  **Spike outcome (2026-05-21, blitz-* 0.3.0-alpha.4):** synthetic
+  events *are* accepted by `BaseDocument::handle_dom_event` and
+  `Document::handle_ui_event` without error, but Blitz's published
+  headless API does NOT run the browser's default actions (a
+  synthetic click on `<summary>` does not toggle the parent
+  `<details>`'s `open` attribute, neither immediately nor after a
+  subsequent `resolve()`). Phase 2 will therefore ship with a
+  *host-side event router* inside `savvagent-canvas::HtmlCanvas::dispatch`
+  that maps clicks-on-`<summary>` to manual `open`-attribute flipping,
+  clicks-on-`<a href>` to `Effect::OpenUrl`, and form submission to a
+  synthesized `Effect::OpenUrl`. The `ContentRenderer` trait surface
+  defined in this spec is unaffected by the router; it lives inside one
+  method's implementation. See
+  `docs/superpowers/notes/2026-05-21-blitz-spike.md` for details.
+- **`<details>` body painted regardless of `open` state.** Independent
+  of events, the spike found that Blitz 0.3.0-alpha.4's headless paint
+  renders the `<details>` body even when the `open` attribute is
+  absent. For Phase 1 (no interaction yet), the system-prompt segment
+  steers the model away from `<details>` (or uses it only for
+  always-visible disclosures). For Phase 2, the host router's
+  `open`-attribute-flip + re-render path naturally drives the correct
+  paint output, since paint just renders whatever the current attribute
+  says — the bug only bites when the attribute is *off* and Blitz
+  paints as if it were *on*. Mitigation in v1 prompts: prefer
+  semantically-flat structure to `<details>`. Subset validator warns
+  for `<details>` in the document until the upstream paint bug is
+  fixed.
 - **Image-protocol bandwidth.** Hover means re-uploading the frame on
   mouse-move. Mitigated by re-render only on state change and by
   Kitty's incremental frame update support; spec calls out tmux as a
@@ -1113,13 +1137,22 @@ chunk of the "I don't read markdown plans" problem.
 
 - `InputEvent`, `MouseEventPortable`, `InputOutcome`, `FocusableElement` types.
 - `ContentRenderer::dispatch`, `freeze`, `thaw`, `focusable_elements`, `set_focus`, `focused_index`.
-- `HtmlCanvas` implements the eventing surface against Blitz.
+- `HtmlCanvas` implements the eventing surface against Blitz, with a
+  **host-side event router** inside `dispatch` that runs the browser
+  default actions Blitz's headless API does not (see "Approach risks"
+  above): clicks on `<summary>` flip the parent `<details>`'s `open`
+  attribute and re-resolve; clicks on `<a href>` emit
+  `Effect::OpenUrl` rather than propagating to Blitz; form submission
+  synthesizes an `Effect::OpenUrl`. If a later Blitz version implements
+  default actions natively, the router shrinks to a pass-through; the
+  surface contract doesn't change.
 - TUI: `AppFocus::Canvas`, mouse-routing, keyboard routing, Ctrl-J/K block traversal, Tab/Shift-Tab element traversal, Esc to unfocus, focus chrome.
 - New keybinding scope `KeyScope::OnFocusedCanvas` for canvas-specific shortcuts.
 - Ctrl-O "open in browser" keybinding while focused on a canvas.
 - Soft freeze on focus loss; thaw on refocus.
 - Link follow via `Effect::OpenUrl` (default `SystemBrowser`).
-- `<details>` expand/collapse interaction.
+- `<details>` expand/collapse interaction (driven by the router, not
+  Blitz's default action).
 - Form input (text/checkbox/radio/select).
 
 ### Phase 0 (spike, before Phase 1 implementation begins)
@@ -1136,8 +1169,15 @@ chunk of the "I don't read markdown plans" problem.
 
 ## Risk register
 
-- **Blitz event dispatch path.** Mitigated by Phase 0 spike before
-  Phase 2 planning.
+- **Blitz event dispatch path.** Mitigated by Phase 0 spike (run
+  2026-05-21 against `blitz-* 0.3.0-alpha.4`, findings at
+  `docs/superpowers/notes/2026-05-21-blitz-spike.md`). Outcome:
+  synthetic events accepted, default actions not run; Phase 2 ships a
+  host-side router for `<summary>`/`<a>`/form-submit.
+- **Blitz MSRV bump (1.85 → 1.89).** `blitz-* 0.3.0-alpha.4` declares
+  `rust-version = "1.89.0"`. Adopting it in Phase 1 forces a workspace
+  MSRV bump from 1.85 to 1.89. Mitigation: call out in the Phase 1
+  CHANGELOG entry; CI's `rustup show` already runs on a newer stable.
 - **Image-protocol bandwidth on rapid mouse-move events.** Mitigated by
   re-render only on `InputOutcome::dirty`, by Kitty's image-replace
   semantics, and by debouncing mouse-move events at the TUI layer
@@ -1189,7 +1229,12 @@ chunk of the "I don't read markdown plans" problem.
 
 ## Open questions
 
-- **Crate version of Blitz** to pin. Decided in Phase 0 spike.
+- **Crate version of Blitz** to pin. **Resolved by Phase 0 spike
+  (2026-05-21):** `blitz-dom = "=0.3.0-alpha.4"`,
+  `blitz-html = "=0.3.0-alpha.4"`, `blitz-paint = "=0.3.0-alpha.4"`,
+  `blitz-traits = "=0.3.0-alpha.4"`, plus `anyrender = "0.10"`,
+  `anyrender_vello_cpu = "0.12"`, `peniko = "0.6"`. Spike notes at
+  `docs/superpowers/notes/2026-05-21-blitz-spike.md`.
 - **Default `UrlTarget`** for `<a href>` follow: `SystemBrowser` vs.
   `ContinueConversation`. Lean: `SystemBrowser` for absolute URLs;
   `ContinueConversation` for relative paths (model probably means
