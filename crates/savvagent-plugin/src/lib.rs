@@ -34,7 +34,7 @@ pub use styled::{StyledLine, StyledSpan, TextMods, ThemeColor};
 
 /// Closed-vocabulary effect and bound-action types returned by plugin callbacks.
 pub mod effect;
-pub use effect::{BoundAction, Effect};
+pub use effect::{BoundAction, Effect, UrlTarget};
 
 /// System-prompt segment contributions.
 pub mod prompt;
@@ -123,6 +123,34 @@ mod trait_smoke {
             p.summarize_tool_result("read_file", "{\"bytes\":12}")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn dummy_plugin_create_renderer_default_returns_not_found() {
+        use crate::content::ContentBlockId;
+
+        let p = DummyPlugin;
+        let r = p.create_renderer("html", ContentBlockId(0), "<p>x</p>");
+        assert!(
+            matches!(r, Err(PluginError::ContentRendererNotFound(ref t)) if t == "html"),
+            "default impl should return ContentRendererNotFound",
+        );
+    }
+
+    #[test]
+    fn effect_open_url_variants() {
+        use crate::effect::{Effect, UrlTarget};
+        let e = Effect::OpenUrl {
+            url: "https://example.com".into(),
+            target: UrlTarget::SystemBrowser,
+        };
+        match e {
+            Effect::OpenUrl { url, target } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(target, UrlTarget::SystemBrowser);
+            }
+            _ => panic!("expected OpenUrl"),
+        }
     }
 
     #[test]

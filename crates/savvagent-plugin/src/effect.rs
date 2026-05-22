@@ -129,11 +129,34 @@ pub enum Effect {
     /// styled notes. Sets `App::pending_routing_show` for the same
     /// reason as `ReloadRoutingRules`.
     ShowRoutingRules,
+    /// Open a URL. The host shells to `xdg-open` (Linux), `open` (macOS),
+    /// or `start` (Windows) when `target == SystemBrowser`. When
+    /// `target == ContinueConversation`, the host treats the URL as a
+    /// follow-up user prompt instead.
+    OpenUrl {
+        /// Absolute URL. Plugins MUST validate this before emitting;
+        /// the host treats untrusted URLs as a security risk.
+        url: String,
+        /// Where the URL should be opened.
+        target: UrlTarget,
+    },
     /// Compound: apply children in order. Not atomic — partial application is
     /// observable if a later child fails or has user-visible side effects.
     /// Useful for `vec![SetActiveTheme{..}, CloseScreen]`-style sequences from
     /// a single handler.
     Stack(Vec<Effect>),
+}
+
+/// Destination for an [`Effect::OpenUrl`] effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UrlTarget {
+    /// Open in the user's default system browser via
+    /// `xdg-open`/`open`/`start`.
+    SystemBrowser,
+    /// Send the URL as a new user prompt in the active conversation
+    /// (useful for relative paths the model means as
+    /// "look at this file").
+    ContinueConversation,
 }
 
 /// The right-hand side of a [`crate::manifest::KeybindingSpec`]: either invoke a
