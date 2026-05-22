@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use savvagent_mcp::ProviderClient;
+use savvagent_plugin::SystemPromptSegment;
 use savvagent_protocol::{
     BlockDelta, CompleteRequest, ContentBlock, Message, ProviderError, ProviderId, Role,
     StopReason, StreamEvent, ToolDef,
@@ -358,6 +359,19 @@ pub struct Host {
     /// tool-use-loop iteration boundary to inject `[resource updated: …]`
     /// user-text blocks into the conversation.
     resources: Arc<tokio::sync::Mutex<crate::resources::ResourceCache>>,
+    /// Active plugin-contributed system-prompt segments. Replaced atomically
+    /// by [`Self::set_prompt_segments`] whenever the enabled-plugin set
+    /// changes. Read once per turn (before composing the `CompleteRequest`
+    /// `system` field) under a brief read lock — no guard is held across an
+    /// await. `std::sync::RwLock` (not tokio) because the read path inside
+    /// `run_turn_inner` is synchronous (snapshot then drop).
+    prompt_segments: std::sync::RwLock<Vec<SystemPromptSegment>>,
+    /// Suppression list for the next turn. Set by the slash dispatcher
+    /// before calling `run_turn_streaming` when the dispatched slash carries
+    /// a non-empty `suppress_prompt_segments`. Cleared automatically at the
+    /// end of each turn so stale lists never bleed into subsequent turns.
+    /// Plain `std::sync::Mutex` — set and cleared from non-async callers.
+    pending_slash_suppression: std::sync::Mutex<Vec<String>>,
 }
 
 struct SessionState {
@@ -540,6 +554,8 @@ impl Host {
             resources: Arc::new(tokio::sync::Mutex::new(
                 crate::resources::ResourceCache::default(),
             )),
+            prompt_segments: std::sync::RwLock::new(Vec::new()),
+            pending_slash_suppression: std::sync::Mutex::new(Vec::new()),
         };
         host.wire_self_into_resolver().await;
         // Spawn the resource pump. It owns the receiver, the cache handle,
@@ -655,6 +671,8 @@ impl Host {
             resources: Arc::new(tokio::sync::Mutex::new(
                 crate::resources::ResourceCache::default(),
             )),
+            prompt_segments: std::sync::RwLock::new(Vec::new()),
+            pending_slash_suppression: std::sync::Mutex::new(Vec::new()),
         };
         host.wire_self_into_resolver().await;
         // Spawn the resource pump. Mirrors the spawn in `Host::start`.
@@ -931,6 +949,43 @@ impl Host {
         let mut iterations: u32 = 0;
         let want_stream = events.is_some();
 
+        // Compose the per-turn system prompt: base (default + SAVVAGENT.md +
+        // embedder override) with plugin-contributed segments appended, minus
+        // any segments suppressed by the slash dispatcher for this turn.
+        // The suppression list is consumed here (cleared via `take`) so stale
+        // suppressions never bleed into subsequent turns.
+        let turn_system: Option<String> = {
+            let segments = self.active_prompt_segments();
+            let suppressed = self.take_suppressed_segments_for_turn();
+            if segments.is_empty() {
+                self.system_prompt.clone()
+            } else {
+                match &self.system_prompt {
+                    Some(base) => {
+                        let suppressed_refs: Vec<&str> =
+                            suppressed.iter().map(String::as_str).collect();
+                        Some(crate::default_prompt::append_prompt_segments(
+                            base,
+                            &segments,
+                            &suppressed_refs,
+                        ))
+                    }
+                    None => {
+                        // No base prompt — append segments to an empty string
+                        // so the model still receives the plugin contributions.
+                        let suppressed_refs: Vec<&str> =
+                            suppressed.iter().map(String::as_str).collect();
+                        let composed = crate::default_prompt::append_prompt_segments(
+                            "",
+                            &segments,
+                            &suppressed_refs,
+                        );
+                        if composed.is_empty() { None } else { Some(composed) }
+                    }
+                }
+            }
+        };
+
         loop {
             if iterations >= self.config.max_iterations {
                 return Err(HostError::LoopLimit(self.config.max_iterations));
@@ -978,7 +1033,7 @@ impl Host {
             let req = CompleteRequest {
                 model: decision.model_id.clone(),
                 messages: req_messages,
-                system: self.system_prompt.clone(),
+                system: turn_system.clone(),
                 tools: tool_defs.clone(),
                 temperature: None,
                 top_p: None,
@@ -1597,6 +1652,63 @@ impl Host {
                     Ok(PermissionDecision::Deny) => Err("denied by user".into()),
                     Err(_) => Err("permission channel dropped".into()),
                 }
+            }
+        }
+    }
+
+    /// Replace the active prompt segments. Called by the TUI runtime
+    /// each time the enabled-plugin set changes.
+    pub fn set_prompt_segments(&self, segments: Vec<SystemPromptSegment>) {
+        match self.prompt_segments.write() {
+            Ok(mut guard) => *guard = segments,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "prompt_segments RwLock poisoned; skipping set"
+                );
+            }
+        }
+    }
+
+    /// Set the suppression list for the next turn. Called by the slash
+    /// dispatcher *before* invoking `run_turn_streaming` when the
+    /// dispatched slash has a non-empty `suppress_prompt_segments`.
+    /// Cleared automatically after the turn completes.
+    pub fn set_turn_suppression(&self, suppressed: Vec<String>) {
+        match self.pending_slash_suppression.lock() {
+            Ok(mut guard) => *guard = suppressed,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "pending_slash_suppression mutex poisoned; skipping set"
+                );
+            }
+        }
+    }
+
+    /// Snapshot the active prompt segments. Called once per turn inside
+    /// `run_turn_inner` before composing the `CompleteRequest` `system`
+    /// field. The guard is held only for the clone; no `.await` is
+    /// crossed while holding it.
+    pub(crate) fn active_prompt_segments(&self) -> Vec<SystemPromptSegment> {
+        self.prompt_segments
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot and clear the per-turn suppression list. Called once per
+    /// turn inside `run_turn_inner`; clearing ensures stale suppressions
+    /// never bleed into subsequent turns.
+    pub(crate) fn take_suppressed_segments_for_turn(&self) -> Vec<String> {
+        match self.pending_slash_suppression.lock() {
+            Ok(mut guard) => std::mem::take(&mut *guard),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "pending_slash_suppression mutex poisoned; returning empty suppression list"
+                );
+                Vec::new()
             }
         }
     }
