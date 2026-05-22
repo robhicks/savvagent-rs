@@ -232,9 +232,9 @@ fn format_entry(entry: &EntryProgress) -> (&'static str, String) {
         }
         EntryStatus::Installed { .. } => ("✓", "installed".to_string()),
         EntryStatus::Failed {
-            reason: _,
+            reason,
             fatal: true,
-        } => ("✗", "SHA256 mismatch — batch aborted".to_string()),
+        } => ("✗", reason.clone()),
         EntryStatus::Failed {
             reason,
             fatal: false,
@@ -710,7 +710,7 @@ mod tests {
                 id: "ra".into(),
                 display_name: "ra".into(),
                 status: EntryStatus::Failed {
-                    reason: "SHA256 mismatch".into(),
+                    reason: "SHA256 mismatch — batch aborted".into(),
                     fatal: true,
                 },
             }],
@@ -723,6 +723,28 @@ mod tests {
         assert!(
             !out.contains("failed:"),
             "fatal arm must not use 'failed:' prefix, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_shows_downstream_batch_abort_label() {
+        let s = screen_with_state(ProgressState {
+            entries: vec![EntryProgress {
+                id: "pyright".into(),
+                display_name: "pyright".into(),
+                status: EntryStatus::Failed {
+                    reason: "batch aborted after SHA mismatch".into(),
+                    fatal: true,
+                },
+            }],
+            finished: false,
+            config_error: None,
+        });
+        let out = rendered(&s);
+        assert!(out.contains("batch aborted after SHA mismatch"));
+        assert!(
+            !out.contains("failed:"),
+            "downstream-aborted entry must not use 'failed:' prefix, got:\n{out}"
         );
     }
 }

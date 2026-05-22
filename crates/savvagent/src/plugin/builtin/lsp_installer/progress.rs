@@ -224,7 +224,7 @@ pub async fn run_installs(
                 let mut guard = state.lock().await;
                 if let Some(slot) = guard.entries.iter_mut().find(|e| e.id == entry.id) {
                     slot.status = EntryStatus::Failed {
-                        reason: "SHA256 mismatch".into(),
+                        reason: "SHA256 mismatch — batch aborted".into(),
                         fatal: true,
                     };
                 }
