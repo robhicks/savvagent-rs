@@ -7,6 +7,7 @@ mod decision;
 mod discovery;
 mod matcher;
 mod payload;
+mod runner;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
