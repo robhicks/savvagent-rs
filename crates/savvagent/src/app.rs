@@ -498,6 +498,16 @@ pub struct App {
     /// `main.rs::apply_pending_routing_show`.
     pub pending_routing_show: Option<PendingRoutingAction>,
 
+    /// Prompt text accumulated by `UserPromptSubmit` hooks before
+    /// dispatch. Each `Effect::PrependToPendingPrompt` adds to the
+    /// front; when the worker spawn fires, the full text becomes
+    /// `accumulated\n\n<user typed prompt>`.
+    pub pending_prompt_prefix: Option<String>,
+    /// If `Some`, the next attempted turn dispatch aborts and `reason`
+    /// is surfaced as a `[blocked]` PushNote. Set by
+    /// `Effect::CancelPendingTurn`; cleared after the abort fires.
+    pub pending_turn_cancellation: Option<String>,
+
     /// Per-project shell-style prompt history. Up at an empty input recalls
     /// the most recent entry; Up/Down then navigate while the recalled text
     /// is still the live textarea content (any edit cancels the browse).
@@ -661,6 +671,8 @@ impl App {
             pending_gate: None,
             pending_routing_reload: None,
             pending_routing_show: None,
+            pending_prompt_prefix: None,
+            pending_turn_cancellation: None,
             prompt_history: PromptHistory::default(),
             log_scroll_offset_from_bottom: None,
             next_turn_model_override: None,

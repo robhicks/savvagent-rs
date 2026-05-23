@@ -377,6 +377,24 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                 }
             }
         }
+        Effect::PrependToPendingPrompt { text } => {
+            if text.is_empty() {
+                return Ok(());
+            }
+            let combined = match app.pending_prompt_prefix.take() {
+                Some(existing) => format!("{existing}\n\n{text}"),
+                None => text,
+            };
+            app.pending_prompt_prefix = Some(combined);
+        }
+        Effect::CancelPendingTurn { reason } => {
+            let reason = if reason.is_empty() {
+                "blocked by user hook".to_string()
+            } else {
+                reason
+            };
+            app.pending_turn_cancellation = Some(reason);
+        }
         Effect::RegisterPreToolGate { plugin_id } => {
             let reg = match &app.plugin_registry {
                 Some(r) => r.clone(),
@@ -2796,5 +2814,43 @@ mod tests {
         let effs = vec![savvagent_plugin::Effect::RegisterPreToolGate { plugin_id: pid }];
         let res = apply_effects(&mut app, effs).await;
         assert!(res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn prepend_concatenates_in_order() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        apply_effects(
+            &mut app,
+            vec![
+                Effect::PrependToPendingPrompt { text: "A".into() },
+                Effect::PrependToPendingPrompt { text: "B".into() },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(app.pending_prompt_prefix.as_deref(), Some("A\n\nB"));
+    }
+
+    #[tokio::test]
+    async fn cancel_with_empty_reason_uses_default() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        apply_effects(
+            &mut app,
+            vec![Effect::CancelPendingTurn { reason: "".into() }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            app.pending_turn_cancellation.as_deref(),
+            Some("blocked by user hook")
+        );
     }
 }

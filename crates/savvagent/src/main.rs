@@ -2893,12 +2893,38 @@ async fn run_app(
                                     "PromptSubmitted dispatch failed");
                             }
 
+                            // Drain hook-driven prompt mutations now that
+                            // PromptSubmitted dispatch has completed.
+                            // CancelPendingTurn takes precedence over
+                            // PrependToPendingPrompt — if a hook blocked the
+                            // turn, drop the accumulated prefix too so it
+                            // doesn't bleed into a future turn.
+                            if let Some(reason) = app.pending_turn_cancellation.take() {
+                                app.push_note(format!("[blocked] {reason}"));
+                                app.is_loading = false;
+                                app.pending_prompt_prefix = None;
+                                continue;
+                            }
+                            let prefix = app.pending_prompt_prefix.take();
+
                             // Consume the one-turn model override (if any)
                             // before moving `app` references into the spawn.
                             // `original_model` is saved so the host can be
                             // restored after the turn completes.
                             let model_override = app.consume_model_override();
                             let original_model = app.model.clone();
+
+                            // Build the prompt text that goes to the host.
+                            // The hook-supplied prefix MUST NOT appear in
+                            // `push_user` / `prompt_history.append` /
+                            // `PromptSubmitted` (all of which already ran on
+                            // `value`); it only shapes the prompt the host
+                            // sees, so the user's transcript and history
+                            // stay clean.
+                            let prompt_text = match prefix {
+                                Some(p) => format!("{p}\n\n{value}"),
+                                None => value.clone(),
+                            };
 
                             let tx = worker_tx.clone();
                             tokio::spawn(async move {
@@ -2917,7 +2943,7 @@ async fn run_app(
 
                                 let (ev_tx, mut ev_rx) = mpsc::channel(64);
                                 let host_for_run = host.clone();
-                                let prompt = value;
+                                let prompt = prompt_text;
                                 let runner = tokio::spawn(async move {
                                     host_for_run.run_turn_streaming(prompt, ev_tx).await
                                 });
