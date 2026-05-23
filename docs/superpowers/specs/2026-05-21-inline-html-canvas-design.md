@@ -1,10 +1,74 @@
 # Inline HTML canvas — design
 
-Date: 2026-05-21
-Status: draft, pending review
+Date: 2026-05-21 (Phase 1 + 2 design); Phase 2 amendment 2026-05-23
+Status: Phase 1 shipped (PR #97); Phase 2 amendment approved 2026-05-23
 Supersedes: nothing
 Related: v0.9.0 plugin system (`2026-05-12-v0.9.0-plugin-system-design.md`); SPP wire format (`crates/savvagent-protocol/SPEC.md`)
 Inspiration: ["How I AI: HTML is the new markdown"](https://www.lennysnewsletter.com/p/how-i-ai-html-is-the-new-markdown)
+
+## Phase 2 amendment (2026-05-23)
+
+This spec was originally written for both phases of the inline HTML
+canvas initiative. Phase 1 (static rendering + export) shipped via the
+22-task plan at
+`docs/superpowers/plans/2026-05-21-inline-html-canvas-phase-1.md`. This
+amendment closes the spec for Phase 2 implementation by:
+
+1. **Promoting** the spec's existing Phase 2 subsections — `Focus
+   model`, `Keyboard routing`, `Mouse routing`, `Focus chrome`,
+   `Lifecycle and soft freeze`, and the `ContentRenderer` event-surface
+   methods (`dispatch`, `freeze`, `thaw`, `focusable_elements`,
+   `set_focus`, `focused_index`) — from "deferred to Phase 2" to
+   "shipping in Phase 2." Their as-written design is unchanged; only
+   the disposition moves.
+2. **Pinning** Blitz at the same versions Phase 1 ships
+   (`blitz-* = "=0.3.0-alpha.4"`). A 2026-05-23 re-check of crates.io
+   confirmed no alpha.5 has been published; the Phase 0 spike findings
+   continue to apply, including the requirement that Phase 2 ship a
+   **host-side default-action router** (links, `<summary>`, form
+   submit) inside `HtmlCanvas::dispatch`.
+3. **Adding** three capability areas not in the original spec:
+   - **Tool-emitted HTML** (new § *Tool-emitted HTML*): MCP tool
+     results can carry `{ "type": "html", "source": "..." }` content
+     items, which `ToolRegistry` translates to SPP `ContentBlock::Html`
+     blocks. Bypasses the fence parser (the content is already typed).
+   - **Persistence of interactive state** (updates § *Persistence*):
+     two new `ContentRenderer` trait methods, `snapshot_state` and
+     `restore_state`, carry an opaque renderer-defined byte blob in
+     the transcript JSON. `HtmlCanvas` serializes form values, scroll
+     offsets, expanded-details set, and the focused-element id; on
+     `/resume` the bytes are handed back via `restore_state`.
+   - **Sub-agent prompt firmness** (updates § *Agent contention*): the
+     "future" hedge is replaced by a concrete contract — sub-agent
+     `CompleteRequest::system` REPLACES the host's composed prompt by
+     default; plugin `SystemPromptSegment`s do NOT leak in; sub-agent
+     manifests can opt in per-segment via `inherit_segments:
+     Vec<String>`. Code change deferred to whenever sub-agents land;
+     this spec section is the contract that future code must honor.
+4. **Resolving** the original open question on default `UrlTarget` for
+   `<a href>` follows (see § *Open questions*): **absolute URLs →
+   `SystemBrowser`; relative paths → `ContinueConversation`**. Decided
+   here so the Phase 2 plan can codify it.
+5. **Documenting** two design refinements surfaced during Phase 2
+   scoping:
+   - The default-action interceptor lives **inside
+     `savvagent-canvas::HtmlCanvas::dispatch`**, returning
+     `Effect::OpenUrl` via `InputOutcome::effects` so the host still
+     mediates the actual shell-out (see § *Architecture overview*).
+   - **Built-in canvas keys take precedence over plugin keybindings
+     in `KeyScope::OnFocusedCanvas`** (Tab, Shift-Tab, Esc, Ctrl-J,
+     Ctrl-K, Ctrl-O; see § *Keyboard routing*). Plugin authors register
+     non-conflicting bindings only.
+
+After Phase 2 lands, the version bump from `release(0.17.0)` (already
+in master from Phase 1's scaffolding commit) is followed by the actual
+`v0.17.0` git tag push — `cargo-dist` owns the release artifact build
+from there.
+
+The rest of this document is the original 2026-05-21 design with
+in-place amendments at the affected sections. Where a section's text
+was updated, the change is in-line; where new sections were added,
+they appear at the natural location in the document.
 
 ## Problem
 
@@ -248,6 +312,64 @@ state machine. Providers that gain "native" HTML blocks (multi-modal
 output) in the future can bypass the parser and emit `Html` blocks
 directly.
 
+## Tool-emitted HTML
+
+> *Phase 2 amendment. Not in the original 2026-05-21 spec.*
+
+A second producer of `ContentBlock::Html` is MCP tools. The MCP tool-
+result contract already supports a content-array shape with `type`
+discriminators (`text`, `image`, etc.); a tool can include items of
+type `html`:
+
+```json
+{
+  "content": [
+    {"type": "text", "text": "Wrote 3 files. Diff:"},
+    {"type": "html", "source": "<!doctype html><html><body>…</body></html>"}
+  ]
+}
+```
+
+`ToolRegistry::call` (in `savvagent-host`) walks the returned
+content array. Today it concatenates `text` items into a single
+`ContentBlock::Text`. Phase 2 extends this:
+
+- `text` items continue to concatenate into a `Text` block.
+- `html` items each become their own `ContentBlock::Html { source }`
+  block, preserving the per-item HTML source verbatim.
+- Block order in the output matches the order the tool emitted them
+  (text-then-html, text-html-text, etc.).
+- Unknown content types are stringified into a fallback `Text` block
+  with a one-line warning, matching today's "ignore unknown" behavior.
+
+This bypasses the fence parser entirely — the tool's HTML is already
+typed; no sentinel scanning is needed. The host treats the source
+identically to model-emitted HTML once it's in `ContentBlock::Html`
+form: the registered `internal:html-canvas` renderer takes over from
+there.
+
+### Tool author contract
+
+A tool that emits HTML promises:
+
+- The source is a complete document. Partial fragments are not
+  supported; the renderer parses fresh on each `restore_state`
+  cycle.
+- The HTML stays within the documented subset (§ *HTML+CSS subset*).
+- No network resources (`http://`, `https://`, `file://`). Inline
+  styles and `data:` URIs only.
+- The tool does NOT include `\`\`\`html-canvas` fences inside the
+  source — those are a *streaming-text* convention for model output;
+  tool HTML is already structurally typed.
+
+### Streaming
+
+Tool calls return synchronously today; there is no streaming-tool-
+result delivery path. When that lands (separate feature), each
+`html` content item maps to a sequence of `HtmlSourceDelta`s
+identically to model-emitted streaming HTML. The renderer is unaware
+of the source.
+
 ## Plugin trait extension
 
 The v0.9.0 plugin trait surface (`savvagent-plugin`) is extended with a
@@ -364,6 +486,35 @@ pub trait ContentRenderer: Send {
     /// Move focus to the element at the given index. The host calls
     /// this when the user Tabs through elements.
     fn set_focus(&mut self, index: Option<u32>);
+
+    /// **Phase 2 amendment.** Serialize the renderer's interactive
+    /// state (form values, scroll offsets, expanded `<details>` set,
+    /// focused-element id) to an opaque byte blob. Returns `None` if
+    /// the renderer has no recoverable state (e.g. the document has
+    /// no focusable or stateful elements). The bytes are persisted
+    /// in the transcript JSON alongside the source.
+    ///
+    /// Default returns `None` so plugins authored against the
+    /// Phase 1 trait surface compile against the Phase 2 trait
+    /// without code change.
+    fn snapshot_state(&self) -> Option<Vec<u8>> { None }
+
+    /// **Phase 2 amendment.** Restore renderer state previously
+    /// produced by `snapshot_state`. Called by the host after
+    /// constructing the renderer from source on `/resume`. The
+    /// renderer is free to interpret the bytes however it likes;
+    /// the host treats them as opaque.
+    ///
+    /// Returns an error if the bytes are corrupt or schema-
+    /// incompatible. The host falls back to "no restored state" and
+    /// logs a warning; the renderer proceeds as if newly constructed.
+    ///
+    /// Default returns `Ok(())` (no-op) so plugins authored against
+    /// the Phase 1 trait surface compile against the Phase 2 trait
+    /// without code change.
+    fn restore_state(&mut self, _bytes: &[u8]) -> Result<(), PluginError> {
+        Ok(())
+    }
 }
 ```
 
@@ -617,6 +768,25 @@ When `AppFocus == Canvas(id)`:
 - `Esc` → unfocus (`AppFocus = ChatInput`).
 - `Ctrl-J` / `Ctrl-K` → jump to next/prev canvas (host-level, not
   routed into the renderer).
+- `Ctrl-O` → "open in browser" (Phase 2 — writes the canvas to a
+  temp file and shells `xdg-open` / `open` / `start`).
+
+#### Precedence with `KeyScope::OnFocusedCanvas`
+
+> *Phase 2 amendment. The original spec defined the scope but didn't
+> spell out the precedence rule.*
+
+Plugins can register keybindings scoped to `OnFocusedCanvas` via the
+existing `KeybindingSpec` mechanism. Built-in canvas keys (`Tab`,
+`Shift-Tab`, `Esc`, `Ctrl-J`, `Ctrl-K`, `Ctrl-O`) **take precedence**
+over any plugin-registered binding in this scope. The host runs the
+built-in matcher first; only on a miss does it look at plugin-
+contributed bindings.
+
+Plugin authors should register non-conflicting bindings only. Plugin
+registration of a conflicting binding is not a startup error (would
+break composability across plugins users mix-and-match) but it has no
+effect, and the host emits a debug-level log on first conflict.
 
 ### Mouse routing
 
@@ -983,14 +1153,42 @@ These are *not* shipped as part of this spec; if a slash command
 already exists that conflicts, its `SlashSpec` is updated to include
 the suppression in the same PR that introduces this feature.
 
-### Agent contention (future)
+### Sub-agent contract
 
-When savvagent grows a sub-agent concept, each agent declares its
-own `system` field that overrides the host's plugin-composed prompt
-for the duration of the sub-agent's turn. Plugin-contributed segments
-do *not* leak into sub-agent prompts by default. The agent's
-declaration can opt in by referencing a segment ID. Mechanism deferred
-to whenever the sub-agent feature lands.
+> *Phase 2 amendment. The original "Agent contention (future)" section
+> hedged this; Phase 2 commits to a concrete contract that future
+> sub-agent code must honor. No sub-agent code ships in Phase 2; this
+> section is the design.*
+
+When savvagent grows a sub-agent concept, each sub-agent's
+`CompleteRequest::system` **fully replaces** the host's composed
+prompt for the duration of the sub-agent's turn. Plugin-contributed
+`SystemPromptSegment`s do NOT leak into sub-agent prompts by default.
+
+A sub-agent manifest may opt into specific segments via:
+
+```rust
+pub struct SubAgentManifest {
+    // ... existing fields ...
+    /// Plugin SystemPromptSegment ids to compose into THIS sub-agent's
+    /// system prompt. Composition order: sub-agent's own system field,
+    /// then each segment in this list (in order). Empty by default.
+    pub inherit_segments: Vec<String>,
+}
+```
+
+The mechanism resembles the per-slash suppression (§ *Prompt
+contention and suppression*) but inverted: slashes opt *out* of host
+defaults; sub-agents opt *in* to specific segments.
+
+**Why this asymmetry**: a slash command runs inside the same agent
+loop as normal chat; suppression is a targeted exception. A sub-
+agent is a different agent with its own identity and instructions;
+inheritance is a deliberate borrow.
+
+Phase 2 ships only the spec; the code change lands with the sub-
+agent feature itself. When that PR is written, it MUST honor this
+contract — no leak by default, opt-in via `inherit_segments`.
 
 ### Multiple prompt-contributing plugins
 
@@ -1015,12 +1213,58 @@ language precisely. Conflict detection is out of scope; this is a
 
 - Transcripts JSON gains the new `Html` content block type. The block
   carries `{ type: "html", source: "..." }`. Existing transcripts
-  load unchanged (no `Html` blocks present).
+  load unchanged (no `Html` blocks present). *(Phase 1.)*
 - The on-disk schema version of transcripts (if any) is bumped to
   signal the new block type. Older builds loading newer transcripts
-  log a warning and render `Html` blocks as raw source.
-- Active interactive state (form values, scroll, focus, expanded
-  details) is NOT persisted in v1. Re-rendered from source on load.
+  log a warning and render `Html` blocks as raw source. *(Phase 1.)*
+
+### Interactive-state persistence
+
+> *Phase 2 amendment. The original spec said interactive state is NOT
+> persisted; Phase 2 adds it.*
+
+The `Canvas` Entry variant in the transcript JSON gains an optional
+opaque `state` field:
+
+```json
+{
+  "type": "canvas",
+  "id": 42,
+  "source": "<!doctype html>...",
+  "state": "<base64-encoded opaque blob>"
+}
+```
+
+- The blob is produced by `ContentRenderer::snapshot_state()` (see
+  § *New trait*) at transcript save time, and consumed by
+  `restore_state()` at `/resume` time.
+- The host treats the bytes as opaque. The encoding inside is the
+  renderer's choice; `HtmlCanvas` serializes a `serde_json`-shaped
+  struct of `{ form_values: Map<NodeId, FormValue>, scroll: Map<NodeId,
+  (u32, u32)>, open_details: Set<NodeId>, focused: Option<NodeId> }`.
+- NodeId stability: Blitz assigns node ids during parsing; the same
+  source parses to the same node ids deterministically, so a snapshot
+  taken in session A can be restored in session B after re-parsing the
+  same source. If the source changes between save and resume (it
+  shouldn't — the source is in the same JSON record), `restore_state`
+  best-effort applies what still matches and logs a warning for the
+  rest.
+- The transcript schema version bumps again to signal the new field.
+  Older builds loading newer transcripts ignore `state` and render
+  the source fresh — graceful fallback, no data loss except
+  interactive state.
+- A snapshot is taken at: `TurnComplete`, before manual `/save`,
+  and at clean TUI shutdown. A snapshot is NOT taken on
+  every input event (too expensive — events are frequent and most
+  don't change persistable state).
+
+### Cross-build compatibility matrix
+
+| Build / transcript | Pre-canvas | Phase 1 | Phase 2 |
+|---|---|---|---|
+| Pre-canvas build  | works | warns + renders `Html` as source | warns + renders `Html` as source, ignores `state` |
+| Phase 1 build     | works | works | works (silently ignores `state` field — no consumer) |
+| Phase 2 build     | works | works (no `state` to restore) | works (full restore) |
 
 ## Testing strategy
 
@@ -1151,27 +1395,58 @@ file in `~/.savvagent/canvases/` for opening in a real browser or
 sharing. No interaction inside the TUI yet. This alone solves a big
 chunk of the "I don't read markdown plans" problem.
 
-### Phase 2 — Interaction (one release)
+### Phase 2 — Interaction + tool HTML + state persistence (one release)
 
-- `InputEvent`, `MouseEventPortable`, `InputOutcome`, `FocusableElement` types.
-- `ContentRenderer::dispatch`, `freeze`, `thaw`, `focusable_elements`, `set_focus`, `focused_index`.
+> *Phase 2 amendment. Items marked "(new)" were not in the original
+> spec and are added by the 2026-05-23 amendment above.*
+
+- `InputEvent`, `MouseEventPortable`, `InputOutcome`, `FocusableElement` types. *(Phase 1 added these as Phase-2-ready stubs; Phase 2 wires them.)*
+- `ContentRenderer::dispatch`, `freeze`, `thaw`, `focusable_elements`,
+  `set_focus`, `focused_index` — promoted from no-op defaults to real
+  implementations on `HtmlCanvas`.
+- `ContentRenderer::snapshot_state` and `restore_state` — **(new)**
+  two methods added to the trait surface, default to `None` /
+  `Ok(())` so Phase 1 plugins continue to compile.
 - `HtmlCanvas` implements the eventing surface against Blitz, with a
-  **host-side event router** inside `dispatch` that runs the browser
-  default actions Blitz's headless API does not (see "Approach risks"
-  above): clicks on `<summary>` flip the parent `<details>`'s `open`
-  attribute and re-resolve; clicks on `<a href>` emit
-  `Effect::OpenUrl` rather than propagating to Blitz; form submission
-  synthesizes an `Effect::OpenUrl`. If a later Blitz version implements
-  default actions natively, the router shrinks to a pass-through; the
-  surface contract doesn't change.
-- TUI: `AppFocus::Canvas`, mouse-routing, keyboard routing, Ctrl-J/K block traversal, Tab/Shift-Tab element traversal, Esc to unfocus, focus chrome.
-- New keybinding scope `KeyScope::OnFocusedCanvas` for canvas-specific shortcuts.
+  **renderer-side event router** inside `dispatch` that runs the
+  browser default actions Blitz's headless API does not: clicks on
+  `<summary>` flip the parent `<details>`'s `open` attribute and re-
+  resolve; clicks on `<a href>` emit `Effect::OpenUrl` via
+  `InputOutcome::effects` rather than propagating to Blitz; form
+  submission synthesizes an `Effect::OpenUrl`. If a later Blitz
+  version implements default actions natively, the router shrinks to
+  a pass-through; the surface contract doesn't change.
+- TUI: `AppFocus::Canvas`, mouse routing, keyboard routing, Ctrl-J/K
+  block traversal, Tab/Shift-Tab element traversal, Esc to unfocus,
+  focus chrome.
+- New keybinding scope `KeyScope::OnFocusedCanvas` for canvas-
+  specific shortcuts, with built-in keys taking precedence (§
+  *Keyboard routing*).
 - Ctrl-O "open in browser" keybinding while focused on a canvas.
 - Soft freeze on focus loss; thaw on refocus.
-- Link follow via `Effect::OpenUrl` (default `SystemBrowser`).
-- `<details>` expand/collapse interaction (driven by the router, not
-  Blitz's default action).
+- Link follow via `Effect::OpenUrl`. Default `UrlTarget` is
+  `SystemBrowser` for absolute URLs, `ContinueConversation` for
+  relative paths (§ *Open questions* resolution).
+- `<details>` expand/collapse interaction (driven by the renderer
+  router, not Blitz's default action).
 - Form input (text/checkbox/radio/select).
+- **Tool-emitted HTML (new):** `ToolRegistry::call` translates
+  MCP tool-result content items of type `html` into
+  `ContentBlock::Html` blocks. See § *Tool-emitted HTML*.
+- **Persistence of interactive state (new):** transcript JSON gains
+  the optional `state` field on the `Canvas` Entry. `HtmlCanvas`
+  serializes form values, scroll offsets, expanded-details set, and
+  focused-element id. `/resume` restores state via
+  `restore_state`. See § *Interactive-state persistence*.
+- **Sub-agent prompt contract (new — spec-only):** firms up the
+  segment-leak rules for sub-agents (§ *Sub-agent contract*). No
+  code change in Phase 2; future sub-agent PR must honor.
+- `release(0.17.0)` rollup commit (Phase 1's commit bumped the
+  version; Phase 2's commit consolidates CHANGELOG, README,
+  spec-doc cross-references).
+- **Push the `v0.17.0` git tag.** cargo-dist's Release workflow
+  takes over from here. Per `feedback_phase_release_rollup`, this
+  is the first tag push for the inline-canvas initiative.
 
 ### Phase 0 (spike, before Phase 1 implementation begins)
 
@@ -1224,6 +1499,10 @@ chunk of the "I don't read markdown plans" problem.
 
 ## Out of scope (deferred)
 
+> *Phase 2 amendment: two bullets removed — "Cross-restart interactive
+> state" and "Sub-agent prompt-segment inheritance" moved into Phase 2
+> scope.*
+
 - Terminal-widget rendering fallback (path A from brainstorming).
   Future spec if there's demand for low-fidelity-but-universal mode.
 - Streaming layout (mid-stream re-render).
@@ -1231,7 +1510,6 @@ chunk of the "I don't read markdown plans" problem.
 - Network resources (external stylesheets, fonts, images via
   http/https URIs).
 - Multi-page / paginated HTML docs.
-- Cross-restart interactive state.
 - WASM-loaded `ContentRenderer` plugins. The trait surface is
   WIT-portable in shape; the loader is the v1.0+ problem.
 - Themes that style the canvas chrome differently per app theme.
@@ -1242,8 +1520,10 @@ chunk of the "I don't read markdown plans" problem.
 - Cross-plugin prompt-segment conflict detection. Plugin authors are
   expected to scope their language precisely; the host concatenates
   and trusts the model.
-- Sub-agent prompt-segment inheritance. Mechanism deferred to whenever
-  the sub-agent feature lands.
+- Streaming tool-result delivery. Today tool calls return
+  synchronously; if/when streaming tool results land, tool-emitted
+  HTML naturally extends to `HtmlSourceDelta` (§ *Tool-emitted HTML*
+  → *Streaming*).
 
 ## Open questions
 
@@ -1253,10 +1533,13 @@ chunk of the "I don't read markdown plans" problem.
   `blitz-traits = "=0.3.0-alpha.4"`, plus `anyrender = "0.10"`,
   `anyrender_vello_cpu = "0.12"`, `peniko = "0.6"`. Spike notes at
   `docs/superpowers/notes/2026-05-21-blitz-spike.md`.
-- **Default `UrlTarget`** for `<a href>` follow: `SystemBrowser` vs.
-  `ContinueConversation`. Lean: `SystemBrowser` for absolute URLs;
-  `ContinueConversation` for relative paths (model probably means
-  "look at this file in the project"). Final decision in plan.
+- **Default `UrlTarget`** for `<a href>` follow: **Resolved by Phase 2
+  amendment (2026-05-23).** Absolute URLs (`http://`, `https://`,
+  `mailto:`, etc.) → `SystemBrowser`. Relative paths and bare
+  filenames → `ContinueConversation` (the model probably means "look
+  at this file in the project," so we route it as a new user prompt
+  rather than try to `xdg-open` a path that may not exist or that the
+  user may not want opened in a separate process).
 - **Whether `internal:html-canvas` is Core or Optional.** Lean:
   Optional in v1 (allow users to turn it off if Blitz misbehaves on
   their setup); promote to Core in a later release once stable.
@@ -1266,8 +1549,12 @@ chunk of the "I don't read markdown plans" problem.
 
 ## Implementation order (high-level — full plan in writing-plans output)
 
-Phase 0 spike → Phase 1 (SPP, provider extract, canvas crate static
-render, plugin trait extension, TUI integration, streaming preview) →
-Phase 2 (eventing, freeze/thaw, focus, mouse/kb routing). Each phase
-ships as its own release with notes, README/CHANGELOG update, and
-GitHub issue closure per the project's existing release discipline.
+Phase 0 spike (2026-05-21, done) → Phase 1 (SPP, provider extract,
+canvas crate static render, plugin trait extension, TUI integration,
+streaming preview — shipped as PR #97, merged 2026-05-23) → **Phase 2**
+(eventing, freeze/thaw, focus, mouse/kb routing, tool-emitted HTML,
+interactive-state persistence, sub-agent contract). Each phase ships
+as its own release with notes, README/CHANGELOG update, and GitHub
+issue closure per the project's existing release discipline; per
+`feedback_phase_release_rollup`, only the final phase (Phase 2)
+pushes the `v0.17.0` git tag.
