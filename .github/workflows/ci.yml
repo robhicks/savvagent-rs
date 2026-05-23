@@ -64,8 +64,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libfontconfig1-dev pkg-config
       - name: build
         run: cargo build --workspace --all-targets
-      - name: test
+      - name: test (non-Windows)
+        if: runner.os != 'Windows'
         run: cargo test --workspace --no-fail-fast
+      # `savvagent-canvas` (and `savvagent`, which links it via the
+      # `internal:html-canvas` built-in plugin) pull in Blitz. Blitz's font
+      # discovery on the GitHub-hosted windows-latest runner hangs the test
+      # binary at process start — even `#[ignore]` on the one render-invoking
+      # test doesn't help because the hang is in static init, not in any
+      # specific test body. Linux + macOS still exercise the full pipeline;
+      # Windows coverage for these crates resumes once Blitz ships a runner
+      # workaround. Track in Phase 2 spike notes.
+      - name: test (Windows, exclude Blitz-linking crates)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --exclude savvagent-canvas --exclude savvagent --no-fail-fast
 
   # Cross-vendor `tool_use_id` compatibility gate. Each (sender, receiver)
   # pair across the three shipping vendors gets its own #[tokio::test] in
