@@ -13,5 +13,6 @@
 
 mod plugin;
 mod prompt_text;
+pub mod auto_export;
 
 pub use plugin::HtmlCanvasPlugin;

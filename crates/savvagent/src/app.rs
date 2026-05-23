@@ -2732,6 +2732,39 @@ mod tests {
         }
     }
 
+    /// Auto-export writes a canvas file to `~/.savvagent/canvases/` after
+    /// `handle_html_block_stop` finalizes the source, simulating the call
+    /// sequence used by `main.rs::auto_export_canvas`.
+    #[test]
+    fn auto_export_writes_file_on_block_stop() {
+        use crate::plugin::builtin::html_canvas::auto_export::{
+            auto_export_path, canvases_dir, write_canvas,
+        };
+        use crate::test_helpers::{HOME_LOCK, HomeGuard};
+
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home = HomeGuard::new();
+
+        let mut app = fresh_app();
+        let id = app.handle_html_block_start();
+        app.handle_html_block_delta(id, "<p>hi</p>");
+        app.handle_html_block_stop(id);
+
+        // Retrieve the finalized source (mirrors auto_export_canvas in main.rs).
+        let source = match app.last_entry().expect("canvas entry") {
+            Entry::Canvas { source, .. } => source.clone(),
+            other => panic!("expected Canvas, got {other:?}"),
+        };
+
+        let base = canvases_dir().expect("HOME set by HomeGuard");
+        let path = auto_export_path(&base, 1_716_300_000, 1, id);
+        write_canvas(&path, &source).expect("write_canvas");
+
+        assert!(path.exists(), "canvas file must be created");
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "<p>hi</p>");
+    }
+
     /// `apply_turn_event` routes `HtmlBlockStart/Delta/Stop` through the
     /// handler methods and keeps the `html_block_index_to_id` map in sync.
     #[test]

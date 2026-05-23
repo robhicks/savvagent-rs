@@ -2430,6 +2430,46 @@ async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::Cont
     }
 }
 
+/// Write the finalized canvas identified by `canvas_id` to
+/// `~/.savvagent/canvases/<unix>-<turn>-<block>.html`.
+///
+/// Called immediately after [`create_canvas_renderer`] succeeds so the
+/// export is gated on full block reception. Failures are warn-logged;
+/// the canvas entry in the conversation log is unaffected. Disable
+/// auto-export by toggling the `internal:html-canvas` plugin off via
+/// `~/.savvagent/plugins.toml`.
+fn auto_export_canvas(app: &App, canvas_id: savvagent_plugin::ContentBlockId, turn_id: u32) {
+    use crate::plugin::builtin::html_canvas::auto_export::{auto_export_path, canvases_dir, write_canvas};
+    use crate::app::Entry;
+
+    let Some(base) = canvases_dir() else {
+        return;
+    };
+
+    // Retrieve the finalized source from the entry.
+    let source = match app.entries.iter().find(|e| {
+        matches!(e, Entry::Canvas { id, .. } if *id == canvas_id)
+    }) {
+        Some(Entry::Canvas { source, .. }) => source.clone(),
+        _ => {
+            tracing::debug!(?canvas_id, "auto_export_canvas: canvas entry not found");
+            return;
+        }
+    };
+
+    let unix_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let path = auto_export_path(&base, unix_ts, turn_id, canvas_id);
+    if let Err(err) = write_canvas(&path, &source) {
+        tracing::warn!(?err, ?path, "auto-export of canvas failed");
+    } else {
+        tracing::debug!(?path, "canvas auto-exported");
+    }
+}
+
 /// If `app.context_size` (the chars/4 estimate) has moved since the last
 /// emission, fire `HostEvent::ContextSizeChanged` so footer/status
 /// plugins can rerender their `~N ctx` segment without polling. Called
@@ -2586,6 +2626,12 @@ async fn run_app(
                     // swap) already happened inside apply_turn_event.
                     if let Some(canvas_id) = html_block_stop_id {
                         create_canvas_renderer(app, canvas_id).await;
+                        // Auto-export: write the finalized canvas to
+                        // ~/.savvagent/canvases/<unix>-<turn>-<block>.html.
+                        // Runs after renderer creation so it only fires for
+                        // fully-received blocks. Disable by toggling the
+                        // internal:html-canvas plugin off via plugins.toml.
+                        auto_export_canvas(app, canvas_id, current_turn_id.unwrap_or(next_turn_id));
                     }
                     if let Some(he) = host_event {
                         if let Err(err) =
