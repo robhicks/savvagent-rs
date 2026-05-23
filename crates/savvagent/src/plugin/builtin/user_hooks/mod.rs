@@ -166,10 +166,19 @@ impl UserHooksPlugin {
     /// Dispatch `SessionStart` hooks. Source is hardcoded to `"startup"`
     /// in v1 (we don't distinguish resume/clear). All groups run — the
     /// matcher field is ignored for non-tool events.
+    ///
+    /// Emits `Effect::RegisterPreToolGate` as the first effect so the
+    /// runtime installs the gate on the host before any tool call can
+    /// happen. This is the one-shot path: HostStarting fires exactly
+    /// once per host lifecycle, so the gate is registered exactly once.
     async fn dispatch_session_start(&mut self) -> Result<Vec<Effect>, PluginError> {
+        let mut effects: Vec<Effect> = vec![Effect::RegisterPreToolGate {
+            plugin_id: PluginId::new("internal:user-hooks").expect("valid built-in id"),
+        }];
+
         let idx = self.hooks.read().await;
         let Some(groups) = idx.by_event.get(&HookEvent::SessionStart) else {
-            return Ok(vec![]);
+            return Ok(effects);
         };
         let groups = groups.clone();
         drop(idx);
@@ -182,7 +191,6 @@ impl UserHooksPlugin {
         };
         let payload = payload::session_start(&ctx, "startup");
 
-        let mut effects: Vec<Effect> = Vec::new();
         for group in &groups {
             // SessionStart is not a tool event; matcher is ignored.
             for cmd in &group.commands {
@@ -468,10 +476,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_hooks_means_no_effects() {
+    async fn no_hooks_still_emits_register_pre_tool_gate_on_host_starting() {
+        // With no user-authored SessionStart hooks configured, HostStarting
+        // must STILL emit `RegisterPreToolGate` so the runtime installs the
+        // PreToolUse gate on the host. This is the one-shot wiring path.
         let mut p = mk_plugin(HooksIndex::default());
         let effs = p.on_event(HostEvent::HostStarting).await.unwrap();
-        assert!(effs.is_empty());
+        assert_eq!(
+            effs.len(),
+            1,
+            "expected only RegisterPreToolGate; got {effs:?}"
+        );
+        assert!(matches!(
+            effs[0],
+            Effect::RegisterPreToolGate { ref plugin_id }
+                if plugin_id.as_str() == "internal:user-hooks"
+        ));
+    }
+
+    #[tokio::test]
+    async fn host_starting_emits_register_pre_tool_gate() {
+        let mut p = mk_plugin(HooksIndex::default());
+        let effs = p.on_event(HostEvent::HostStarting).await.unwrap();
+        assert!(effs.iter().any(|e| matches!(
+            e,
+            Effect::RegisterPreToolGate { plugin_id }
+                if plugin_id.as_str() == "internal:user-hooks"
+        )));
     }
 
     #[tokio::test]

@@ -118,12 +118,6 @@ pub(crate) fn register_builtins(
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
-        Box::new(builtin::user_hooks::UserHooksPlugin::new(
-            user_hooks_index.clone(),
-            session_id.clone(),
-            project_root.clone(),
-            transcript_path.clone(),
-        )),
         Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(
             trust_levels,
         )),
@@ -132,10 +126,24 @@ pub(crate) fn register_builtins(
         Box::new(builtin::view_file::ViewFilePlugin::new()),
     ];
 
+    // Hook plugins live in a parallel Vec so the registry can index them
+    // both as `dyn Plugin` (for slash/render/hook dispatch) and as
+    // `dyn BuiltinHookPlugin` (for `RegisterPreToolGate` apply). Mirrors
+    // the `ProviderEntry` pattern; both views share the same `Arc<Mutex<T>>`.
+    let hook_entries: Vec<crate::plugin::registry::HookEntry> =
+        vec![crate::plugin::registry::HookEntry::new(
+            builtin::user_hooks::UserHooksPlugin::new(
+                user_hooks_index.clone(),
+                session_id.clone(),
+                project_root.clone(),
+                transcript_path.clone(),
+            ),
+        )];
+
     BuiltinSet {
         plugins,
         providers,
-        hook_entries: vec![],
+        hook_entries,
     }
 }
 
@@ -192,7 +200,6 @@ mod tests {
             "internal:tool-bash-summary",
             "internal:tool-fs-summary",
             "internal:tool-grep-summary",
-            "internal:user-hooks",
             "internal:user-slash-commands",
             "internal:view-file",
         ] {
@@ -201,7 +208,20 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 27);
+        assert_eq!(set.plugins.len(), 26);
+
+        // `internal:user-hooks` lives in `hook_entries`, not the `plugins`
+        // Vec. The dual-Arc HookEntry pattern means it still appears in
+        // the registry's plugins map (see assertion below) AND the hooks
+        // map, so slash/render/hook dispatch and `RegisterPreToolGate`
+        // apply both find the same instance.
+        let hook_ids: Vec<_> = set
+            .hook_entries
+            .iter()
+            .map(|e| e.id.as_str().to_string())
+            .collect();
+        assert_eq!(hook_ids, vec!["internal:user-hooks".to_string()]);
+        assert_eq!(set.hook_entries.len(), 1);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -225,24 +245,38 @@ mod tests {
         }
         assert_eq!(set.providers.len(), 4);
 
-        // Registry shape: non-provider plugins PLUS 4 provider plugins.
+        // Registry shape: non-provider plugins PLUS 4 provider plugins
+        // PLUS 1 hook plugin (HookEntry's `as_plugin` view is inserted
+        // into the same id-keyed plugins map by `PluginRegistry::new`).
+        //
         // Task 9 adds migration-picker, bringing non-provider count to 20;
         // Task 6 adds route, bringing non-provider count to 21;
         // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
         // v0.16.0 adds lsp-installer, bringing non-provider count to 25;
         // user-slash-commands adds 1 more, bringing non-provider count to 26;
-        // sub-project B (user-hooks) adds 1 more, bringing non-provider count to 27;
-        // total registry size is 27 + 4 = 31.
+        // sub-project B (user-hooks) moves to `hook_entries` (not counted
+        // in the plugins Vec) but still surfaces in the registry's plugins
+        // map via the dual-Arc HookEntry, contributing 1 more registry
+        // entry; total registry size is 26 + 4 + 1 = 31.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
             31,
-            "registry should have 27 non-provider + 4 provider plugins"
+            "registry should have 26 non-provider + 4 provider + 1 hook plugin"
         );
         assert_eq!(
             reg.provider_count(),
             4,
             "registry should have 4 provider plugins"
+        );
+
+        // The user-hooks plugin still resolves through `reg.get(&pid)`
+        // because the HookEntry's `as_plugin` view is inserted into the
+        // plugins HashMap by `PluginRegistry::new`.
+        let user_hooks_pid = PluginId::new("internal:user-hooks").unwrap();
+        assert!(
+            reg.get(&user_hooks_pid).is_some(),
+            "hook plugin must resolve via reg.get() (Plugin-view of HookEntry)"
         );
 
         // And every provider id resolves through `get` (proves the
@@ -259,5 +293,30 @@ mod tests {
                 "provider {pid_str} missing from plugins map"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn register_builtins_includes_user_hooks_hook_entry() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        let set = register_builtins(
+            Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
+        assert_eq!(set.hook_entries.len(), 1);
+        // The hook-view exposes the same manifest as the plugin-view
+        // (it's the same `Arc<Mutex<T>>`); confirms wiring.
+        let id = {
+            let guard = set.hook_entries[0].as_hook.try_lock().unwrap();
+            guard.manifest().id.as_str().to_string()
+        };
+        assert_eq!(id, "internal:user-hooks");
     }
 }
