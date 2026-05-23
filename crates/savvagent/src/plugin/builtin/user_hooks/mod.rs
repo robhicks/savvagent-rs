@@ -3,6 +3,7 @@
 //! `docs/superpowers/specs/2026-05-22-user-hooks-design.md`.
 
 mod config;
+mod decision;
 mod discovery;
 mod matcher;
 mod payload;
