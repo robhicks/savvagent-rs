@@ -698,6 +698,20 @@ fn render_log(
                         .add_modifier(Modifier::ITALIC),
                 )));
             }
+            // Canvas entries are rendered by the dedicated canvas render
+            // pass (Task 16). Insert a placeholder line so the scroll
+            // accounting doesn't lose a row.
+            Entry::Canvas { id, source_preview, .. } => {
+                let label = if source_preview.is_some() {
+                    format!("⬛ [canvas:{}  rendering…]", id.0)
+                } else {
+                    format!("⬛ [canvas:{}]", id.0)
+                };
+                lines.push(Line::from(Span::styled(
+                    label,
+                    palette.base_style().fg(palette.muted),
+                )));
+            }
         }
     }
 

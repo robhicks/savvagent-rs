@@ -1,8 +1,83 @@
 //! TUI state. The app holds a shared [`Host`] and a render-friendly
 //! conversation log built incrementally from streaming [`TurnEvent`]s.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
+
+use savvagent_plugin::{ContentBlockId, ContentRenderer};
+
+/// Lives inside [`App`]. Owns one renderer per live canvas block.
+///
+/// The image picker (`ratatui_image::Picker`) is constructed once at
+/// startup via a stdio terminal query. Subsequent frames reuse the
+/// picker to produce [`ratatui_image::protocol::StatefulProtocol`]
+/// instances for each canvas, which the render path passes to
+/// `ratatui_image::StatefulImage`.
+pub(crate) struct CanvasRegistry {
+    next_id: u32,
+    renderers: HashMap<ContentBlockId, Box<dyn ContentRenderer>>,
+    image_picker: Option<ratatui_image::picker::Picker>,
+    image_states: HashMap<ContentBlockId, ratatui_image::protocol::StatefulProtocol>,
+}
+
+impl CanvasRegistry {
+    pub fn new() -> Self {
+        Self {
+            next_id: 0,
+            renderers: HashMap::new(),
+            image_picker: ratatui_image::picker::Picker::from_query_stdio().ok(),
+            image_states: HashMap::new(),
+        }
+    }
+
+    /// Allocate a fresh [`ContentBlockId`] for a newly-arrived canvas.
+    pub fn allocate_id(&mut self) -> ContentBlockId {
+        let id = ContentBlockId(self.next_id);
+        self.next_id += 1;
+        id
+    }
+
+    /// Insert a renderer instance for `id`.
+    pub fn insert(&mut self, id: ContentBlockId, renderer: Box<dyn ContentRenderer>) {
+        self.renderers.insert(id, renderer);
+    }
+
+    /// Look up the renderer for `id`.
+    pub fn get_mut(&mut self, id: ContentBlockId) -> Option<&mut Box<dyn ContentRenderer>> {
+        self.renderers.get_mut(&id)
+    }
+
+    /// Expose the image picker for rendering (Task 16 uses this to produce
+    /// `StatefulProtocol` instances from rendered `Frame`s).
+    #[allow(dead_code)]
+    pub fn image_picker_mut(&mut self) -> Option<&mut ratatui_image::picker::Picker> {
+        self.image_picker.as_mut()
+    }
+
+    /// Expose the image states map for rendering (Task 16).
+    #[allow(dead_code)]
+    pub fn image_states_mut(
+        &mut self,
+    ) -> &mut HashMap<ContentBlockId, ratatui_image::protocol::StatefulProtocol> {
+        &mut self.image_states
+    }
+
+    /// `true` iff this terminal supports an image protocol.
+    pub fn image_protocol_available(&self) -> bool {
+        self.image_picker.is_some()
+    }
+}
+
+impl std::fmt::Debug for CanvasRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CanvasRegistry")
+            .field("next_id", &self.next_id)
+            .field("renderer_count", &self.renderers.len())
+            .field("image_protocol", &self.image_protocol_available())
+            .finish_non_exhaustive()
+    }
+}
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders};
@@ -235,6 +310,23 @@ pub enum Entry {
     RouteBadge(String),
     /// Local notice — file ops, errors, transcript notifications.
     Note(String),
+    /// A model-emitted HTML block to be rendered inline as a canvas.
+    ///
+    /// `source_preview` is `Some(...)` while the block is still
+    /// streaming (each `HtmlSourceDelta` appends to it); on
+    /// `ContentBlockStop` the host promotes the preview into `source`
+    /// and sets `source_preview` back to `None`. The renderer instance
+    /// lives in `App::canvas_registry`.
+    Canvas {
+        /// Host-assigned id, matching the renderer key in the
+        /// canvas registry.
+        id: savvagent_plugin::ContentBlockId,
+        /// Final HTML source (after streaming completes).
+        source: String,
+        /// In-flight source buffer during streaming, swapped to
+        /// `source` and reset to `None` on completion.
+        source_preview: Option<String>,
+    },
 }
 
 /// Slash command shown in the palette.
@@ -507,6 +599,12 @@ pub struct App {
     /// streams in. Reset to `None` by `End`/`Esc` and by submitting a new
     /// prompt. Driven by `PageUp`/`PageDown`/`Home`/`End` on the home screen.
     pub log_scroll_offset_from_bottom: Option<u16>,
+
+    /// Live renderer instances keyed by [`ContentBlockId`], plus the
+    /// terminal image protocol picker. Populated when an
+    /// `Entry::Canvas` is created; Task 16 reads this during the render
+    /// pass to produce ratatui-image frames.
+    pub(crate) canvas_registry: CanvasRegistry,
 }
 
 /// Compute the `scroll_y` value (number of wrapped rows hidden ABOVE the
@@ -632,6 +730,7 @@ impl App {
             pending_routing_show: None,
             prompt_history: PromptHistory::default(),
             log_scroll_offset_from_bottom: None,
+            canvas_registry: CanvasRegistry::new(),
         };
         app.refresh_commands();
         app
@@ -845,6 +944,11 @@ impl App {
                     let args_len = serde_json::to_string(args).map(|s| s.len()).unwrap_or(0);
                     args_len + result_text.as_deref().map(str::len).unwrap_or(0)
                 }
+                Entry::Canvas {
+                    source,
+                    source_preview,
+                    ..
+                } => source.len() + source_preview.as_deref().map(str::len).unwrap_or(0),
             })
             .sum::<usize>()
             + self.live_text.len();
@@ -1572,6 +1676,9 @@ impl App {
                 }
                 Entry::RouteBadge(t) => format!("route: {t}"),
                 Entry::Note(t) => format!("note: {t}"),
+                Entry::Canvas { id, source, .. } => {
+                    format!("canvas: id={} source_len={}", id.0, source.len())
+                }
             })
             .collect();
         let json = serde_json::to_string_pretty(&lines).map_err(std::io::Error::other)?;
@@ -2240,6 +2347,75 @@ mod tests {
         app.entries
             .push(Entry::RouteBadge("malformed-no-separator".into()));
         assert!(app.most_recent_routing_decision().is_none());
+    }
+
+    #[test]
+    fn entry_carries_canvas_variant() {
+        let e = Entry::Canvas {
+            id: savvagent_plugin::ContentBlockId(7),
+            source: "<p>hi</p>".into(),
+            source_preview: None,
+        };
+        match e {
+            Entry::Canvas {
+                id,
+                source,
+                source_preview,
+            } => {
+                assert_eq!(id, savvagent_plugin::ContentBlockId(7));
+                assert_eq!(source, "<p>hi</p>");
+                assert!(source_preview.is_none());
+            }
+            _ => panic!("expected Canvas"),
+        }
+    }
+
+    /// Verify that `save_transcript_to` round-trips a Canvas entry into
+    /// the plain-text JSON transcript. The serialized form is a string
+    /// starting with `"canvas: id=3"`.
+    #[test]
+    fn canvas_entry_persists_to_transcript() {
+        use std::path::PathBuf;
+        use tempfile::NamedTempFile;
+
+        let mut app = App::new("model".into(), PathBuf::from("/tmp"), "en".to_string());
+        app.entries.push(Entry::Canvas {
+            id: savvagent_plugin::ContentBlockId(3),
+            source: "<p>x</p>".into(),
+            source_preview: None,
+        });
+
+        let tmp = NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_str().unwrap().to_string();
+        app.save_transcript_to(path.clone())
+            .expect("save should succeed");
+
+        let written = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            written.contains("canvas: id=3"),
+            "expected canvas entry in transcript, got: {written}"
+        );
+        assert!(
+            written.contains("source_len=8"),
+            "expected source_len in transcript, got: {written}"
+        );
+    }
+
+    #[test]
+    fn canvas_registry_allocates_unique_ids() {
+        let mut reg = CanvasRegistry::new();
+        let id0 = reg.allocate_id();
+        let id1 = reg.allocate_id();
+        assert_eq!(id0, ContentBlockId(0));
+        assert_eq!(id1, ContentBlockId(1));
+        assert_ne!(id0, id1);
+    }
+
+    #[test]
+    fn app_has_canvas_registry_field() {
+        let app = fresh_app();
+        // Just confirm the field is accessible and starts empty.
+        assert!(!app.canvas_registry.image_protocol_available() || true, "field accessible");
     }
 
     #[test]

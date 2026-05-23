@@ -71,6 +71,7 @@ dotenvy.workspace = true
 dirs.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+ratatui-image.workspace = true
 ratatui-themes.workspace = true
 rust-i18n.workspace = true
 tui-markdown.workspace = true
