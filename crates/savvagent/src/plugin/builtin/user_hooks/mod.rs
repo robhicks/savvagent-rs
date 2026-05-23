@@ -233,17 +233,122 @@ impl UserHooksPlugin {
         Ok(effects)
     }
 
-    /// Placeholder for Task 18 — `UserPromptSubmit` dispatch lands there.
+    /// Dispatch `UserPromptSubmit` hooks. All groups run — the matcher
+    /// field is ignored for non-tool events. Block decisions short-circuit
+    /// the chain and surface as `Effect::CancelPendingTurn`. `Continue`
+    /// decisions with `additional_context` emit
+    /// `Effect::PrependToPendingPrompt`.
     async fn dispatch_user_prompt_submit(
         &mut self,
-        _prompt: &str,
+        prompt: &str,
     ) -> Result<Vec<Effect>, PluginError> {
-        unimplemented!("filled in by Task 18")
+        let idx = self.hooks.read().await;
+        let Some(groups) = idx.by_event.get(&HookEvent::UserPromptSubmit) else {
+            return Ok(vec![]);
+        };
+        let groups = groups.clone();
+        drop(idx);
+
+        let transcript = self.transcript_path.read().await.clone();
+        let ctx = HookContext {
+            session_id: &self.session_id,
+            transcript_path: &transcript,
+            cwd: &self.project_root,
+        };
+        let payload = payload::user_prompt_submit(&ctx, prompt);
+
+        let mut effects: Vec<Effect> = Vec::new();
+        for group in &groups {
+            // UserPromptSubmit is not a tool event; matcher is ignored.
+            for cmd in &group.commands {
+                let (decision, warnings, _stdout, _stderr) = runner::run_one(
+                    HookEvent::UserPromptSubmit,
+                    &cmd.command,
+                    cmd.timeout,
+                    &payload,
+                    &self.project_root,
+                )
+                .await;
+                for w in &warnings {
+                    effects.push(Effect::PushNote {
+                        line: StyledLine::plain(format!("[warn] {w}")),
+                    });
+                }
+                match decision {
+                    HookDecision::Block { reason, .. } => {
+                        effects.push(Effect::CancelPendingTurn { reason });
+                        return Ok(effects);
+                    }
+                    HookDecision::Continue {
+                        additional_context, ..
+                    } => {
+                        if let Some(extra) = additional_context {
+                            if !extra.is_empty() {
+                                effects.push(Effect::PrependToPendingPrompt { text: extra });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(effects)
     }
 
-    /// Placeholder for Task 18 — `Stop` dispatch lands there.
-    async fn dispatch_stop(&mut self, _success: bool) -> Result<Vec<Effect>, PluginError> {
-        unimplemented!("filled in by Task 18")
+    /// Dispatch `Stop` hooks. Block decisions short-circuit and surface
+    /// as `Effect::CancelPendingTurn`. `additional_context` is ignored
+    /// for `Stop` (per spec the turn is ending, so prepending a prompt
+    /// prefix would be meaningless). `stop_hook_active` is hardcoded to
+    /// `false` in v1 — there is no re-entrancy guard yet.
+    async fn dispatch_stop(&mut self, success: bool) -> Result<Vec<Effect>, PluginError> {
+        // `success` is reserved for a future stop-on-failure variant;
+        // v1 payload does not expose it.
+        let _ = success;
+        let idx = self.hooks.read().await;
+        let Some(groups) = idx.by_event.get(&HookEvent::Stop) else {
+            return Ok(vec![]);
+        };
+        let groups = groups.clone();
+        drop(idx);
+
+        let transcript = self.transcript_path.read().await.clone();
+        let ctx = HookContext {
+            session_id: &self.session_id,
+            transcript_path: &transcript,
+            cwd: &self.project_root,
+        };
+        let payload = payload::stop(&ctx, false);
+
+        let mut effects: Vec<Effect> = Vec::new();
+        for group in &groups {
+            // Stop is not a tool event; matcher is ignored.
+            for cmd in &group.commands {
+                let (decision, warnings, _stdout, _stderr) = runner::run_one(
+                    HookEvent::Stop,
+                    &cmd.command,
+                    cmd.timeout,
+                    &payload,
+                    &self.project_root,
+                )
+                .await;
+                for w in &warnings {
+                    effects.push(Effect::PushNote {
+                        line: StyledLine::plain(format!("[warn] {w}")),
+                    });
+                }
+                match decision {
+                    HookDecision::Block { reason, .. } => {
+                        effects.push(Effect::CancelPendingTurn { reason });
+                        return Ok(effects);
+                    }
+                    HookDecision::Continue { .. } => {
+                        // Stop hooks can't inject prompt context — the
+                        // turn is ending. Silently drop additionalContext
+                        // and any stdout/stderr surfacing.
+                    }
+                }
+            }
+        }
+        Ok(effects)
     }
 }
 
@@ -370,5 +475,93 @@ mod tests {
         ];
         expected.sort_by_key(|k| format!("{k:?}"));
         assert_eq!(kinds, expected);
+    }
+
+    /// Build a `HooksIndex` containing a single group for `event` whose
+    /// sole hook runs `command` with `timeout` seconds. Matcher is `*`,
+    /// which is harmless for non-tool events (matcher is ignored there).
+    #[cfg(unix)]
+    fn single_hook_index(event: HookEvent, command: &str) -> HooksIndex {
+        use crate::plugin::builtin::user_hooks::config::HookCommand;
+        use crate::plugin::builtin::user_hooks::discovery::CompiledGroup;
+        use crate::plugin::builtin::user_hooks::matcher::CompiledMatcher;
+
+        let group = CompiledGroup {
+            matcher: CompiledMatcher::compile("*").expect("compile *"),
+            commands: vec![HookCommand {
+                type_field: "command".into(),
+                command: command.into(),
+                timeout: 5,
+            }],
+            source: PathBuf::from("test"),
+        };
+        let mut idx = HooksIndex::default();
+        idx.by_event.entry(event).or_default().push(group);
+        idx
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn user_prompt_submit_emits_prepend_on_additional_context() {
+        // The decision parser recognises `hookSpecificOutput.additionalContext`
+        // for UserPromptSubmit and returns
+        // `Continue { additional_context: Some("extra"), .. }`.
+        let cmd = r#"echo '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"extra"}}'"#;
+        let idx = single_hook_index(HookEvent::UserPromptSubmit, cmd);
+        let mut p = mk_plugin(idx);
+        let effs = p
+            .on_event(HostEvent::PromptSubmitted { text: "hi".into() })
+            .await
+            .unwrap();
+        assert!(
+            effs.iter().any(|e| matches!(
+                e,
+                Effect::PrependToPendingPrompt { text } if text == "extra"
+            )),
+            "expected PrependToPendingPrompt{{text=\"extra\"}} in {effs:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn user_prompt_submit_emits_cancel_on_block() {
+        // Exit 2 with stderr → Block { reason: "denied" } per the
+        // exit-code-only fallback in `parse_outcome`.
+        let cmd = r#"echo 'denied' >&2; exit 2"#;
+        let idx = single_hook_index(HookEvent::UserPromptSubmit, cmd);
+        let mut p = mk_plugin(idx);
+        let effs = p
+            .on_event(HostEvent::PromptSubmitted { text: "hi".into() })
+            .await
+            .unwrap();
+        assert!(
+            effs.iter().any(|e| matches!(
+                e,
+                Effect::CancelPendingTurn { reason } if reason == "denied"
+            )),
+            "expected CancelPendingTurn{{reason=\"denied\"}} in {effs:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_emits_cancel_on_block() {
+        let cmd = r#"echo 'stop-block' >&2; exit 2"#;
+        let idx = single_hook_index(HookEvent::Stop, cmd);
+        let mut p = mk_plugin(idx);
+        let effs = p
+            .on_event(HostEvent::TurnEnd {
+                turn_id: 1,
+                success: true,
+            })
+            .await
+            .unwrap();
+        assert!(
+            effs.iter().any(|e| matches!(
+                e,
+                Effect::CancelPendingTurn { reason } if reason == "stop-block"
+            )),
+            "expected CancelPendingTurn{{reason=\"stop-block\"}} in {effs:?}"
+        );
     }
 }
