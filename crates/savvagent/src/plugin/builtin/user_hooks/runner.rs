@@ -91,16 +91,17 @@ pub async fn run_one(
     let decision = parse_outcome(event, exit_code, &stdout, &stderr, &mut warnings);
 
     // Convert exit-2 on non-block-capable events into a warning instead
-    // of a block.
+    // of a block. Preserve the hook author's `suppress_output` flag so
+    // explicit silence is honoured on the demoted Continue.
     let decision = match (event, &decision) {
-        (HookEvent::PostToolUse, HookDecision::Block { .. })
-        | (HookEvent::SessionStart, HookDecision::Block { .. }) => {
+        (HookEvent::PostToolUse, HookDecision::Block { suppress_output, .. })
+        | (HookEvent::SessionStart, HookDecision::Block { suppress_output, .. }) => {
             warnings.push(format!(
                 "hook `{command}` exited 2 on non-block-capable event {event:?}; treating as warning"
             ));
             HookDecision::Continue {
                 additional_context: None,
-                suppress_output: false,
+                suppress_output: *suppress_output,
             }
         }
         _ => decision,
