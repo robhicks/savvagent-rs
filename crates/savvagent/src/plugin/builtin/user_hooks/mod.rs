@@ -719,6 +719,60 @@ mod tests {
         );
     }
 
+    // HOME_LOCK is std::Mutex (shared with sync tests) and must span the await.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    async fn e2e_pre_tool_use_block_short_circuits() {
+        use crate::test_helpers::{HOME_LOCK, HomeGuard};
+
+        // Pin HOME for the duration of the test so discovery::walk_all doesn't
+        // pick up hooks from the dev machine's real ~/.savvagent/settings.json.
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home_guard = HomeGuard::new();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let proj = tmp.path().to_path_buf();
+        std::fs::create_dir_all(proj.join(".savvagent")).unwrap();
+        std::fs::write(
+            proj.join(".savvagent/settings.json"),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [ { "command": "echo deny >&2; exit 2" } ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let home = tempfile::TempDir::new().unwrap();
+        let idx = discovery::walk_all(&proj, home.path());
+        let hooks = std::sync::Arc::new(tokio::sync::RwLock::new(idx));
+        let transcript = std::sync::Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+            "/t.json",
+        )));
+
+        let gate = pre_tool_gate::UserHooksPreToolGate {
+            hooks,
+            session_id: "sid".into(),
+            project_root: proj.clone(),
+            transcript_path: transcript,
+        };
+
+        use savvagent_host::PreToolUseGate;
+        let decision = gate.check("run", &serde_json::json!({})).await;
+        match decision {
+            savvagent_host::PreToolDecision::Block(reason) => {
+                assert_eq!(reason, "deny");
+            }
+            _ => panic!("expected Block, got {decision:?}"),
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_emits_cancel_on_block() {
