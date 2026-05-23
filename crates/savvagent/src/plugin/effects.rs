@@ -2138,7 +2138,17 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::Arc;
 
-        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
+        let set = register_builtins(
+            Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
@@ -2184,7 +2194,17 @@ mod tests {
         use std::collections::BTreeMap;
         use std::sync::Arc;
 
-        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
+        let set = register_builtins(
+            Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
         let registry = PluginRegistry::new(set);
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(registry));
         let candidates = build_connect_candidates(&registry).await;

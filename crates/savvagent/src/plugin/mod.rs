@@ -79,6 +79,12 @@ pub(crate) use registry::BuiltinSet;
 /// architecturally impossible.
 pub(crate) fn register_builtins(
     trust_levels: builtin::user_slash_commands::TrustMap,
+    user_hooks_index: std::sync::Arc<
+        tokio::sync::RwLock<crate::plugin::builtin::user_hooks::discovery::HooksIndex>,
+    >,
+    session_id: String,
+    project_root: std::path::PathBuf,
+    transcript_path: std::sync::Arc<tokio::sync::RwLock<std::path::PathBuf>>,
 ) -> BuiltinSet {
     use builtin::provider_common::ProviderEntry;
 
@@ -112,14 +118,11 @@ pub(crate) fn register_builtins(
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
-        // TODO(B-T20): wire real handles from App
         Box::new(builtin::user_hooks::UserHooksPlugin::new(
-            std::sync::Arc::new(tokio::sync::RwLock::new(
-                builtin::user_hooks::discovery::HooksIndex::default(),
-            )),
-            String::new(),
-            std::path::PathBuf::from("."),
-            std::sync::Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::new())),
+            user_hooks_index.clone(),
+            session_id.clone(),
+            project_root.clone(),
+            transcript_path.clone(),
         )),
         Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(
             trust_levels,
@@ -146,7 +149,17 @@ mod tests {
     async fn register_builtins_pr8_complete() {
         use std::collections::BTreeMap;
         use std::sync::Arc;
-        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
+        let set = register_builtins(
+            Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
         // Non-provider plugins from PR 1..PR 5 + themes (PR 6) + plugins-manager (PR 8)
         // + migration-picker (Task 9).
         let plugin_ids: Vec<_> = set

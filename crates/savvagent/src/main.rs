@@ -175,12 +175,30 @@ async fn main() -> Result<()> {
     let mut app = App::new(header_model, transcript_dir, initial_locale);
     app.load_prompt_history(&project_root);
 
+    // Load user-defined hooks from settings.json. The HooksIndex is
+    // shared with the `internal:user-hooks` plugin via App's
+    // user_hooks_index Arc; the plugin reads it under each event
+    // dispatch and writes it on `/reload-hooks`.
+    {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let initial_idx =
+            crate::plugin::builtin::user_hooks::discovery::walk_all(&project_root, &home);
+        let mut g = app.user_hooks_index.write().await;
+        *g = initial_idx;
+    }
+
     {
         use crate::plugin::manifests::Indexes;
         use crate::plugin::registry::PluginRegistry;
         use savvagent_plugin::PluginKind;
 
-        let set = plugin::register_builtins(app.trust_levels.clone());
+        let set = plugin::register_builtins(
+            app.trust_levels.clone(),
+            app.user_hooks_index.clone(),
+            app.session_id.clone(),
+            project_root.clone(),
+            app.transcript_path.clone(),
+        );
         let mut registry = PluginRegistry::new(set);
 
         // Apply persisted Optional-plugin enabled state from

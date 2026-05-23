@@ -547,6 +547,22 @@ pub struct App {
             >,
         >,
     >,
+
+    /// Shared user-hooks index. Initialized to an empty `HooksIndex` by
+    /// `App::new`; populated by `main.rs` immediately after construction
+    /// once `project_root` is known; mutated thereafter by
+    /// `/reload-hooks`. Cloned into the `internal:user-hooks` plugin so
+    /// both views (App-side and plugin-side) see the same data.
+    pub user_hooks_index: std::sync::Arc<
+        tokio::sync::RwLock<crate::plugin::builtin::user_hooks::discovery::HooksIndex>,
+    >,
+    /// Mutable transcript path passed to the user-hooks plugin so hooks
+    /// can include the up-to-date path in their stdin payload. Initially
+    /// empty; the TUI replaces it once a real transcript is opened.
+    pub transcript_path: std::sync::Arc<tokio::sync::RwLock<std::path::PathBuf>>,
+    /// Per-process session id, generated at startup. Used as the
+    /// `session_id` field of every user-hook stdin payload.
+    pub session_id: String,
 }
 
 /// Compute the `scroll_y` value (number of wrapped rows hidden ABOVE the
@@ -692,6 +708,19 @@ impl App {
                 };
                 std::sync::Arc::new(tokio::sync::RwLock::new(loaded))
             },
+            user_hooks_index: std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            transcript_path: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::path::PathBuf::new(),
+            )),
+            session_id: format!(
+                "savvagent-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            ),
         };
         app.refresh_commands();
         app

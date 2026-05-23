@@ -607,6 +607,71 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn reload_hooks_through_app_index_round_trip() {
+        // Shared App-side Arc + plugin built around the same Arc → after
+        // /reload-hooks-style reload, both sides see the updated index.
+
+        use std::sync::Arc;
+        use tempfile::TempDir;
+        use tokio::sync::RwLock;
+
+        let proj = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        std::fs::create_dir_all(proj.path().join(".savvagent")).unwrap();
+        std::fs::write(
+            proj.path().join(".savvagent/settings.json"),
+            r#"{
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [ { "command": "echo round-trip" } ]
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let shared_idx = Arc::new(RwLock::new(HooksIndex::default()));
+        let shared_transcript = Arc::new(RwLock::new(std::path::PathBuf::from("/t.json")));
+
+        // Pre-populate the index the way main.rs does at startup.
+        {
+            let initial = discovery::walk_all(proj.path(), home.path());
+            *shared_idx.write().await = initial;
+        }
+
+        // Plugin built around the same Arcs as the App-side handle.
+        let mut p = UserHooksPlugin::new(
+            shared_idx.clone(),
+            "test-session".into(),
+            proj.path().to_path_buf(),
+            shared_transcript.clone(),
+        );
+
+        // Reload should re-walk; the index it walks is project-tempdir-local,
+        // and the result should still contain the PreToolUse group.
+        // Note: the plugin uses `dirs::home_dir()` for the home walk; that
+        // path is OS-specific and may not be the tempdir. Just assert
+        // ReindexPlugin is in the result and the App-side Arc still holds
+        // the PreToolUse entry.
+        let effs = p.handle_slash("reload-hooks", vec![]).await.unwrap();
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, Effect::ReindexPlugin { .. }))
+        );
+
+        let app_view = shared_idx.read().await;
+        assert!(
+            app_view
+                .by_event
+                .contains_key(&discovery::HookEvent::PreToolUse)
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_emits_cancel_on_block() {
