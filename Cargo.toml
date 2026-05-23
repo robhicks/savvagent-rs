@@ -147,6 +147,11 @@ crossterm = "0.29"
 # Disable chafa-dyn (requires libchafa system library, not available in all
 # envs). crossterm + image-defaults cover sixels, kitty, iterm2, halfblocks.
 ratatui-image = { version = "11.0.2", default-features = false, features = ["crossterm", "image-defaults"] }
+# `image` crate is a transitive dep of `ratatui-image` and `blitz-paint`. We
+# depend on it directly so `ui.rs` can build an `image::DynamicImage` from the
+# raw RGBA bytes a `ContentRenderer::render` returns. Pinned to the same minor
+# series the rest of the workspace already resolves to (see Cargo.lock).
+image = { version = "0.25", default-features = false }
 ratatui = { version = "0.30", features = [
     "crossterm_0_29",
     # `Paragraph::line_count` is gated behind this feature until

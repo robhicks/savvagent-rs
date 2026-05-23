@@ -5048,6 +5048,7 @@ dependencies = [
  "dotenvy",
  "flate2",
  "hex",
+ "image",
  "keyring",
  "provider-anthropic",
  "provider-gemini",

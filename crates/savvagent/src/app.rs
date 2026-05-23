@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use savvagent_plugin::{ContentBlockId, ContentRenderer};
+use savvagent_plugin::{ContentBlockId, ContentRenderer, PixelFormat, PixelSize};
 
 /// Lives inside [`App`]. Owns one renderer per live canvas block.
 ///
@@ -32,6 +32,10 @@ impl CanvasRegistry {
     }
 
     /// Allocate a fresh [`ContentBlockId`] for a newly-arrived canvas.
+    // Task 17 wires this up from the streaming event loop. Until then
+    // only tests consume it; suppress the binary-crate dead_code lint
+    // (`-D warnings` in CI catches what `cargo test` lets through).
+    #[allow(dead_code)]
     pub fn allocate_id(&mut self) -> ContentBlockId {
         let id = ContentBlockId(self.next_id);
         self.next_id += 1;
@@ -39,11 +43,13 @@ impl CanvasRegistry {
     }
 
     /// Insert a renderer instance for `id`.
+    #[allow(dead_code)]
     pub fn insert(&mut self, id: ContentBlockId, renderer: Box<dyn ContentRenderer>) {
         self.renderers.insert(id, renderer);
     }
 
     /// Look up the renderer for `id`.
+    #[allow(dead_code)]
     pub fn get_mut(&mut self, id: ContentBlockId) -> Option<&mut Box<dyn ContentRenderer>> {
         self.renderers.get_mut(&id)
     }
@@ -67,6 +73,72 @@ impl CanvasRegistry {
     pub fn image_protocol_available(&self) -> bool {
         self.image_picker.is_some()
     }
+
+    /// Terminal cell dimensions in pixels — `(width, height)` — as
+    /// reported by the picker. Returns `None` when there's no image
+    /// protocol. Used by the renderer to size the requested `Frame` so
+    /// the image scales sensibly into the available cell rect.
+    pub fn image_cell_size(&self) -> Option<(u16, u16)> {
+        let picker = self.image_picker.as_ref()?;
+        let fs = picker.font_size();
+        Some((fs.width, fs.height))
+    }
+
+    /// Look up — and lazily build — the `StatefulProtocol` for canvas `id`.
+    ///
+    /// The first call drives the renderer at `pixel_width`, converts the
+    /// returned `Frame` into a `DynamicImage`, and asks the picker for a
+    /// `StatefulProtocol`. Subsequent calls reuse the cached protocol; the
+    /// stateful widget re-encodes internally when the render area changes.
+    ///
+    /// Returns `None` when:
+    /// * the terminal has no image protocol (`image_picker` is `None`), or
+    /// * no renderer is registered for `id`, or
+    /// * the produced `Frame` is empty / mis-sized.
+    pub fn image_protocol_mut(
+        &mut self,
+        id: ContentBlockId,
+        pixel_width: u32,
+    ) -> Option<&mut ratatui_image::protocol::StatefulProtocol> {
+        let picker = self.image_picker.as_ref()?;
+        if !self.image_states.contains_key(&id) {
+            let renderer = self.renderers.get_mut(&id)?;
+            let frame = renderer.render(PixelSize {
+                width: pixel_width,
+                height: 0,
+            });
+            let image = frame_to_dynamic_image(&frame)?;
+            let protocol = picker.new_resize_protocol(image);
+            self.image_states.insert(id, protocol);
+        }
+        self.image_states.get_mut(&id)
+    }
+}
+
+/// Build an `image::DynamicImage` from a plugin-emitted [`savvagent_plugin::Frame`].
+///
+/// Frames are RGBA8 by contract (see `crates/savvagent-canvas/src/canvas.rs`),
+/// but we accept BGRA8 by swapping byte channels rather than rejecting the
+/// frame outright. Returns `None` for empty frames or when the byte buffer's
+/// length doesn't match `width * height * 4`.
+fn frame_to_dynamic_image(frame: &savvagent_plugin::Frame) -> Option<image::DynamicImage> {
+    if frame.width == 0 || frame.height == 0 {
+        return None;
+    }
+    let expected = (frame.width as usize)
+        .checked_mul(frame.height as usize)?
+        .checked_mul(4)?;
+    if frame.bytes.len() != expected {
+        return None;
+    }
+    let mut bytes = frame.bytes.clone();
+    if matches!(frame.format, PixelFormat::Bgra8) {
+        for px in bytes.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+    }
+    let buf = image::RgbaImage::from_raw(frame.width, frame.height, bytes)?;
+    Some(image::DynamicImage::ImageRgba8(buf))
 }
 
 impl std::fmt::Debug for CanvasRegistry {
@@ -317,6 +389,11 @@ pub enum Entry {
     /// `ContentBlockStop` the host promotes the preview into `source`
     /// and sets `source_preview` back to `None`. The renderer instance
     /// lives in `App::canvas_registry`.
+    // Task 17 constructs this variant from the streaming event loop;
+    // until then only tests instantiate it. Suppress the binary-crate
+    // dead_code lint so CI's `-D warnings` doesn't fail. See
+    // `feedback_dead_code_in_binary_crate.md`.
+    #[allow(dead_code)]
     Canvas {
         /// Host-assigned id, matching the renderer key in the
         /// canvas registry.
@@ -2441,5 +2518,69 @@ mod tests {
         assert_eq!(args.get("path").unwrap(), &serde_json::json!("src/main.rs"));
         assert_eq!(status, Some(ToolCallStatus::Ok));
         assert_eq!(result_text.as_deref(), Some(r#"{"bytes": 1234}"#));
+    }
+
+    // Frame -> DynamicImage conversion ----------------------------------
+
+    #[test]
+    fn frame_to_dynamic_image_accepts_well_formed_rgba8() {
+        // 2x2 image, 4 bytes/pixel = 16 bytes total.
+        let frame = savvagent_plugin::Frame {
+            width: 2,
+            height: 2,
+            format: PixelFormat::Rgba8,
+            bytes: vec![
+                255, 0, 0, 255, // red
+                0, 255, 0, 255, // green
+                0, 0, 255, 255, // blue
+                255, 255, 255, 255, // white
+            ],
+        };
+        let img = frame_to_dynamic_image(&frame).expect("conversion should succeed");
+        assert_eq!(img.width(), 2);
+        assert_eq!(img.height(), 2);
+    }
+
+    #[test]
+    fn frame_to_dynamic_image_swaps_bgra_channels() {
+        // BGRA input: (0,0,255,255) is red in BGRA but must read as red
+        // (255,0,0,255) in the resulting RGBA image.
+        let frame = savvagent_plugin::Frame {
+            width: 1,
+            height: 1,
+            format: PixelFormat::Bgra8,
+            bytes: vec![0, 0, 255, 255], // BGRA = pure red
+        };
+        let img = frame_to_dynamic_image(&frame).expect("conversion should succeed");
+        let rgba = img.to_rgba8();
+        let px = rgba.get_pixel(0, 0);
+        assert_eq!(
+            px.0,
+            [255, 0, 0, 255],
+            "BGRA byte order must be swapped to RGBA"
+        );
+    }
+
+    #[test]
+    fn frame_to_dynamic_image_rejects_zero_dimensions() {
+        let frame = savvagent_plugin::Frame {
+            width: 0,
+            height: 10,
+            format: PixelFormat::Rgba8,
+            bytes: vec![],
+        };
+        assert!(frame_to_dynamic_image(&frame).is_none());
+    }
+
+    #[test]
+    fn frame_to_dynamic_image_rejects_mismatched_byte_length() {
+        // 2x2 should be 16 bytes; pass 8 and confirm we don't panic.
+        let frame = savvagent_plugin::Frame {
+            width: 2,
+            height: 2,
+            format: PixelFormat::Rgba8,
+            bytes: vec![0; 8],
+        };
+        assert!(frame_to_dynamic_image(&frame).is_none());
     }
 }
