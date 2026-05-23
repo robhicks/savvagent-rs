@@ -1250,6 +1250,10 @@ impl Host {
                                     }
                                 }
                             }
+                        } else if let Some(blocked) =
+                            self.check_pre_tool_gate(&name, &input).await
+                        {
+                            blocked
                         } else {
                             let guard = self.tools.lock().await;
                             let registry = guard.as_ref().expect("tools registry present");
@@ -1494,13 +1498,17 @@ impl Host {
     ) -> Result<(bool, String), String> {
         let _events_guard = CurrentTurnEventsGuard::install(&self.current_turn_events, &events);
         let input = serde_json::json!({ "command": command });
-        let guard = self.tools.lock().await;
-        let registry = guard
-            .as_ref()
-            .ok_or_else(|| "tool registry unavailable".to_string())?;
-        let outcome = registry
-            .call_with_bash_net_override("run", input, net_override)
-            .await;
+        let outcome = if let Some(blocked) = self.check_pre_tool_gate("run", &input).await {
+            blocked
+        } else {
+            let guard = self.tools.lock().await;
+            let registry = guard
+                .as_ref()
+                .ok_or_else(|| "tool registry unavailable".to_string())?;
+            registry
+                .call_with_bash_net_override("run", input, net_override)
+                .await
+        };
         Ok((outcome.is_error, outcome.payload))
     }
 
@@ -1855,12 +1863,45 @@ impl Host {
     }
 
     /// Borrow the currently-installed gate. Used by the dispatch path.
-    // TODO(B-T10): remove allow once the dispatch path calls this.
-    #[allow(dead_code)]
     pub(crate) async fn pre_tool_gate_snapshot(
         &self,
     ) -> Option<std::sync::Arc<dyn crate::pre_tool_gate::PreToolUseGate>> {
         self.pre_tool_gate.read().await.clone()
+    }
+
+    /// Consult the `PreToolUseGate` (if any) before tool dispatch. On
+    /// `Block`, returns `Some(error_outcome)`; the caller short-circuits
+    /// the dispatch with this outcome. `None` means "proceed to dispatch".
+    ///
+    /// Panics inside the gate are caught and treated as `Allow` (fail
+    /// open) to avoid hanging the TUI.
+    pub(crate) async fn check_pre_tool_gate(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) -> Option<crate::tools::ToolCallOutcome> {
+        let Some(gate) = self.pre_tool_gate_snapshot().await else {
+            return None;
+        };
+        let name = tool_name.to_string();
+        let input_owned = input.clone();
+        let gate_owned = gate.clone();
+        let join = tokio::spawn(async move {
+            gate_owned.check(&name, &input_owned).await
+        })
+        .await;
+        match join {
+            Ok(crate::pre_tool_gate::PreToolDecision::Allow) => None,
+            Ok(crate::pre_tool_gate::PreToolDecision::Block(reason)) => {
+                Some(crate::tools::ToolCallOutcome::error(format!(
+                    "blocked by user hook: {reason}"
+                )))
+            }
+            Err(e) => {
+                tracing::warn!("PreToolUseGate panicked: {e}; failing open");
+                None
+            }
+        }
     }
 }
 
@@ -3144,6 +3185,58 @@ mod policy_tests {
         assert!(host.pre_tool_gate_snapshot().await.is_none());
         host.set_pre_tool_gate(std::sync::Arc::new(Allow)).await;
         assert!(host.pre_tool_gate_snapshot().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn pre_tool_gate_block_short_circuits_dispatch() {
+        use crate::pre_tool_gate::{PreToolDecision, PreToolUseGate};
+        use async_trait::async_trait;
+        use serde_json::Value;
+
+        struct Deny;
+        #[async_trait]
+        impl PreToolUseGate for Deny {
+            async fn check(&self, _: &str, _: &Value) -> PreToolDecision {
+                PreToolDecision::Block("test deny".into())
+            }
+        }
+
+        let provider: Box<dyn savvagent_mcp::ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("noop", serde_json::json!({})));
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+
+        host.set_pre_tool_gate(std::sync::Arc::new(Deny)).await;
+
+        // check_pre_tool_gate returns Some(error_outcome) when the gate blocks.
+        let outcome = host
+            .check_pre_tool_gate("run", &serde_json::json!({"command": "echo hi"}))
+            .await;
+        let outcome = outcome.expect("Deny gate must return Some");
+        assert!(outcome.is_error, "blocked outcome must be an error");
+        assert!(
+            outcome.payload.contains("test deny"),
+            "payload must contain the gate reason; got: {}",
+            outcome.payload
+        );
+
+        // Allow gate returns None (proceed to dispatch).
+        struct Allow;
+        #[async_trait]
+        impl PreToolUseGate for Allow {
+            async fn check(&self, _: &str, _: &Value) -> PreToolDecision {
+                PreToolDecision::Allow
+            }
+        }
+        host.set_pre_tool_gate(std::sync::Arc::new(Allow)).await;
+        let allow_outcome = host
+            .check_pre_tool_gate("run", &serde_json::json!({"command": "echo hi"}))
+            .await;
+        assert!(
+            allow_outcome.is_none(),
+            "Allow gate must return None (proceed)"
+        );
     }
 }
 
