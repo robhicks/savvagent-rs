@@ -2340,7 +2340,93 @@ fn translate_turn_event_to_host_event(
         | TurnEvent::ToolCallDenied { .. }
         | TurnEvent::Cancelled { .. }
         | TurnEvent::AbortedAfterGrace { .. }
-        | TurnEvent::ResourceUpdated { .. } => None,
+        | TurnEvent::ResourceUpdated { .. }
+        | TurnEvent::HtmlBlockStart { .. }
+        | TurnEvent::HtmlBlockDelta { .. }
+        | TurnEvent::HtmlBlockStop { .. } => None,
+    }
+}
+
+/// Attempt to create a [`savvagent_plugin::ContentRenderer`] for the
+/// `Entry::Canvas` identified by `canvas_id` and register it in
+/// `app.canvas_registry`.
+///
+/// Called from the `run_app` event loop immediately after a
+/// `TurnEvent::HtmlBlockStop` is processed (the sync half — moving
+/// `source_preview` into `source` — already happened inside
+/// `App::handle_html_block_stop`). This is the async half because it
+/// needs to take read locks on the plugin indexes and registry.
+///
+/// Failures are warn-logged rather than propagated; the canvas entry
+/// stays visible in the conversation log with its `source` field
+/// populated even when no renderer is available (e.g. when the plugin
+/// is disabled or the index hasn't been built yet).
+async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::ContentBlockId) {
+    // Extract the finalized source from the entry.
+    let source = match app.entries.iter().find(|e| {
+        matches!(e, Entry::Canvas { id, .. } if *id == canvas_id)
+    }) {
+        Some(Entry::Canvas { source, .. }) => source.clone(),
+        _ => {
+            tracing::debug!(?canvas_id, "create_canvas_renderer: canvas entry not found");
+            return;
+        }
+    };
+
+    // Look up the plugin that owns the canonical html renderer.
+    let plugin_id = {
+        let Some(indexes_arc) = app.plugin_indexes.as_ref() else {
+            tracing::debug!("create_canvas_renderer: plugin_indexes not installed");
+            return;
+        };
+        let indexes = indexes_arc.read().await;
+        match indexes.content_renderer_for("html") {
+            Some(id) => id.clone(),
+            None => {
+                tracing::debug!("create_canvas_renderer: no html renderer registered");
+                return;
+            }
+        }
+        // indexes guard drops here
+    };
+
+    // Retrieve the plugin and call create_renderer (sync).
+    let renderer_result = {
+        let Some(registry_arc) = app.plugin_registry.as_ref() else {
+            tracing::debug!("create_canvas_renderer: plugin_registry not installed");
+            return;
+        };
+        let registry = registry_arc.read().await;
+        let Some(handle) = registry.get(&plugin_id) else {
+            tracing::warn!(
+                plugin_id = %plugin_id.as_str(),
+                "create_canvas_renderer: plugin not found in registry"
+            );
+            return;
+        };
+        // Lock the plugin and call create_renderer (sync, no await inside).
+        let guard = match handle.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                tracing::warn!(
+                    plugin_id = %plugin_id.as_str(),
+                    "create_canvas_renderer: plugin mutex contended"
+                );
+                return;
+            }
+        };
+        guard.create_renderer("html", canvas_id, &source)
+        // guard + registry drop here
+    };
+
+    match renderer_result {
+        Ok(renderer) => {
+            app.canvas_registry.insert(canvas_id, renderer);
+            tracing::debug!(?canvas_id, "canvas renderer created and registered");
+        }
+        Err(err) => {
+            tracing::warn!(?canvas_id, ?err, "create_renderer failed; canvas stays as source");
+        }
     }
 }
 
@@ -2469,6 +2555,13 @@ async fn run_app(
             match msg {
                 WorkerMsg::Event(e) => {
                     let was_complete = matches!(e, TurnEvent::TurnComplete { .. });
+                    // Capture the canvas id before apply_turn_event consumes
+                    // the event and removes the index from html_block_index_to_id.
+                    let html_block_stop_id = if let TurnEvent::HtmlBlockStop { index } = &e {
+                        app.html_block_index_to_id.get(index).copied()
+                    } else {
+                        None
+                    };
                     // Translate the streaming TurnEvent before
                     // `apply_turn_event` (which consumes `e` by value)
                     // so the translator and the App mutation each get
@@ -2487,6 +2580,13 @@ async fn run_app(
                     );
                     app.apply_turn_event(e);
                     app.update_metrics();
+                    // If an HTML block just completed, try to create a renderer
+                    // for it via the plugin registry. This is the async half of
+                    // handle_html_block_stop — the sync half (preview→source
+                    // swap) already happened inside apply_turn_event.
+                    if let Some(canvas_id) = html_block_stop_id {
+                        create_canvas_renderer(app, canvas_id).await;
+                    }
                     if let Some(he) = host_event {
                         if let Err(err) =
                             crate::plugin::effects::dispatch_host_event(app, he, 0).await

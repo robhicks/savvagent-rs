@@ -32,10 +32,6 @@ impl CanvasRegistry {
     }
 
     /// Allocate a fresh [`ContentBlockId`] for a newly-arrived canvas.
-    // Task 17 wires this up from the streaming event loop. Until then
-    // only tests consume it; suppress the binary-crate dead_code lint
-    // (`-D warnings` in CI catches what `cargo test` lets through).
-    #[allow(dead_code)]
     pub fn allocate_id(&mut self) -> ContentBlockId {
         let id = ContentBlockId(self.next_id);
         self.next_id += 1;
@@ -43,7 +39,6 @@ impl CanvasRegistry {
     }
 
     /// Insert a renderer instance for `id`.
-    #[allow(dead_code)]
     pub fn insert(&mut self, id: ContentBlockId, renderer: Box<dyn ContentRenderer>) {
         self.renderers.insert(id, renderer);
     }
@@ -386,14 +381,9 @@ pub enum Entry {
     ///
     /// `source_preview` is `Some(...)` while the block is still
     /// streaming (each `HtmlSourceDelta` appends to it); on
-    /// `ContentBlockStop` the host promotes the preview into `source`
-    /// and sets `source_preview` back to `None`. The renderer instance
+    /// `ContentBlockStop` the preview is moved into `source` and
+    /// `source_preview` is set back to `None`. The renderer instance
     /// lives in `App::canvas_registry`.
-    // Task 17 constructs this variant from the streaming event loop;
-    // until then only tests instantiate it. Suppress the binary-crate
-    // dead_code lint so CI's `-D warnings` doesn't fail. See
-    // `feedback_dead_code_in_binary_crate.md`.
-    #[allow(dead_code)]
     Canvas {
         /// Host-assigned id, matching the renderer key in the
         /// canvas registry.
@@ -682,6 +672,11 @@ pub struct App {
     /// `Entry::Canvas` is created; Task 16 reads this during the render
     /// pass to produce ratatui-image frames.
     pub(crate) canvas_registry: CanvasRegistry,
+
+    /// Maps streaming block index → [`ContentBlockId`] for in-flight
+    /// HTML blocks. Populated on `TurnEvent::HtmlBlockStart`, consumed
+    /// on `TurnEvent::HtmlBlockStop`.
+    pub(crate) html_block_index_to_id: HashMap<u32, savvagent_plugin::ContentBlockId>,
 }
 
 /// Compute the `scroll_y` value (number of wrapped rows hidden ABOVE the
@@ -808,6 +803,7 @@ impl App {
             prompt_history: PromptHistory::default(),
             log_scroll_offset_from_bottom: None,
             canvas_registry: CanvasRegistry::new(),
+            html_block_index_to_id: HashMap::new(),
         };
         app.refresh_commands();
         app
@@ -981,6 +977,21 @@ impl App {
                 self.entries
                     .push(Entry::Note(format!("resource updated: {uri} — {summary}")));
             }
+            TurnEvent::HtmlBlockStart { index } => {
+                let id = self.handle_html_block_start();
+                self.html_block_index_to_id.insert(index, id);
+            }
+            TurnEvent::HtmlBlockDelta { index, source } => {
+                if let Some(&id) = self.html_block_index_to_id.get(&index) {
+                    self.handle_html_block_delta(id, &source);
+                }
+            }
+            TurnEvent::HtmlBlockStop { index } => {
+                if let Some(&id) = self.html_block_index_to_id.get(&index) {
+                    self.handle_html_block_stop(id);
+                    self.html_block_index_to_id.remove(&index);
+                }
+            }
         }
     }
 
@@ -991,6 +1002,76 @@ impl App {
         }
         let text = std::mem::take(&mut self.live_text);
         self.entries.push(Entry::Assistant(text));
+    }
+
+    // ── HTML canvas streaming handlers ───────────────────────────────────────
+
+    /// Called when a `TurnEvent::HtmlBlockStart` arrives.
+    ///
+    /// Flushes any buffered live text, allocates a fresh
+    /// [`savvagent_plugin::ContentBlockId`], and pushes an `Entry::Canvas`
+    /// with an empty `source_preview` (the streaming accumulator). Returns
+    /// the allocated id so the caller can record the `index → id` mapping.
+    pub fn handle_html_block_start(&mut self) -> savvagent_plugin::ContentBlockId {
+        self.flush_live_text();
+        let id = self.canvas_registry.allocate_id();
+        self.entries.push(Entry::Canvas {
+            id,
+            source: String::new(),
+            source_preview: Some(String::new()),
+        });
+        id
+    }
+
+    /// Called when a `TurnEvent::HtmlBlockDelta` arrives.
+    ///
+    /// Appends `fragment` to the `source_preview` buffer of the
+    /// `Entry::Canvas` that was created for `id`. No-op if the entry
+    /// is not found or has already been finalized (`source_preview` is `None`).
+    pub fn handle_html_block_delta(&mut self, id: savvagent_plugin::ContentBlockId, fragment: &str) {
+        if let Some(Entry::Canvas {
+            source_preview,
+            id: entry_id,
+            ..
+        }) = self.entries.iter_mut().rfind(|e| {
+            matches!(e, Entry::Canvas { id: eid, .. } if *eid == id)
+        }) {
+            if let Some(buf) = source_preview {
+                buf.push_str(fragment);
+            }
+            let _ = entry_id;
+        }
+    }
+
+    /// Called when a `TurnEvent::HtmlBlockStop` arrives (sync half).
+    ///
+    /// Moves `source_preview` into `source` and sets `source_preview` to
+    /// `None`, marking the entry as fully received. Renderer creation is
+    /// async and handled separately in `main.rs` via
+    /// [`App::try_create_canvas_renderer`].
+    pub fn handle_html_block_stop(&mut self, id: savvagent_plugin::ContentBlockId) {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .rfind(|e| matches!(e, Entry::Canvas { id: eid, .. } if *eid == id))
+        {
+            if let Entry::Canvas {
+                source,
+                source_preview,
+                ..
+            } = entry
+            {
+                if let Some(preview) = source_preview.take() {
+                    *source = preview;
+                }
+            }
+        }
+    }
+
+    /// Helper for tests — return the last `Entry` in the conversation log.
+    #[cfg(test)]
+    pub(crate) fn last_entry(&self) -> Option<&Entry> {
+        self.entries.last()
     }
 
     /// Convenience: append a user-visible note (file ops, errors, system messages).
@@ -2582,5 +2663,116 @@ mod tests {
             bytes: vec![0; 8],
         };
         assert!(frame_to_dynamic_image(&frame).is_none());
+    }
+
+    /// Streaming HTML block: source_preview accumulates during streaming,
+    /// then moves to source on ContentBlockStop.
+    ///
+    /// Renderer creation (the async half) is NOT tested here because it
+    /// requires a live plugin registry with `HtmlCanvasPlugin` installed.
+    /// That integration path is exercised in `main.rs`'s `create_canvas_renderer`
+    /// call after `TurnEvent::HtmlBlockStop` is processed.
+    #[test]
+    fn streaming_html_block_transitions_to_canvas_on_stop() {
+        let mut app = fresh_app();
+
+        // Start: a fresh canvas entry with empty source_preview is pushed.
+        let block_id = app.handle_html_block_start();
+
+        // Delta: fragments are appended to source_preview.
+        app.handle_html_block_delta(block_id, "<!doctype");
+        app.handle_html_block_delta(block_id, " html><body>hi</body>");
+
+        // While streaming, the entry has source_preview = Some(...).
+        let entry = app.last_entry().expect("entry pushed");
+        match entry {
+            Entry::Canvas {
+                source_preview,
+                source,
+                ..
+            } => {
+                assert_eq!(
+                    source_preview.as_deref(),
+                    Some("<!doctype html><body>hi</body>"),
+                    "source_preview accumulates fragments during streaming"
+                );
+                assert!(
+                    source.is_empty(),
+                    "source must stay empty while streaming"
+                );
+            }
+            _ => panic!("expected Canvas entry, got {entry:?}"),
+        }
+
+        // Stop: preview is swapped into source and set to None.
+        app.handle_html_block_stop(block_id);
+
+        let entry = app.last_entry().expect("entry");
+        match entry {
+            Entry::Canvas {
+                id,
+                source,
+                source_preview,
+            } => {
+                assert!(
+                    source_preview.is_none(),
+                    "source_preview must be None after block stop"
+                );
+                assert_eq!(
+                    source,
+                    "<!doctype html><body>hi</body>",
+                    "source must hold the assembled HTML after block stop"
+                );
+                // Renderer creation happens asynchronously in main.rs after
+                // TurnEvent::HtmlBlockStop; not testable in sync unit tests.
+                // We only verify the id is stable.
+                assert_eq!(*id, block_id);
+            }
+            _ => panic!("expected Canvas entry, got {entry:?}"),
+        }
+    }
+
+    /// `apply_turn_event` routes `HtmlBlockStart/Delta/Stop` through the
+    /// handler methods and keeps the `html_block_index_to_id` map in sync.
+    #[test]
+    fn apply_turn_event_html_block_roundtrip() {
+        use savvagent_host::TurnEvent;
+
+        let mut app = fresh_app();
+
+        app.apply_turn_event(TurnEvent::HtmlBlockStart { index: 2 });
+        // After start: one canvas entry with empty preview; index mapped.
+        assert_eq!(app.html_block_index_to_id.len(), 1);
+        let &id = app.html_block_index_to_id.get(&2).expect("index 2 mapped");
+
+        app.apply_turn_event(TurnEvent::HtmlBlockDelta {
+            index: 2,
+            source: "<p>hello</p>".to_string(),
+        });
+        // After delta: source_preview has the fragment.
+        if let Some(Entry::Canvas { source_preview, .. }) = app.last_entry() {
+            assert_eq!(source_preview.as_deref(), Some("<p>hello</p>"));
+        } else {
+            panic!("expected Canvas entry");
+        }
+
+        app.apply_turn_event(TurnEvent::HtmlBlockStop { index: 2 });
+        // After stop: preview is None, source is set, index removed from map.
+        assert!(
+            app.html_block_index_to_id.is_empty(),
+            "index must be removed on stop"
+        );
+        if let Some(Entry::Canvas {
+            id: entry_id,
+            source,
+            source_preview,
+        }) = app.last_entry()
+        {
+            assert_eq!(*entry_id, id);
+            assert_eq!(source, "<p>hello</p>");
+            assert!(source_preview.is_none());
+        } else {
+            panic!("expected Canvas entry");
+        }
     }
 }

@@ -263,6 +263,32 @@ pub enum TurnEvent {
         /// Defaults to the URI when the producer didn't include one.
         summary: String,
     },
+    /// A streaming HTML content block started. Emitted when the provider
+    /// emits `ContentBlockStart { block: ContentBlock::Html }`. The TUI
+    /// pushes an `Entry::Canvas` with an empty `source_preview`.
+    HtmlBlockStart {
+        /// Zero-based block index within the streamed message. Subsequent
+        /// `HtmlBlockDelta` and `HtmlBlockStop` events carry the same index.
+        index: u32,
+    },
+    /// A fragment of HTML source arrived during streaming. Emitted for each
+    /// `ContentBlockDelta { delta: BlockDelta::HtmlSourceDelta }` for an
+    /// HTML block. The TUI appends `source` to the matching entry's
+    /// `source_preview` buffer.
+    HtmlBlockDelta {
+        /// Block index, matching the corresponding [`TurnEvent::HtmlBlockStart`].
+        index: u32,
+        /// HTML source fragment to append.
+        source: String,
+    },
+    /// The streaming HTML block is complete. Emitted on
+    /// `ContentBlockStop` for an HTML block. The TUI swaps
+    /// `source_preview` into `source` and creates a renderer.
+    HtmlBlockStop {
+        /// Block index, matching the corresponding [`TurnEvent::HtmlBlockStart`].
+        index: u32,
+    },
+
     /// The whole turn finished.
     TurnComplete {
         /// Final outcome — same value `run_turn_streaming` returns.
@@ -2208,17 +2234,52 @@ async fn resolve_bash_network_with_state(
     }
 }
 
-/// Convert a stream of provider [`StreamEvent`]s into [`TurnEvent::TextDelta`]s
-/// and forward them to the host caller. Non-text events are dropped (they're
-/// re-derivable from the final response, which the loop already has).
+/// Convert a stream of provider [`StreamEvent`]s into [`TurnEvent`]s and
+/// forward them to the host caller.
+///
+/// Translated events:
+/// - `ContentBlockDelta { TextDelta }` → `TurnEvent::TextDelta`
+/// - `ContentBlockStart { Html }` → `TurnEvent::HtmlBlockStart`
+/// - `ContentBlockDelta { HtmlSourceDelta }` → `TurnEvent::HtmlBlockDelta`
+/// - `ContentBlockStop` (for an HTML block) → `TurnEvent::HtmlBlockStop`
+///
+/// All other events are dropped — they're re-derivable from the final
+/// `CompleteResponse`, which the host loop already processes.
 async fn forward_text_deltas(mut rx: mpsc::Receiver<StreamEvent>, out: mpsc::Sender<TurnEvent>) {
+    // Track which block indices are HTML so we can emit HtmlBlockStop at the
+    // right ContentBlockStop event.
+    let mut html_indices: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
     while let Some(ev) = rx.recv().await {
-        if let StreamEvent::ContentBlockDelta {
-            delta: BlockDelta::TextDelta { text },
-            ..
-        } = ev
-        {
-            if out.send(TurnEvent::TextDelta { text }).await.is_err() {
+        let turn_ev = match ev {
+            StreamEvent::ContentBlockDelta {
+                delta: BlockDelta::TextDelta { text },
+                ..
+            } => Some(TurnEvent::TextDelta { text }),
+
+            StreamEvent::ContentBlockStart {
+                index,
+                block: ContentBlock::Html { .. },
+            } => {
+                html_indices.insert(index);
+                Some(TurnEvent::HtmlBlockStart { index })
+            }
+
+            StreamEvent::ContentBlockDelta {
+                index,
+                delta: BlockDelta::HtmlSourceDelta { source },
+            } => Some(TurnEvent::HtmlBlockDelta { index, source }),
+
+            StreamEvent::ContentBlockStop { index } if html_indices.contains(&index) => {
+                html_indices.remove(&index);
+                Some(TurnEvent::HtmlBlockStop { index })
+            }
+
+            _ => None,
+        };
+
+        if let Some(ev) = turn_ev {
+            if out.send(ev).await.is_err() {
                 break;
             }
         }
