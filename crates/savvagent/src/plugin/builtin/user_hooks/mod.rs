@@ -381,10 +381,32 @@ impl Plugin for UserHooksPlugin {
 
     async fn handle_slash(
         &mut self,
-        _name: &str,
+        name: &str,
         _args: Vec<String>,
     ) -> Result<Vec<Effect>, PluginError> {
-        Ok(vec![])
+        if name != "reload-hooks" {
+            return Ok(vec![]);
+        }
+        // Re-walk discovery on the same project_root + home (home is
+        // dirs::home_dir() at the time of reload).
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let new_idx =
+            crate::plugin::builtin::user_hooks::discovery::walk_all(&self.project_root, &home);
+        let warnings = new_idx.warnings.clone();
+        *self.hooks.write().await = new_idx;
+        let mut effs: Vec<Effect> = warnings
+            .into_iter()
+            .map(|w| Effect::PushNote {
+                line: StyledLine::plain(format!("[warn] user-hooks: {w}")),
+            })
+            .collect();
+        effs.push(Effect::ReindexPlugin {
+            id: PluginId::new("internal:user-hooks").expect("valid built-in id"),
+        });
+        effs.push(Effect::PushNote {
+            line: StyledLine::plain("user-hooks: reloaded"),
+        });
+        Ok(effs)
     }
 
     async fn on_event(
@@ -542,6 +564,47 @@ mod tests {
             )),
             "expected CancelPendingTurn{{reason=\"denied\"}} in {effs:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reload_emits_reindex_plugin_effect() {
+        let mut p = mk_plugin(HooksIndex::default());
+        let effs = p.handle_slash("reload-hooks", vec![]).await.unwrap();
+        assert!(
+            effs.iter()
+                .any(|e| matches!(e, Effect::ReindexPlugin { .. })),
+            "expected ReindexPlugin in {effs:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reload_ignores_other_slashes() {
+        let mut p = mk_plugin(HooksIndex::default());
+        let effs = p.handle_slash("not-reload-hooks", vec![]).await.unwrap();
+        assert!(
+            effs.is_empty(),
+            "expected no effects for unrelated slash; got {effs:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reload_emits_reloaded_note_after_reindex() {
+        let mut p = mk_plugin(HooksIndex::default());
+        let effs = p.handle_slash("reload-hooks", vec![]).await.unwrap();
+        let last = effs.last().expect("at least one effect");
+        match last {
+            Effect::PushNote { line } => {
+                let joined: String = line.spans.iter().map(|s| s.text.as_str()).collect();
+                assert!(
+                    joined.contains("user-hooks: reloaded"),
+                    "expected trailing PushNote with 'user-hooks: reloaded'; got {line:?}"
+                );
+            }
+            other => panic!("expected trailing PushNote; got {other:?}"),
+        }
     }
 
     #[cfg(unix)]
