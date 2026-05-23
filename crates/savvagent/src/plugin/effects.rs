@@ -377,6 +377,45 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
                 }
             }
         }
+        Effect::RegisterPreToolGate { plugin_id } => {
+            let reg = match &app.plugin_registry {
+                Some(r) => r.clone(),
+                None => {
+                    tracing::warn!(
+                        "RegisterPreToolGate: plugin runtime not installed; \
+                         cannot look up BuiltinHookPlugin for {}",
+                        plugin_id.as_str()
+                    );
+                    return Ok(());
+                }
+            };
+            let hook_arc = {
+                let reg_guard = reg.read().await;
+                reg_guard.get_hook(&plugin_id)
+            };
+            let Some(hook_arc) = hook_arc else {
+                tracing::warn!(
+                    "RegisterPreToolGate: no BuiltinHookPlugin for {}",
+                    plugin_id.as_str()
+                );
+                return Ok(());
+            };
+            let gate = {
+                let mut handle = hook_arc.lock().await;
+                handle.take_pre_tool_gate()
+            };
+            let Some(gate) = gate else {
+                tracing::warn!(
+                    "RegisterPreToolGate: {} returned no gate",
+                    plugin_id.as_str()
+                );
+                return Ok(());
+            };
+            // Store for main.rs::apply_pending_gate which has host-slot access.
+            // If a gate was already queued (shouldn't happen in normal startup),
+            // the new one wins — last writer takes effect.
+            app.pending_gate = Some(gate);
+        }
         // The Effect enum is #[non_exhaustive]; unhandled variants are logged
         // so implementers of future PRs can spot missing wiring.
         other => {
@@ -2742,5 +2781,20 @@ mod tests {
             !path.exists(),
             "persist must not fire when set_active_language rejected the code"
         );
+    }
+
+    /// Applying `RegisterPreToolGate` for a plugin id that doesn't exist as a
+    /// `BuiltinHookPlugin` should warn-log and return `Ok` — no panic, no error.
+    #[tokio::test]
+    async fn register_pre_tool_gate_no_hook_entry_warns() {
+        let mut app = {
+            let _lock = HOME_LOCK.lock().unwrap();
+            let _home = HomeGuard::new();
+            fresh_app()
+        };
+        let pid = savvagent_plugin::PluginId::new("internal:does-not-exist").unwrap();
+        let effs = vec![savvagent_plugin::Effect::RegisterPreToolGate { plugin_id: pid }];
+        let res = apply_effects(&mut app, effs).await;
+        assert!(res.is_ok());
     }
 }

@@ -486,6 +486,11 @@ pub struct App {
     /// view).
     pub pending_pool_add: Option<PendingPoolAdd>,
 
+    /// Queued by `Effect::RegisterPreToolGate`; drained by
+    /// `main.rs::apply_pending_gate` which has host-slot access.
+    /// `None` when no gate is queued.
+    pub pending_gate: Option<std::sync::Arc<dyn savvagent_host::PreToolUseGate>>,
+
     /// Queued by `Effect::ReloadRoutingRules`; drained by
     /// `main.rs::apply_pending_routing_reload`.
     pub pending_routing_reload: Option<PendingRoutingAction>,
@@ -653,6 +658,7 @@ impl App {
             cached_models: Vec::new(),
             pending_model_change: None,
             pending_pool_add: None,
+            pending_gate: None,
             pending_routing_reload: None,
             pending_routing_show: None,
             prompt_history: PromptHistory::default(),

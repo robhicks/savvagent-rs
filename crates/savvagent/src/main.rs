@@ -728,6 +728,7 @@ async fn dispatch_slash_command(
                 }
                 apply_pending_model_change(app, host_slot, project_root, tool_bins).await;
                 apply_pending_pool_add(app, host_slot).await;
+                apply_pending_gate(app, host_slot).await;
                 apply_pending_routing_reload(app, host_slot).await;
                 apply_pending_routing_show(app, host_slot).await;
                 return;
@@ -1541,6 +1542,24 @@ fn render_routing_show(app: &mut App, rules: &savvagent_host::RoutingRules) {
         ),
         None => app.push_note(rust_i18n::t!("routing.show-no-last").to_string()),
     }
+}
+
+/// Drain `app.pending_gate` (set by `Effect::RegisterPreToolGate`) and
+/// install the gate on the active host. No-op when nothing is queued or
+/// when no host exists yet (the effect arm already warns in that case via
+/// a tracing::warn — the gate is simply dropped).
+async fn apply_pending_gate(app: &mut App, host_slot: &HostSlot) {
+    let Some(gate) = app.pending_gate.take() else {
+        return;
+    };
+    let Some(host) = current_host(host_slot).await else {
+        tracing::warn!(
+            "apply_pending_gate: no host yet; gate dropped — \
+             re-emit RegisterPreToolGate after /connect if needed"
+        );
+        return;
+    };
+    host.set_pre_tool_gate(gate).await;
 }
 
 fn format_rule_match(m: &savvagent_host::RuleMatch) -> String {
@@ -2447,6 +2466,7 @@ async fn run_app(
     // bootstrap_pool_host already added (apply_pending_pool_add handles
     // PoolError::AlreadyRegistered as a debug no-op).
     apply_pending_pool_add(app, &host_slot).await;
+    apply_pending_gate(app, &host_slot).await;
 
     // Populate `App::cached_models` from the bootstrap host's pool so the
     // `/model` picker has rows the moment the user opens it. Previously
@@ -2770,6 +2790,7 @@ async fn run_app(
             }
             apply_pending_model_change(app, &host_slot, &project_root, &tool_bins).await;
             apply_pending_pool_add(app, &host_slot).await;
+            apply_pending_gate(app, &host_slot).await;
             apply_pending_routing_reload(app, &host_slot).await;
             apply_pending_routing_show(app, &host_slot).await;
             continue;
@@ -3026,6 +3047,7 @@ async fn run_app(
                                     )
                                     .await;
                                     apply_pending_pool_add(app, &host_slot).await;
+                                    apply_pending_gate(app, &host_slot).await;
                                     apply_pending_routing_reload(app, &host_slot).await;
                                     apply_pending_routing_show(app, &host_slot).await;
                                     handled = true;
