@@ -112,7 +112,15 @@ pub(crate) fn register_builtins(
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
-        Box::new(builtin::user_hooks::UserHooksPlugin::new()),
+        // TODO(B-T20): wire real handles from App
+        Box::new(builtin::user_hooks::UserHooksPlugin::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(
+                builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            String::new(),
+            std::path::PathBuf::from("."),
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::new())),
+        )),
         Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(
             trust_levels,
         )),

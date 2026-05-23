@@ -452,7 +452,6 @@ mod caps_helpers_tests {
 /// [`BuiltinProviderPlugin`]: the runtime calls `take_pre_tool_gate`
 /// after observing [`savvagent_plugin::Effect::RegisterPreToolGate`]
 /// and installs the result on the host.
-#[allow(dead_code)] // used by tasks that follow this one in sub-project B
 pub(crate) trait BuiltinHookPlugin: savvagent_plugin::Plugin {
     /// Surrender the plugin's `PreToolUseGate` to the runtime. The
     /// runtime calls this exactly once at startup. The plugin may

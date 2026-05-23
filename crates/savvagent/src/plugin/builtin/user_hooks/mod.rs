@@ -4,29 +4,63 @@
 
 mod config;
 mod decision;
-mod discovery;
+pub mod discovery;
 mod matcher;
 mod payload;
+pub mod pre_tool_gate;
 mod runner;
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
     Contributions, Effect, Manifest, Plugin, PluginError, PluginId, PluginKind, SlashSpec,
 };
+use tokio::sync::RwLock;
+
+use crate::plugin::builtin::provider_common::BuiltinHookPlugin;
+use crate::plugin::builtin::user_hooks::discovery::HooksIndex;
+use crate::plugin::builtin::user_hooks::pre_tool_gate::UserHooksPreToolGate;
 
 /// Built-in plugin that exposes user-authored shell hooks.
-pub struct UserHooksPlugin;
+pub struct UserHooksPlugin {
+    pub hooks: Arc<RwLock<HooksIndex>>,
+    pub session_id: String,
+    pub project_root: PathBuf,
+    pub transcript_path: Arc<RwLock<PathBuf>>,
+    cached_gate: Option<Arc<UserHooksPreToolGate>>,
+}
 
 impl UserHooksPlugin {
     /// Construct a new [`UserHooksPlugin`].
-    pub fn new() -> Self {
-        Self
+    pub fn new(
+        hooks: Arc<RwLock<HooksIndex>>,
+        session_id: String,
+        project_root: PathBuf,
+        transcript_path: Arc<RwLock<PathBuf>>,
+    ) -> Self {
+        Self {
+            hooks,
+            session_id,
+            project_root,
+            transcript_path,
+            cached_gate: None,
+        }
     }
-}
 
-impl Default for UserHooksPlugin {
-    fn default() -> Self {
-        Self::new()
+    fn gate_arc(&mut self) -> Arc<UserHooksPreToolGate> {
+        if let Some(g) = self.cached_gate.as_ref() {
+            return g.clone();
+        }
+        let g = Arc::new(UserHooksPreToolGate {
+            hooks: self.hooks.clone(),
+            session_id: self.session_id.clone(),
+            project_root: self.project_root.clone(),
+            transcript_path: self.transcript_path.clone(),
+        });
+        self.cached_gate = Some(g.clone());
+        g
     }
 }
 
@@ -59,13 +93,28 @@ impl Plugin for UserHooksPlugin {
     }
 }
 
+impl BuiltinHookPlugin for UserHooksPlugin {
+    fn take_pre_tool_gate(&mut self) -> Option<Arc<dyn savvagent_host::PreToolUseGate>> {
+        Some(self.gate_arc())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn stub_plugin() -> UserHooksPlugin {
+        UserHooksPlugin::new(
+            Arc::new(RwLock::new(HooksIndex::default())),
+            String::new(),
+            PathBuf::from("."),
+            Arc::new(RwLock::new(PathBuf::new())),
+        )
+    }
+
     #[test]
     fn manifest_has_reload_hooks() {
-        let p = UserHooksPlugin::new();
+        let p = stub_plugin();
         let m = p.manifest();
         assert_eq!(m.id.as_str(), "internal:user-hooks");
         let names: Vec<_> = m
