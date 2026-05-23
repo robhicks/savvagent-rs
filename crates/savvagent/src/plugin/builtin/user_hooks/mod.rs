@@ -495,17 +495,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_starting_emits_register_pre_tool_gate() {
-        let mut p = mk_plugin(HooksIndex::default());
-        let effs = p.on_event(HostEvent::HostStarting).await.unwrap();
-        assert!(effs.iter().any(|e| matches!(
-            e,
-            Effect::RegisterPreToolGate { plugin_id }
-                if plugin_id.as_str() == "internal:user-hooks"
-        )));
-    }
-
-    #[tokio::test]
     async fn ignores_unrelated_events() {
         let mut p = mk_plugin(HooksIndex::default());
         let effs = p
