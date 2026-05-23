@@ -2032,6 +2032,30 @@ mod tests {
         App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
     }
 
+    /// Verify that `PluginRegistry::active_prompt_segments` — the value that
+    /// `main` pushes into `Host::set_prompt_segments` at startup — includes
+    /// the html-canvas segment when the full builtin set is registered.
+    ///
+    /// This is the unit-side of the startup wiring: the production code does
+    /// `host.set_prompt_segments(registry.active_prompt_segments())` right
+    /// after `app.install_plugin_runtime(registry, indexes)`. The host's
+    /// `set_prompt_segments` / `active_prompt_segments` round-trip is covered
+    /// in `savvagent-host`; this test pins the "what gets pushed" side.
+    #[tokio::test]
+    async fn startup_pushes_html_canvas_segment_to_host() {
+        let _lock = crate::test_helpers::HOME_LOCK.lock().unwrap();
+        let set = crate::plugin::register_builtins();
+        let registry = crate::plugin::registry::PluginRegistry::new(set);
+        let segments = registry.active_prompt_segments();
+        assert!(
+            segments
+                .iter()
+                .any(|s| s.id == "internal:html-canvas:default"),
+            "expected internal:html-canvas:default in active segments, got: {:?}",
+            segments.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+    }
+
     /// Auto-tail: when the user hasn't scrolled and content overflows the
     /// viewport, the bottom row of the viewport is the newest line.
     #[test]

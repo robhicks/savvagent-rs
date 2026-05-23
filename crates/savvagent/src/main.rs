@@ -223,6 +223,16 @@ async fn main() -> Result<()> {
         let indexes = Indexes::build(&registry)
             .await
             .unwrap_or_else(|e| panic!("plugin manifest conflict at startup: {e}"));
+
+        // Push plugin-contributed system-prompt segments to the host now that
+        // the enabled set is finalised. This must happen before the first turn
+        // so the model sees (e.g.) the html-canvas rendering instructions in
+        // its system prompt.
+        let startup_segments = registry.active_prompt_segments();
+        if let Some(host) = current_host(&host_slot).await {
+            host.set_prompt_segments(startup_segments);
+        }
+
         app.install_plugin_runtime(registry, indexes);
     }
 
@@ -708,6 +718,38 @@ async fn dispatch_slash_command(
     if let (Some(reg), Some(idx)) = (&app.plugin_registry, &app.plugin_indexes) {
         let reg = reg.clone();
         let idx = idx.clone();
+
+        // Collect the suppress_prompt_segments list for this slash before
+        // dispatching. Look up under a brief synchronous lock; guards are
+        // dropped before any `.await` below, keeping async discipline.
+        let suppress: Vec<String> = {
+            let reg_guard = reg.read().await;
+            let idx_guard = idx.read().await;
+            idx_guard
+                .slash
+                .get(name_str)
+                .and_then(|pid| reg_guard.get(pid))
+                .and_then(|handle| handle.try_lock().ok().map(|g| g.manifest()))
+                .map(|m| {
+                    m.contributions
+                        .slash_commands
+                        .into_iter()
+                        .find(|s| s.name == name_str)
+                        .map(|s| s.suppress_prompt_segments)
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default()
+            // reg_guard and idx_guard drop here
+        };
+        // If the slash spec suppresses any prompt segments, tell the host
+        // before dispatching so the next turn (which some slashes trigger
+        // immediately via Effect::RunTurn) omits those segments.
+        if !suppress.is_empty() {
+            if let Some(host) = current_host(host_slot).await {
+                host.set_turn_suppression(suppress);
+            }
+        }
+
         let effs_result = {
             let reg_guard = reg.read().await;
             let idx_guard = idx.read().await;
