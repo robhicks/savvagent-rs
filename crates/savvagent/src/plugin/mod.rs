@@ -78,7 +78,9 @@ pub(crate) use registry::BuiltinSet;
 /// `take_client` map, so both code paths mutate the same state — the
 /// dual-instance bug that previously broke `/connect <provider>` is now
 /// architecturally impossible.
-pub(crate) fn register_builtins() -> BuiltinSet {
+pub(crate) fn register_builtins(
+    trust_levels: builtin::user_slash_commands::TrustMap,
+) -> BuiltinSet {
     use builtin::provider_common::ProviderEntry;
 
     let providers: Vec<ProviderEntry> = vec![
@@ -111,6 +113,9 @@ pub(crate) fn register_builtins() -> BuiltinSet {
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
+        Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(
+            trust_levels,
+        )),
         Box::new(builtin::tool_fs_summary::ToolFsSummaryPlugin::new()),
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
@@ -128,7 +133,9 @@ mod tests {
 
     #[tokio::test]
     async fn register_builtins_pr8_complete() {
-        let set = register_builtins();
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        let set = register_builtins(Arc::new(tokio::sync::RwLock::new(BTreeMap::new())));
         // Non-provider plugins from PR 1..PR 5 + themes (PR 6) + plugins-manager (PR 8)
         // + migration-picker (Task 9).
         let plugin_ids: Vec<_> = set
@@ -161,6 +168,7 @@ mod tests {
             "internal:tool-bash-summary",
             "internal:tool-fs-summary",
             "internal:tool-grep-summary",
+            "internal:user-slash-commands",
             "internal:view-file",
             "internal:html-canvas",
         ] {
@@ -169,7 +177,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 26);
+        assert_eq!(set.plugins.len(), 27);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -198,13 +206,13 @@ mod tests {
         // Task 6 adds route, bringing non-provider count to 21;
         // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
         // v0.16.0 adds lsp-installer, bringing non-provider count to 25;
-        // Task 13 adds html-canvas, bringing non-provider count to 26;
-        // total registry size is 26 + 4 = 30.
+        // Task 13 adds html-canvas (26) and user-slash-commands (27), bringing non-provider count to 27;
+        // total registry size is 27 + 4 = 31.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            30,
-            "registry should have 26 non-provider + 4 provider plugins"
+            31,
+            "registry should have 27 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),

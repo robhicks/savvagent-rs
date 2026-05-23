@@ -677,6 +677,31 @@ pub struct App {
     /// HTML blocks. Populated on `TurnEvent::HtmlBlockStart`, consumed
     /// on `TurnEvent::HtmlBlockStop`.
     pub(crate) html_block_index_to_id: HashMap<u32, savvagent_plugin::ContentBlockId>,
+
+    /// One-turn model override populated by
+    /// [`savvagent_plugin::Effect::SetNextTurnModelOverride`] and consumed
+    /// by the worker spawn at the start of the next turn. `None`
+    /// means "use the provider's currently-active model."
+    pub next_turn_model_override: Option<String>,
+    /// `(command_name, args)` that should re-dispatch after the trust
+    /// modal resolves. Set by `internal:user-slash-commands` before
+    /// emitting `Effect::OpenScreen("trust.modal")`; cleared by
+    /// `apply_effects` after the re-dispatch (or on cancel).
+    pub pending_slash_after_trust: Option<(String, Vec<String>)>,
+
+    /// In-memory trust state for the session, shared with the
+    /// `internal:user-slash-commands` plugin so `handle_slash` can
+    /// read trust without going through `App`. Loaded from
+    /// `~/.savvagent/trusted-projects.json` at startup; `Always`
+    /// decisions persist back via `Effect::SetTrustLevel`.
+    pub trust_levels: std::sync::Arc<
+        tokio::sync::RwLock<
+            std::collections::BTreeMap<
+                std::path::PathBuf,
+                crate::plugin::builtin::user_slash_commands::trust::TrustLevel,
+            >,
+        >,
+    >,
 }
 
 /// Compute the `scroll_y` value (number of wrapped rows hidden ABOVE the
@@ -804,6 +829,23 @@ impl App {
             log_scroll_offset_from_bottom: None,
             canvas_registry: CanvasRegistry::new(),
             html_block_index_to_id: HashMap::new(),
+            next_turn_model_override: None,
+            pending_slash_after_trust: None,
+            trust_levels: {
+                // Load persisted trust decisions from disk. Missing file is OK —
+                // `trust::load` returns an empty map in that case.
+                let loaded = if let Some(home) = dirs::home_dir() {
+                    let (map, warn) =
+                        crate::plugin::builtin::user_slash_commands::trust::load(&home);
+                    if let Some(w) = warn {
+                        tracing::warn!("user-slash-commands: {w}");
+                    }
+                    map
+                } else {
+                    std::collections::BTreeMap::new()
+                };
+                std::sync::Arc::new(tokio::sync::RwLock::new(loaded))
+            },
         };
         app.refresh_commands();
         app
@@ -1868,6 +1910,16 @@ impl App {
     pub fn submit_prompt(&mut self, text: String) {
         tracing::debug!("submit_prompt effect ignored in PR 3");
     }
+
+    /// Take the one-turn model override out of `App`, leaving `None` behind.
+    ///
+    /// Called at the worker-spawn site before every user turn so the override
+    /// is consumed exactly once (the turn it was set for). Returns `Some(id)`
+    /// if a `SetNextTurnModelOverride` effect fired before this turn, `None`
+    /// otherwise.
+    pub(crate) fn consume_model_override(&mut self) -> Option<String> {
+        self.next_turn_model_override.take()
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -2047,7 +2099,9 @@ mod tests {
     #[tokio::test]
     async fn startup_pushes_html_canvas_segment_to_host() {
         let _lock = crate::test_helpers::HOME_LOCK.lock().unwrap();
-        let set = crate::plugin::register_builtins();
+        let set = crate::plugin::register_builtins(std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::BTreeMap::new(),
+        )));
         let registry = crate::plugin::registry::PluginRegistry::new(set);
         let segments = registry.active_prompt_segments();
         assert!(
@@ -2847,5 +2901,30 @@ mod tests {
         } else {
             panic!("expected Canvas entry");
         }
+    }
+
+    /// `consume_model_override` returns the stored id and clears the field.
+    #[test]
+    fn consume_model_override_takes_the_value() {
+        let mut app = fresh_app();
+        assert!(
+            app.next_turn_model_override.is_none(),
+            "fresh App has no override"
+        );
+
+        app.next_turn_model_override = Some("claude-opus-5".to_string());
+        let taken = app.consume_model_override();
+        assert_eq!(
+            taken.as_deref(),
+            Some("claude-opus-5"),
+            "should return the stored id"
+        );
+        assert!(
+            app.next_turn_model_override.is_none(),
+            "field must be None after consume"
+        );
+
+        // Second call is idempotent — no panic, returns None.
+        assert!(app.consume_model_override().is_none());
     }
 }
