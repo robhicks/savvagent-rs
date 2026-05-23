@@ -5,6 +5,7 @@
 mod config;
 mod discovery;
 mod matcher;
+mod payload;
 
 use async_trait::async_trait;
 use savvagent_plugin::{
