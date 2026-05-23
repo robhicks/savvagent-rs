@@ -85,10 +85,7 @@ impl UserHooksPlugin {
     /// Dispatch `PostToolUse` hooks. See struct-level docs for the v1
     /// limitations (only `"*"`-matching groups run; sentinel tool
     /// payload).
-    async fn dispatch_post_tool_use(
-        &mut self,
-        success: bool,
-    ) -> Result<Vec<Effect>, PluginError> {
+    async fn dispatch_post_tool_use(&mut self, success: bool) -> Result<Vec<Effect>, PluginError> {
         let idx = self.hooks.read().await;
         let Some(groups) = idx.by_event.get(&HookEvent::PostToolUse) else {
             return Ok(vec![]);
@@ -102,8 +99,12 @@ impl UserHooksPlugin {
             transcript_path: &transcript,
             cwd: &self.project_root,
         };
-        let payload =
-            payload::post_tool_use(&ctx, "<unknown>", &json!({}), &json!({ "success": success }));
+        let payload = payload::post_tool_use(
+            &ctx,
+            "<unknown>",
+            &json!({}),
+            &json!({ "success": success }),
+        );
 
         let mut effects: Vec<Effect> = Vec::new();
         for group in &groups {
@@ -363,10 +364,10 @@ impl Plugin for UserHooksPlugin {
             requires_arg: false,
         }];
         contributions.hooks = vec![
-            savvagent_plugin::HookKind::ToolCallEnd, // -> PostToolUse
-            savvagent_plugin::HookKind::HostStarting, // -> SessionStart
+            savvagent_plugin::HookKind::ToolCallEnd,     // -> PostToolUse
+            savvagent_plugin::HookKind::HostStarting,    // -> SessionStart
             savvagent_plugin::HookKind::PromptSubmitted, // -> UserPromptSubmit (Task 18)
-            savvagent_plugin::HookKind::TurnEnd,     // -> Stop (Task 18)
+            savvagent_plugin::HookKind::TurnEnd,         // -> Stop (Task 18)
         ];
         Manifest {
             id: PluginId::new("internal:user-hooks").expect("valid built-in id"),
