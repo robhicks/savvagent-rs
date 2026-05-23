@@ -94,8 +94,18 @@ pub async fn run_one(
     // of a block. Preserve the hook author's `suppress_output` flag so
     // explicit silence is honoured on the demoted Continue.
     let decision = match (event, &decision) {
-        (HookEvent::PostToolUse, HookDecision::Block { suppress_output, .. })
-        | (HookEvent::SessionStart, HookDecision::Block { suppress_output, .. }) => {
+        (
+            HookEvent::PostToolUse,
+            HookDecision::Block {
+                suppress_output, ..
+            },
+        )
+        | (
+            HookEvent::SessionStart,
+            HookDecision::Block {
+                suppress_output, ..
+            },
+        ) => {
             warnings.push(format!(
                 "hook `{command}` exited 2 on non-block-capable event {event:?}; treating as warning"
             ));

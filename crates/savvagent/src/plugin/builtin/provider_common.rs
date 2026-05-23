@@ -457,9 +457,7 @@ pub(crate) trait BuiltinHookPlugin: savvagent_plugin::Plugin {
     /// Surrender the plugin's `PreToolUseGate` to the runtime. The
     /// runtime calls this exactly once at startup. The plugin may
     /// return the same `Arc` every call (the gate is shared state).
-    fn take_pre_tool_gate(
-        &mut self,
-    ) -> Option<std::sync::Arc<dyn savvagent_host::PreToolUseGate>>;
+    fn take_pre_tool_gate(&mut self) -> Option<std::sync::Arc<dyn savvagent_host::PreToolUseGate>>;
 }
 
 #[cfg(test)]
@@ -490,9 +488,7 @@ mod tests {
         }
 
         impl super::BuiltinHookPlugin for Stub {
-            fn take_pre_tool_gate(
-                &mut self,
-            ) -> Option<Arc<dyn savvagent_host::PreToolUseGate>> {
+            fn take_pre_tool_gate(&mut self) -> Option<Arc<dyn savvagent_host::PreToolUseGate>> {
                 None
             }
         }

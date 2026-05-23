@@ -112,9 +112,9 @@ pub fn parse_outcome(
                                         .into(),
                                 );
                                 return HookDecision::Block {
-                                    reason: hs
-                                        .permission_decision_reason
-                                        .unwrap_or_else(|| "ask requested (not supported in v1)".into()),
+                                    reason: hs.permission_decision_reason.unwrap_or_else(|| {
+                                        "ask requested (not supported in v1)".into()
+                                    }),
                                     suppress_output: suppress,
                                 };
                             }
@@ -152,9 +152,7 @@ pub fn parse_outcome(
             );
             if d == "block" {
                 return HookDecision::Block {
-                    reason: p
-                        .reason
-                        .unwrap_or_else(|| "blocked by user hook".into()),
+                    reason: p.reason.unwrap_or_else(|| "blocked by user hook".into()),
                     suppress_output: suppress,
                 };
             }
@@ -224,7 +222,8 @@ mod tests {
     #[test]
     fn permission_decision_allow_continues() {
         let mut w = Vec::new();
-        let stdout = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
+        let stdout =
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
         let d = parse_outcome(HookEvent::PreToolUse, 0, stdout, "", &mut w);
         assert!(matches!(d, HookDecision::Continue { .. }));
     }
@@ -243,7 +242,8 @@ mod tests {
     #[test]
     fn permission_decision_ask_warns_and_blocks() {
         let mut w = Vec::new();
-        let stdout = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#;
+        let stdout =
+            r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}"#;
         let d = parse_outcome(HookEvent::PreToolUse, 0, stdout, "", &mut w);
         assert!(matches!(d, HookDecision::Block { .. }));
         assert!(w.iter().any(|s| s.contains("ask")));
@@ -255,7 +255,9 @@ mod tests {
         let stdout = r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"extra"}}"#;
         let d = parse_outcome(HookEvent::UserPromptSubmit, 0, stdout, "", &mut w);
         match d {
-            HookDecision::Continue { additional_context, .. } => {
+            HookDecision::Continue {
+                additional_context, ..
+            } => {
                 assert_eq!(additional_context.as_deref(), Some("extra"));
             }
             _ => panic!(),
@@ -265,7 +267,8 @@ mod tests {
     #[test]
     fn mismatched_hook_event_name_warns_and_ignores() {
         let mut w = Vec::new();
-        let stdout = r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","permissionDecision":"deny"}}"#;
+        let stdout =
+            r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","permissionDecision":"deny"}}"#;
         let d = parse_outcome(HookEvent::PreToolUse, 0, stdout, "", &mut w);
         assert!(matches!(d, HookDecision::Continue { .. }));
         assert!(w.iter().any(|s| s.contains("PostToolUse")));

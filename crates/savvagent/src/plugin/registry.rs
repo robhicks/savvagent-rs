@@ -239,10 +239,7 @@ impl PluginRegistry {
     /// handler to retrieve the `Arc<Mutex<dyn BuiltinHookPlugin>>` so it can
     /// call `take_pre_tool_gate`.
     #[allow(dead_code)] // used by B-T13 (apply_effects RegisterPreToolGate)
-    pub fn get_hook(
-        &self,
-        id: &PluginId,
-    ) -> Option<Arc<Mutex<dyn BuiltinHookPlugin>>> {
+    pub fn get_hook(&self, id: &PluginId) -> Option<Arc<Mutex<dyn BuiltinHookPlugin>>> {
         self.hooks.get(id).cloned()
     }
 

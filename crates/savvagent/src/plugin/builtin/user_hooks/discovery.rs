@@ -105,12 +105,7 @@ fn load_one(path: &Path, index: &mut HooksIndex) {
     }
 }
 
-fn compile_and_push(
-    path: &Path,
-    event: HookEvent,
-    group: &MatcherGroup,
-    index: &mut HooksIndex,
-) {
+fn compile_and_push(path: &Path, event: HookEvent, group: &MatcherGroup, index: &mut HooksIndex) {
     let matcher = match CompiledMatcher::compile(&group.matcher) {
         Ok(m) => m,
         Err(why) => {
@@ -133,11 +128,15 @@ fn compile_and_push(
     if commands.is_empty() {
         return;
     }
-    index.by_event.entry(event).or_default().push(CompiledGroup {
-        matcher,
-        commands,
-        source: path.to_path_buf(),
-    });
+    index
+        .by_event
+        .entry(event)
+        .or_default()
+        .push(CompiledGroup {
+            matcher,
+            commands,
+            source: path.to_path_buf(),
+        });
 }
 
 #[cfg(test)]

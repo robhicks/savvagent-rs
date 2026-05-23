@@ -361,9 +361,8 @@ pub struct Host {
     /// Optional `PreToolUseGate` consulted before every tool dispatch.
     /// `None` means "no gate; allow all". The user-hooks plugin
     /// installs itself via [`Host::set_pre_tool_gate`].
-    pre_tool_gate: tokio::sync::RwLock<
-        Option<std::sync::Arc<dyn crate::pre_tool_gate::PreToolUseGate>>,
-    >,
+    pre_tool_gate:
+        tokio::sync::RwLock<Option<std::sync::Arc<dyn crate::pre_tool_gate::PreToolUseGate>>>,
 }
 
 struct SessionState {
@@ -1250,8 +1249,7 @@ impl Host {
                                     }
                                 }
                             }
-                        } else if let Some(blocked) =
-                            self.check_pre_tool_gate(&name, &input).await
+                        } else if let Some(blocked) = self.check_pre_tool_gate(&name, &input).await
                         {
                             blocked
                         } else {
@@ -1880,23 +1878,16 @@ impl Host {
         tool_name: &str,
         input: &serde_json::Value,
     ) -> Option<crate::tools::ToolCallOutcome> {
-        let Some(gate) = self.pre_tool_gate_snapshot().await else {
-            return None;
-        };
+        let gate = self.pre_tool_gate_snapshot().await?;
         let name = tool_name.to_string();
         let input_owned = input.clone();
         let gate_owned = gate.clone();
-        let join = tokio::spawn(async move {
-            gate_owned.check(&name, &input_owned).await
-        })
-        .await;
+        let join = tokio::spawn(async move { gate_owned.check(&name, &input_owned).await }).await;
         match join {
             Ok(crate::pre_tool_gate::PreToolDecision::Allow) => None,
-            Ok(crate::pre_tool_gate::PreToolDecision::Block(reason)) => {
-                Some(crate::tools::ToolCallOutcome::error(format!(
-                    "blocked by user hook: {reason}"
-                )))
-            }
+            Ok(crate::pre_tool_gate::PreToolDecision::Block(reason)) => Some(
+                crate::tools::ToolCallOutcome::error(format!("blocked by user hook: {reason}")),
+            ),
             Err(e) => {
                 tracing::warn!("PreToolUseGate panicked: {e}; failing open");
                 None
@@ -3250,10 +3241,7 @@ mod policy_tests {
         let no_gate = host_no_gate
             .check_pre_tool_gate("run", &serde_json::json!({}))
             .await;
-        assert!(
-            no_gate.is_none(),
-            "no-gate case must return None"
-        );
+        assert!(no_gate.is_none(), "no-gate case must return None");
     }
 }
 

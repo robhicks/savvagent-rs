@@ -19,8 +19,10 @@ pub struct HookContext<'a> {
 
 /// Build a `PreToolUse` stdin payload.
 pub fn pre_tool_use(ctx: &HookContext<'_>, tool_name: &str, tool_input: &Value) -> Value {
-    base(ctx, HookEvent::PreToolUse)
-        .extend(&[("tool_name", json!(tool_name)), ("tool_input", tool_input.clone())])
+    base(ctx, HookEvent::PreToolUse).extend(&[
+        ("tool_name", json!(tool_name)),
+        ("tool_input", tool_input.clone()),
+    ])
 }
 
 /// Build a `PostToolUse` stdin payload.
@@ -91,8 +93,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn ctx() -> (PathBuf, PathBuf, HookContext<'static>) {
-        let transcript: &'static Path =
-            Box::leak(PathBuf::from("/t/123.json").into_boxed_path());
+        let transcript: &'static Path = Box::leak(PathBuf::from("/t/123.json").into_boxed_path());
         let cwd: &'static Path = Box::leak(PathBuf::from("/cwd").into_boxed_path());
         (
             transcript.to_path_buf(),
