@@ -358,6 +358,12 @@ pub struct Host {
     /// tool-use-loop iteration boundary to inject `[resource updated: …]`
     /// user-text blocks into the conversation.
     resources: Arc<tokio::sync::Mutex<crate::resources::ResourceCache>>,
+    /// Optional `PreToolUseGate` consulted before every tool dispatch.
+    /// `None` means "no gate; allow all". The user-hooks plugin
+    /// installs itself via [`Host::set_pre_tool_gate`].
+    pre_tool_gate: tokio::sync::RwLock<
+        Option<std::sync::Arc<dyn crate::pre_tool_gate::PreToolUseGate>>,
+    >,
 }
 
 struct SessionState {
@@ -540,6 +546,7 @@ impl Host {
             resources: Arc::new(tokio::sync::Mutex::new(
                 crate::resources::ResourceCache::default(),
             )),
+            pre_tool_gate: tokio::sync::RwLock::new(None),
         };
         host.wire_self_into_resolver().await;
         // Spawn the resource pump. It owns the receiver, the cache handle,
@@ -655,6 +662,7 @@ impl Host {
             resources: Arc::new(tokio::sync::Mutex::new(
                 crate::resources::ResourceCache::default(),
             )),
+            pre_tool_gate: tokio::sync::RwLock::new(None),
         };
         host.wire_self_into_resolver().await;
         // Spawn the resource pump. Mirrors the spawn in `Host::start`.
@@ -1833,6 +1841,26 @@ impl Host {
             .get(id)
             .ok_or_else(|| PoolError::NotRegistered(id.clone()))?;
         Ok(entry.lease())
+    }
+
+    /// Install a `PreToolUseGate`. Overwrites any prior gate. Intended
+    /// to be called exactly once during startup, by the user-hooks
+    /// plugin's `RegisterPreToolGate` effect.
+    pub async fn set_pre_tool_gate(
+        &self,
+        gate: std::sync::Arc<dyn crate::pre_tool_gate::PreToolUseGate>,
+    ) {
+        let mut g = self.pre_tool_gate.write().await;
+        *g = Some(gate);
+    }
+
+    /// Borrow the currently-installed gate. Used by the dispatch path.
+    // TODO(B-T10): remove allow once the dispatch path calls this.
+    #[allow(dead_code)]
+    pub(crate) async fn pre_tool_gate_snapshot(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::pre_tool_gate::PreToolUseGate>> {
+        self.pre_tool_gate.read().await.clone()
     }
 }
 
@@ -3091,6 +3119,31 @@ mod policy_tests {
             }
             _ => panic!("constructed variant didn't match"),
         }
+    }
+
+    #[tokio::test]
+    async fn pre_tool_gate_starts_none_and_can_be_set() {
+        use crate::pre_tool_gate::{PreToolDecision, PreToolUseGate};
+        use async_trait::async_trait;
+        use serde_json::Value;
+
+        struct Allow;
+        #[async_trait]
+        impl PreToolUseGate for Allow {
+            async fn check(&self, _: &str, _: &Value) -> PreToolDecision {
+                PreToolDecision::Allow
+            }
+        }
+
+        let provider: Box<dyn savvagent_mcp::ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("noop", serde_json::json!({})));
+        let host = Host::with_components(config_no_tools(), provider)
+            .await
+            .unwrap();
+
+        assert!(host.pre_tool_gate_snapshot().await.is_none());
+        host.set_pre_tool_gate(std::sync::Arc::new(Allow)).await;
+        assert!(host.pre_tool_gate_snapshot().await.is_some());
     }
 }
 
