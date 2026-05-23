@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use savvagent_canvas::HtmlCanvas;
 use savvagent_plugin::{
     Contributions, ContentBlockId, ContentRenderer, ContentRendererSpec,
-    Manifest, Plugin, PluginError, PluginId, PluginKind, SystemPromptSegment,
+    Manifest, Plugin, PluginError, PluginId, PluginKind, SlashSpec, SystemPromptSegment,
 };
 
 use super::prompt_text::{DEFAULT_PROMPT_ID, DEFAULT_PROMPT_TEXT};
@@ -29,6 +29,13 @@ impl Plugin for HtmlCanvasPlugin {
         contributions.prompt_segments = vec![SystemPromptSegment {
             id: DEFAULT_PROMPT_ID.to_string(),
             text: DEFAULT_PROMPT_TEXT.to_string(),
+        }];
+        contributions.slash_commands = vec![SlashSpec {
+            name: "save-canvas".to_string(),
+            summary: "Save the most recent HTML canvas to a file".to_string(),
+            args_hint: Some("[path] [--block N] [--open]".to_string()),
+            requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         Manifest {
             id: PluginId::new("internal:html-canvas").expect("valid built-in id"),

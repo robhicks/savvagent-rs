@@ -833,6 +833,40 @@ async fn run_slash(
     args: Vec<String>,
     depth: u8,
 ) -> Result<(), String> {
+    // Special-case: /save-canvas needs access to App-owned canvas state, so it
+    // bypasses the plugin trait and is dispatched here directly.
+    if name == "save-canvas" {
+        use crate::plugin::builtin::html_canvas::slash::{dispatch, parse_args};
+        use savvagent_plugin::StyledLine;
+        let parsed = match parse_args(&args) {
+            Ok(p) => p,
+            Err(e) => {
+                let effs = vec![Effect::PushNote {
+                    line: StyledLine::plain(format!("/save-canvas: {e}")),
+                }];
+                return Box::pin(apply_effects_with_depth(app, effs, depth)).await;
+            }
+        };
+        let canvases = app.canvas_sources_in_order();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let effs = match dispatch(parsed, &canvases, &cwd) {
+            Ok(result) => {
+                let mut v = vec![Effect::PushNote {
+                    line: StyledLine::plain(format!(
+                        "Canvas saved to {}",
+                        result.path.display()
+                    )),
+                }];
+                v.extend(result.effects);
+                v
+            }
+            Err(e) => vec![Effect::PushNote {
+                line: StyledLine::plain(format!("/save-canvas: {e}")),
+            }],
+        };
+        return Box::pin(apply_effects_with_depth(app, effs, depth)).await;
+    }
+
     let (reg, idx) = match (&app.plugin_registry, &app.plugin_indexes) {
         (Some(r), Some(i)) => (r.clone(), i.clone()),
         _ => return Err("plugin runtime not installed".into()),

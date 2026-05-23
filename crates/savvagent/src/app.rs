@@ -1068,6 +1068,22 @@ impl App {
         }
     }
 
+    /// Return all finalized canvases (not in-flight previews) in
+    /// transcript order. Used by /save-canvas.
+    pub fn canvas_sources_in_order(&self) -> Vec<(savvagent_plugin::ContentBlockId, String)> {
+        self.entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Canvas { id, source, source_preview, .. }
+                    if source_preview.is_none() =>
+                {
+                    Some((*id, source.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Helper for tests — return the last `Entry` in the conversation log.
     #[cfg(test)]
     pub(crate) fn last_entry(&self) -> Option<&Entry> {
