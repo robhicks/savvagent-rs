@@ -3237,6 +3237,23 @@ mod policy_tests {
             allow_outcome.is_none(),
             "Allow gate must return None (proceed)"
         );
+
+        // No gate installed → check_pre_tool_gate returns None without
+        // spawning any task. Construct a fresh host to verify the
+        // no-gate code path directly (rather than relying on the gate
+        // being unset on the existing host).
+        let provider2: Box<dyn savvagent_mcp::ProviderClient + Send + Sync> =
+            Box::new(ScriptedProvider::new("noop", serde_json::json!({})));
+        let host_no_gate = Host::with_components(config_no_tools(), provider2)
+            .await
+            .unwrap();
+        let no_gate = host_no_gate
+            .check_pre_tool_gate("run", &serde_json::json!({}))
+            .await;
+        assert!(
+            no_gate.is_none(),
+            "no-gate case must return None"
+        );
     }
 }
 
