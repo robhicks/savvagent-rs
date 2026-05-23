@@ -112,6 +112,7 @@ pub(crate) fn register_builtins(
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
+        Box::new(builtin::user_hooks::UserHooksPlugin::new()),
         Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(
             trust_levels,
         )),
@@ -166,6 +167,7 @@ mod tests {
             "internal:tool-bash-summary",
             "internal:tool-fs-summary",
             "internal:tool-grep-summary",
+            "internal:user-hooks",
             "internal:user-slash-commands",
             "internal:view-file",
         ] {
@@ -174,7 +176,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 26);
+        assert_eq!(set.plugins.len(), 27);
 
         // PR 6 adds the 4 provider shims — exactly once each.
         let provider_ids: Vec<_> = {
@@ -204,12 +206,13 @@ mod tests {
         // Task 11 adds tool-bash/fs/grep-summary, bringing non-provider count to 24;
         // v0.16.0 adds lsp-installer, bringing non-provider count to 25;
         // user-slash-commands adds 1 more, bringing non-provider count to 26;
-        // total registry size is 26 + 4 = 30.
+        // sub-project B (user-hooks) adds 1 more, bringing non-provider count to 27;
+        // total registry size is 27 + 4 = 31.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            30,
-            "registry should have 26 non-provider + 4 provider plugins"
+            31,
+            "registry should have 27 non-provider + 4 provider plugins"
         );
         assert_eq!(
             reg.provider_count(),
