@@ -29,10 +29,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       # `keyring`'s sync-secret-service backend pulls libdbus-sys, whose
-      # build.rs needs the system libdbus headers. Not installed by default
-      # on the GH ubuntu runner image.
+      # build.rs needs the system libdbus headers. Blitz (savvagent-canvas)
+      # transitively pulls yeslogic-fontconfig-sys, which needs system
+      # fontconfig headers. Neither is installed by default on the GH
+      # ubuntu runner image.
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libfontconfig1-dev pkg-config
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
@@ -54,10 +56,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # libdbus-1-dev is required for keyring's secret-service backend on
-      # Linux. The ubuntu GH runner image doesn't ship it preinstalled.
+      # Linux. libfontconfig1-dev is required by Blitz (savvagent-canvas)
+      # via yeslogic-fontconfig-sys. Neither is preinstalled on the GH
+      # ubuntu runner image.
       - name: Install Linux system deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libfontconfig1-dev pkg-config
       - name: build
         run: cargo build --workspace --all-targets
       - name: test
@@ -83,7 +87,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux system deps
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libfontconfig1-dev pkg-config
       - name: cross-vendor matrix
         run: cargo test -p savvagent-host --test cross_vendor_history --no-fail-fast
 
