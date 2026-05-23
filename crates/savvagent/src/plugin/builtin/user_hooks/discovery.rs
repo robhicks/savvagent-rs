@@ -7,8 +7,6 @@
 //! 3. `~/.savvagent/settings.json`
 //! 4. `~/.claude/settings.json`
 
-#![allow(dead_code)] // consumed by Task 16 (PreToolUseGate impl) + Task 17 (on_event)
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -44,7 +42,8 @@ impl HookEvent {
 pub struct CompiledGroup {
     pub matcher: CompiledMatcher,
     pub commands: Vec<HookCommand>,
-    /// Source path for diagnostics.
+    /// Source path retained for diagnostics; not yet surfaced to the user.
+    #[allow(dead_code)]
     pub source: PathBuf,
 }
 

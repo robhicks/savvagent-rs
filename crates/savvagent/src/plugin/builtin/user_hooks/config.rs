@@ -4,8 +4,6 @@
 //! event names under `hooks` parse cleanly with a warn-log; they're
 //! preserved so a future map-event-to-HookKind pass can address them.
 
-#![allow(dead_code)] // consumed by Task 4 (discovery)
-
 use serde::Deserialize;
 
 /// The portion of `settings.json` we care about.

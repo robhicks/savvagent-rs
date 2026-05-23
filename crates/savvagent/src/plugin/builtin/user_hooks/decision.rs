@@ -1,8 +1,6 @@
 //! Hook outcome decision types + parser for the Claude-Code-compatible
 //! structured-JSON stdout protocol.
 
-#![allow(dead_code)] // consumed by Task 7 (runner) and beyond
-
 use serde::Deserialize;
 
 use crate::plugin::builtin::user_hooks::discovery::HookEvent;

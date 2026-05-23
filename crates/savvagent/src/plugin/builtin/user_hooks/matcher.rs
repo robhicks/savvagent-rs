@@ -1,12 +1,12 @@
 //! Compiled tool-name matchers built from `MatcherGroup::matcher` strings.
 
-#![allow(dead_code)] // consumed by Task 4 (discovery) + Task 16 (PreToolUseGate impl)
-
 use globset::{Glob, GlobMatcher};
 
 /// A compiled glob pattern paired with the raw source string (for logs).
 #[derive(Debug, Clone)]
 pub struct CompiledMatcher {
+    /// Raw matcher string retained for diagnostics; not yet surfaced.
+    #[allow(dead_code)]
     pub source: String,
     pub matcher: GlobMatcher,
 }

@@ -1,8 +1,6 @@
 //! Spawns a shell hook, writes the JSON payload to its stdin, awaits
 //! with timeout, and returns a `HookDecision`.
 
-#![allow(dead_code)] // consumed by Task 16 (gate) + Task 17 (on_event)
-
 use std::path::Path;
 use std::time::Duration;
 

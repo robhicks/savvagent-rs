@@ -29,7 +29,6 @@ impl HookEntry {
     /// Build a [`HookEntry`] from a concrete hook-plugin type. The two
     /// `Arc`s point at the same allocation; mutations via either view
     /// are observed by the other.
-    #[allow(dead_code)] // populated in B-T20/B-T21
     pub fn new<T>(concrete: T) -> Self
     where
         T: BuiltinHookPlugin + 'static,
@@ -238,7 +237,6 @@ impl PluginRegistry {
     /// with that id is registered. Called by the `RegisterPreToolGate` effect
     /// handler to retrieve the `Arc<Mutex<dyn BuiltinHookPlugin>>` so it can
     /// call `take_pre_tool_gate`.
-    #[allow(dead_code)] // used by B-T13 (apply_effects RegisterPreToolGate)
     pub fn get_hook(&self, id: &PluginId) -> Option<Arc<Mutex<dyn BuiltinHookPlugin>>> {
         self.hooks.get(id).cloned()
     }

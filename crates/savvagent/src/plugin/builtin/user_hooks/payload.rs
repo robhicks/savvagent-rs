@@ -1,8 +1,6 @@
 //! Builds the stdin JSON payload each hook receives. Shape matches
 //! Claude Code's hook contract.
 
-#![allow(dead_code)] // consumed by Task 16 (gate) + Task 17 (on_event)
-
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
