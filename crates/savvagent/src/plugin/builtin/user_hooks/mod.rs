@@ -607,18 +607,37 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // HOME_LOCK is std::Mutex (shared with sync tests) and must span the await.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
     #[cfg(unix)]
     async fn reload_hooks_through_app_index_round_trip() {
-        // Shared App-side Arc + plugin built around the same Arc → after
-        // /reload-hooks-style reload, both sides see the updated index.
+        // Proves the shared-Arc contract: the App's `shared_idx` and the
+        // plugin's `self.hooks` point at the SAME `Arc<RwLock<HooksIndex>>`,
+        // so a write performed by the plugin during /reload-hooks is visible
+        // to App-side readers.
+        //
+        // Setup is empty-on-both-sides: the App-side Arc starts as
+        // `HooksIndex::default()` and the plugin is constructed from a
+        // clone of that Arc. The only write into the index is the one
+        // `handle_slash("reload-hooks", ..)` performs internally via
+        // `*self.hooks.write().await = new_idx`. If the plugin had ever
+        // allocated its own `Arc<RwLock<HooksIndex>>` instead of using the
+        // passed-in handle, the App-side view would still be empty after
+        // the reload and the final assertion would fail.
 
+        use crate::test_helpers::{HOME_LOCK, HomeGuard};
         use std::sync::Arc;
         use tempfile::TempDir;
         use tokio::sync::RwLock;
 
+        // Plugin's reload path calls `dirs::home_dir()` for the home walk;
+        // pin HOME to a tempdir so the reload never picks up hooks from the
+        // dev machine's real `~/.savvagent/settings.json`.
+        let _lock = HOME_LOCK.lock().unwrap();
+        let _home_guard = HomeGuard::new();
+
         let proj = TempDir::new().unwrap();
-        let home = TempDir::new().unwrap();
         std::fs::create_dir_all(proj.path().join(".savvagent")).unwrap();
         std::fs::write(
             proj.path().join(".savvagent/settings.json"),
@@ -635,16 +654,12 @@ mod tests {
         )
         .unwrap();
 
+        // App-side Arc starts EMPTY — no pre-population. The reload below
+        // is the sole writer.
         let shared_idx = Arc::new(RwLock::new(HooksIndex::default()));
         let shared_transcript = Arc::new(RwLock::new(std::path::PathBuf::from("/t.json")));
 
-        // Pre-populate the index the way main.rs does at startup.
-        {
-            let initial = discovery::walk_all(proj.path(), home.path());
-            *shared_idx.write().await = initial;
-        }
-
-        // Plugin built around the same Arcs as the App-side handle.
+        // Plugin built around a clone of the same Arc as the App-side handle.
         let mut p = UserHooksPlugin::new(
             shared_idx.clone(),
             "test-session".into(),
@@ -652,23 +667,35 @@ mod tests {
             shared_transcript.clone(),
         );
 
-        // Reload should re-walk; the index it walks is project-tempdir-local,
-        // and the result should still contain the PreToolUse group.
-        // Note: the plugin uses `dirs::home_dir()` for the home walk; that
-        // path is OS-specific and may not be the tempdir. Just assert
-        // ReindexPlugin is in the result and the App-side Arc still holds
-        // the PreToolUse entry.
+        // Sanity-check the precondition: nothing has been written yet.
+        assert!(
+            shared_idx.read().await.by_event.is_empty(),
+            "precondition: App-side index must start empty so the post-reload \
+             assertion below proves the plugin's write reached the shared Arc"
+        );
+
+        // The plugin's `handle_slash` performs `walk_all(self.project_root, home)`
+        // and then `*self.hooks.write().await = new_idx`. `walk_all` scans
+        // `project_root.join(".savvagent")` first, independent of the home
+        // walk, so the PreToolUse group from the project tempdir lands in
+        // the new index regardless of what `dirs::home_dir()` resolves to.
         let effs = p.handle_slash("reload-hooks", vec![]).await.unwrap();
         assert!(
             effs.iter()
-                .any(|e| matches!(e, Effect::ReindexPlugin { .. }))
+                .any(|e| matches!(e, Effect::ReindexPlugin { .. })),
+            "expected ReindexPlugin in {effs:?}"
         );
 
+        // If `UserHooksPlugin::new` allocated its own
+        // `Arc<RwLock<HooksIndex>>` instead of using the passed-in `hooks`,
+        // this read would still see `HooksIndex::default()` and fail.
         let app_view = shared_idx.read().await;
         assert!(
             app_view
                 .by_event
-                .contains_key(&discovery::HookEvent::PreToolUse)
+                .contains_key(&discovery::HookEvent::PreToolUse),
+            "App-side shared Arc must observe the plugin's write; got {:?}",
+            app_view.by_event.keys().collect::<Vec<_>>()
         );
     }
 
