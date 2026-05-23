@@ -1239,6 +1239,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![],
             providers: vec![entry],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1364,6 +1365,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(counter)],
             providers: vec![provider_entry],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1491,6 +1493,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(bad), Box::new(good)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1577,6 +1580,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(counter)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1652,6 +1656,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(Optional)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1752,6 +1757,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(a), Box::new(b)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let mut registry = PluginRegistry::new(set);
 
@@ -1836,6 +1842,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(Core)],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -1897,6 +1904,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -2292,6 +2300,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![Box::new(RecordSlash(calls.clone()))],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");
@@ -2597,6 +2606,7 @@ mod tests {
         let set = BuiltinSet {
             plugins: vec![],
             providers: vec![],
+            hook_entries: vec![],
         };
         let registry = PluginRegistry::new(set);
         let indexes = Indexes::build(&registry).await.expect("indexes build");

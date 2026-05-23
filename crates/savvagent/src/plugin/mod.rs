@@ -121,7 +121,11 @@ pub(crate) fn register_builtins(
         Box::new(builtin::view_file::ViewFilePlugin::new()),
     ];
 
-    BuiltinSet { plugins, providers }
+    BuiltinSet {
+        plugins,
+        providers,
+        hook_entries: vec![],
+    }
 }
 
 #[cfg(test)]
