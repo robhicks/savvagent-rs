@@ -19,11 +19,7 @@ pub fn validate(source: &str) -> usize {
         let needle = format!("<{}", tag);
         if lower.contains(&needle) {
             warnings += 1;
-            tracing::warn!(
-                tag,
-                "savvagent-canvas: {}",
-                msg,
-            );
+            tracing::warn!(tag, "savvagent-canvas: {}", msg,);
         }
     }
 
@@ -107,9 +103,7 @@ mod tests {
 
     #[test]
     fn multiple_violations_count_independently() {
-        let n = validate(
-            "<!doctype html><body><script>x</script><iframe src='y'></iframe></body>",
-        );
+        let n = validate("<!doctype html><body><script>x</script><iframe src='y'></iframe></body>");
         assert_eq!(n, 2);
     }
 

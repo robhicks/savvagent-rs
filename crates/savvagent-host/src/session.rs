@@ -1006,7 +1006,11 @@ impl Host {
                             &segments,
                             &suppressed_refs,
                         );
-                        if composed.is_empty() { None } else { Some(composed) }
+                        if composed.is_empty() {
+                            None
+                        } else {
+                            Some(composed)
+                        }
                     }
                 }
             }
@@ -2278,10 +2282,10 @@ async fn forward_text_deltas(mut rx: mpsc::Receiver<StreamEvent>, out: mpsc::Sen
             _ => None,
         };
 
-        if let Some(ev) = turn_ev {
-            if out.send(ev).await.is_err() {
-                break;
-            }
+        if let Some(ev) = turn_ev
+            && out.send(ev).await.is_err()
+        {
+            break;
         }
     }
 }

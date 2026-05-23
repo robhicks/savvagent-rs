@@ -852,10 +852,7 @@ async fn run_slash(
         let effs = match dispatch(parsed, &canvases, &cwd) {
             Ok(result) => {
                 let mut v = vec![Effect::PushNote {
-                    line: StyledLine::plain(format!(
-                        "Canvas saved to {}",
-                        result.path.display()
-                    )),
+                    line: StyledLine::plain(format!("Canvas saved to {}", result.path.display())),
                 }];
                 v.extend(result.effects);
                 v

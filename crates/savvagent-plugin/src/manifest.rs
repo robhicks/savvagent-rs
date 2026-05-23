@@ -238,7 +238,10 @@ mod tests {
             },
         };
         assert_eq!(m.contributions.prompt_segments.len(), 1);
-        assert_eq!(m.contributions.prompt_segments[0].id, "internal:test-prompt:hello");
+        assert_eq!(
+            m.contributions.prompt_segments[0].id,
+            "internal:test-prompt:hello"
+        );
     }
 
     #[test]

@@ -515,17 +515,16 @@ mod content_renderer_index_tests {
     async fn build_indexes_with_html_canvas() -> Indexes {
         use crate::plugin::builtin::html_canvas::HtmlCanvasPlugin;
         let reg = PluginRegistry::from_plugins(vec![Box::new(HtmlCanvasPlugin::new())]);
-        Indexes::build(&reg).await.expect("indexes build must succeed")
+        Indexes::build(&reg)
+            .await
+            .expect("indexes build must succeed")
     }
 
     #[tokio::test]
     async fn content_renderers_index_routes_block_type_to_plugin() {
         let idx = build_indexes_with_html_canvas().await;
         let plugin_id = idx.content_renderer_for("html");
-        assert_eq!(
-            plugin_id.map(|p| p.as_str()),
-            Some("internal:html-canvas"),
-        );
+        assert_eq!(plugin_id.map(|p| p.as_str()), Some("internal:html-canvas"),);
     }
 
     #[tokio::test]
@@ -540,7 +539,9 @@ mod content_renderer_index_tests {
         let reg = PluginRegistry::from_plugins(vec![Box::new(HtmlCanvasPlugin::new())]);
         let segments = reg.active_prompt_segments();
         assert!(
-            segments.iter().any(|s| s.id == "internal:html-canvas:default"),
+            segments
+                .iter()
+                .any(|s| s.id == "internal:html-canvas:default"),
             "expected segment 'internal:html-canvas:default'; got: {:?}",
             segments.iter().map(|s| &s.id).collect::<Vec<_>>()
         );

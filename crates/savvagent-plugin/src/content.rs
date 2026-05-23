@@ -166,10 +166,7 @@ pub trait ContentRenderer: Send {
 
     /// Phase 2: dispatch an input event. Default returns an empty
     /// non-dirty outcome so Phase 1 renderers compile.
-    async fn dispatch(
-        &mut self,
-        _event: InputEvent,
-    ) -> Result<InputOutcome, PluginError> {
+    async fn dispatch(&mut self, _event: InputEvent) -> Result<InputOutcome, PluginError> {
         Ok(InputOutcome {
             effects: Vec::new(),
             dirty: false,

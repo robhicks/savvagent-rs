@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use savvagent_canvas::HtmlCanvas;
 use savvagent_plugin::{
-    Contributions, ContentBlockId, ContentRenderer, ContentRendererSpec,
-    Manifest, Plugin, PluginError, PluginId, PluginKind, SlashSpec, SystemPromptSegment,
+    ContentBlockId, ContentRenderer, ContentRendererSpec, Contributions, Manifest, Plugin,
+    PluginError, PluginId, PluginKind, SlashSpec, SystemPromptSegment,
 };
 
 use super::prompt_text::{DEFAULT_PROMPT_ID, DEFAULT_PROMPT_TEXT};

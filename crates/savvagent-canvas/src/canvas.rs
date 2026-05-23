@@ -136,7 +136,11 @@ fn render_html_to_rgba(source: &str, width: u32) -> Frame {
         width
     };
     let natural_height = if natural_height > MAX_DIM {
-        tracing::warn!(natural_height, max = MAX_DIM, "canvas height truncated to u16 max");
+        tracing::warn!(
+            natural_height,
+            max = MAX_DIM,
+            "canvas height truncated to u16 max"
+        );
         MAX_DIM
     } else {
         natural_height

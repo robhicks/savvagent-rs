@@ -130,6 +130,11 @@ Approach risks called out up front:
   semantically-flat structure to `<details>`. Subset validator warns
   for `<details>` in the document until the upstream paint bug is
   fixed.
+- **`StyleThreading::Sequential` required.** `HtmlCanvas` constructs Blitz with
+  `StyleThreading::Sequential` because Blitz's default `Parallel` threading panics
+  under concurrent renders (upstream Blitz issue #430). This serializes style recalc
+  to the calling thread; acceptable for headless single-turn rendering, but worth
+  revisiting if Blitz upstream resolves the panic before Phase 2.
 - **Image-protocol bandwidth.** Hover means re-uploading the frame on
   mouse-move. Mitigated by re-render only on state change and by
   Kitty's incremental frame update support; spec calls out tmux as a
@@ -677,6 +682,8 @@ contract does not advertise it.
 host-config time; default `SystemBrowser`).
 
 `<details>` / `<summary>` — expand/collapse via Enter or click.
+*(Phase 1 quirk: Blitz 0.3.0-alpha.4 paints the `<details>` body regardless
+of the `open` attribute; see "Approach risks" for context and mitigation.)*
 
 `<button>` — focusable; click dispatches `Effect::OpenUrl` only if its
 `data-href` attribute is present (the "actionable button" pattern). All
@@ -709,6 +716,11 @@ overflow:auto, border-radius, box-shadow, opacity, position:relative,
 transform: translate/scale, transition on `:hover`/`:focus`/`:active`,
 the four pseudo-classes, `::before`/`::after`). Media queries are not
 in scope in v1 (canvas size is fixed at terminal width).
+
+**White-background default.** Model-authored canvases without an explicit
+`body { background: … }` rule render with a white background, which contrasts
+poorly on dark TUI themes; authors should style their documents appropriately
+(e.g. `body { background: #1e1e1e; color: #cdd6f4; }`).
 
 ### Excluded
 
@@ -879,19 +891,23 @@ By default, every rendered HTML block is also written to disk at:
 ```
 
 The file is self-contained: it includes the HTML source verbatim with
-no rewriting. Auto-export is **on by default**. A `plugins.toml` flag
-disables it:
+no rewriting. Auto-export is **on by default**. To disable it, set
+`enabled = false` for `internal:html-canvas` in `plugins.toml`:
 
 ```toml
 [plugins."internal:html-canvas"]
-enabled = true
-auto_export = false
+enabled = false
 ```
+
+v0.17.0 ships with no separate `auto_export` toggle — the plugin's
+auto-export and rendering are bundled. Disabling the plugin suppresses
+both. A dedicated per-feature flag may be added in a future release if
+there is demand.
 
 The transcript JSON remains the source of truth — the on-disk
 `.html` is a convenience copy. Deleting the files does not corrupt
 the transcript; re-opening the transcript via `/resume` re-creates
-the files (if auto-export is on).
+the files (if the plugin is enabled).
 
 The directory is created with `0o700`, files `0o600`, matching the
 existing `~/.savvagent/` permission discipline.
@@ -1077,6 +1093,8 @@ Documented in `docs/canvas-terminal-compat.md`.
 **Renderer.**
 
 5. `savvagent-canvas` crate builds in the workspace; depends on `savvagent-plugin` + Blitz.
+5b. `savvagent-canvas`'s Blitz dependency bumps the workspace `rust-version` from 1.85 to
+    1.89; CHANGELOG calls this out explicitly.
 6. `HtmlCanvas` implements `ContentRenderer`: renders the spec's HTML+CSS subset to a pixel buffer; dispatches mouse and keyboard events; soft-freezes losslessly.
 
 **Plugin integration.**
@@ -1091,7 +1109,7 @@ Documented in `docs/canvas-terminal-compat.md`.
 
 12. Transcript JSON round-trips `Html { source }` blocks losslessly.
 13. Auto-export on by default: each rendered HTML block writes to `~/.savvagent/canvases/<unix-ts>-<turn>-<block>.html` with `0o600`. The directory is created with `0o700` if missing.
-14. `auto_export = false` in `plugins.toml` disables the auto-write without affecting in-TUI rendering.
+14. Disabling the plugin (`enabled = false` in `plugins.toml`) suppresses both rendering and auto-export; v0.17.0 has no separate `auto_export` toggle.
 15. `/save-canvas` writes the chosen canvas to a user-specified path; `--open` opens it in the system browser.
 16. Phase 2: Ctrl-O while focused on a canvas opens it in the system browser via `xdg-open` / `open`.
 

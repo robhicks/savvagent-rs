@@ -21,6 +21,8 @@
 //! - `SAVVAGENT_TOOL_GREP_BIN`  (default `savvagent-tool-grep` on $PATH)
 //! - `SAVVAGENT_TOOL_LSP_BIN`   (default `savvagent-tool-lsp` on $PATH)
 
+#![allow(clippy::collapsible_if)] // pre-existing debt; many sites under rustc 1.95 new lint
+
 rust_i18n::i18n!("locales", fallback = "en");
 
 #[cfg(test)]
@@ -2405,9 +2407,11 @@ fn translate_turn_event_to_host_event(
 /// is disabled or the index hasn't been built yet).
 async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::ContentBlockId) {
     // Extract the finalized source from the entry.
-    let source = match app.entries.iter().find(|e| {
-        matches!(e, Entry::Canvas { id, .. } if *id == canvas_id)
-    }) {
+    let source = match app
+        .entries
+        .iter()
+        .find(|e| matches!(e, Entry::Canvas { id, .. } if *id == canvas_id))
+    {
         Some(Entry::Canvas { source, .. }) => source.clone(),
         _ => {
             tracing::debug!(?canvas_id, "create_canvas_renderer: canvas entry not found");
@@ -2467,7 +2471,11 @@ async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::Cont
             tracing::debug!(?canvas_id, "canvas renderer created and registered");
         }
         Err(err) => {
-            tracing::warn!(?canvas_id, ?err, "create_renderer failed; canvas stays as source");
+            tracing::warn!(
+                ?canvas_id,
+                ?err,
+                "create_renderer failed; canvas stays as source"
+            );
         }
     }
 }
@@ -2481,17 +2489,21 @@ async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::Cont
 /// auto-export by toggling the `internal:html-canvas` plugin off via
 /// `~/.savvagent/plugins.toml`.
 fn auto_export_canvas(app: &App, canvas_id: savvagent_plugin::ContentBlockId, turn_id: u32) {
-    use crate::plugin::builtin::html_canvas::auto_export::{auto_export_path, canvases_dir, write_canvas};
     use crate::app::Entry;
+    use crate::plugin::builtin::html_canvas::auto_export::{
+        auto_export_path, canvases_dir, write_canvas,
+    };
 
     let Some(base) = canvases_dir() else {
         return;
     };
 
     // Retrieve the finalized source from the entry.
-    let source = match app.entries.iter().find(|e| {
-        matches!(e, Entry::Canvas { id, .. } if *id == canvas_id)
-    }) {
+    let source = match app
+        .entries
+        .iter()
+        .find(|e| matches!(e, Entry::Canvas { id, .. } if *id == canvas_id))
+    {
         Some(Entry::Canvas { source, .. }) => source.clone(),
         _ => {
             tracing::debug!(?canvas_id, "auto_export_canvas: canvas entry not found");

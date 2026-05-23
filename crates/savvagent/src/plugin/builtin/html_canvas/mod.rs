@@ -11,9 +11,9 @@
 //! Phase 2 will add the OnFocusedCanvas keybinding for Ctrl-O
 //! (open-in-browser); Phase 1 doesn't ship interactive bindings.
 
+pub mod auto_export;
 mod plugin;
 mod prompt_text;
-pub mod auto_export;
 pub mod slash;
 
 pub use plugin::HtmlCanvasPlugin;

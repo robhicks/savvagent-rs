@@ -1028,14 +1028,20 @@ impl App {
     /// Appends `fragment` to the `source_preview` buffer of the
     /// `Entry::Canvas` that was created for `id`. No-op if the entry
     /// is not found or has already been finalized (`source_preview` is `None`).
-    pub fn handle_html_block_delta(&mut self, id: savvagent_plugin::ContentBlockId, fragment: &str) {
+    pub fn handle_html_block_delta(
+        &mut self,
+        id: savvagent_plugin::ContentBlockId,
+        fragment: &str,
+    ) {
         if let Some(Entry::Canvas {
             source_preview,
             id: entry_id,
             ..
-        }) = self.entries.iter_mut().rfind(|e| {
-            matches!(e, Entry::Canvas { id: eid, .. } if *eid == id)
-        }) {
+        }) = self
+            .entries
+            .iter_mut()
+            .rfind(|e| matches!(e, Entry::Canvas { id: eid, .. } if *eid == id))
+        {
             if let Some(buf) = source_preview {
                 buf.push_str(fragment);
             }
@@ -1050,21 +1056,17 @@ impl App {
     /// async and handled separately in `main.rs` via
     /// [`App::try_create_canvas_renderer`].
     pub fn handle_html_block_stop(&mut self, id: savvagent_plugin::ContentBlockId) {
-        if let Some(entry) = self
+        if let Some(Entry::Canvas {
+            source,
+            source_preview,
+            ..
+        }) = self
             .entries
             .iter_mut()
             .rfind(|e| matches!(e, Entry::Canvas { id: eid, .. } if *eid == id))
+            && let Some(preview) = source_preview.take()
         {
-            if let Entry::Canvas {
-                source,
-                source_preview,
-                ..
-            } = entry
-            {
-                if let Some(preview) = source_preview.take() {
-                    *source = preview;
-                }
-            }
+            *source = preview;
         }
     }
 
@@ -1074,11 +1076,12 @@ impl App {
         self.entries
             .iter()
             .filter_map(|e| match e {
-                Entry::Canvas { id, source, source_preview, .. }
-                    if source_preview.is_none() =>
-                {
-                    Some((*id, source.clone()))
-                }
+                Entry::Canvas {
+                    id,
+                    source,
+                    source_preview,
+                    ..
+                } if source_preview.is_none() => Some((*id, source.clone())),
                 _ => None,
             })
             .collect()
@@ -2612,8 +2615,9 @@ mod tests {
     #[test]
     fn app_has_canvas_registry_field() {
         let app = fresh_app();
-        // Just confirm the field is accessible and starts empty.
-        assert!(!app.canvas_registry.image_protocol_available() || true, "field accessible");
+        // Just confirm the field is accessible; the bool value depends on the
+        // host terminal and is not meaningful in a unit test.
+        let _ = app.canvas_registry.image_protocol_available();
     }
 
     #[test]
@@ -2736,10 +2740,7 @@ mod tests {
                     Some("<!doctype html><body>hi</body>"),
                     "source_preview accumulates fragments during streaming"
                 );
-                assert!(
-                    source.is_empty(),
-                    "source must stay empty while streaming"
-                );
+                assert!(source.is_empty(), "source must stay empty while streaming");
             }
             _ => panic!("expected Canvas entry, got {entry:?}"),
         }
@@ -2759,8 +2760,7 @@ mod tests {
                     "source_preview must be None after block stop"
                 );
                 assert_eq!(
-                    source,
-                    "<!doctype html><body>hi</body>",
+                    source, "<!doctype html><body>hi</body>",
                     "source must hold the assembled HTML after block stop"
                 );
                 // Renderer creation happens asynchronously in main.rs after

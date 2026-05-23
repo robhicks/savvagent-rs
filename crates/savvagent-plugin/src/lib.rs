@@ -58,9 +58,8 @@ pub use screen::Screen;
 /// Content renderer trait surface (HTML canvas etc.).
 pub mod content;
 pub use content::{
-    ContentBlockId, ContentRenderer, FocusableElement, FocusKind, Frame,
-    InputEvent, InputOutcome, MouseButton, MouseEventKind,
-    MouseEventPortable, PixelFormat, PixelSize, Rect,
+    ContentBlockId, ContentRenderer, FocusKind, FocusableElement, Frame, InputEvent, InputOutcome,
+    MouseButton, MouseEventKind, MouseEventPortable, PixelFormat, PixelSize, Rect,
 };
 
 #[cfg(test)]
@@ -164,7 +163,10 @@ mod trait_smoke {
         };
         assert_eq!(frame.width, 2);
         assert_eq!(frame.bytes.len(), 8);
-        let size = PixelSize { width: 100, height: 50 };
+        let size = PixelSize {
+            width: 100,
+            height: 50,
+        };
         assert_eq!(size.width * size.height, 5_000);
     }
 }

@@ -32,9 +32,7 @@ pub fn parse_args(args: &[String]) -> Result<SaveCanvasArgs, String> {
     while i < args.len() {
         match args[i].as_str() {
             "--block" => {
-                let v = args
-                    .get(i + 1)
-                    .ok_or("--block requires an argument")?;
+                let v = args.get(i + 1).ok_or("--block requires an argument")?;
                 let n: u32 = v.parse().map_err(|_| format!("invalid block id: {v}"))?;
                 block = Some(ContentBlockId(n));
                 i += 2;
@@ -78,9 +76,9 @@ pub fn dispatch(
             .clone(),
     };
 
-    let path = args.path.unwrap_or_else(|| {
-        cwd.join(format!("savvagent-canvas-{}.html", id.0))
-    });
+    let path = args
+        .path
+        .unwrap_or_else(|| cwd.join(format!("savvagent-canvas-{}.html", id.0)));
     write_canvas(&path, &source).map_err(|e| format!("write failed: {e}"))?;
 
     let mut effects = Vec::new();
@@ -110,7 +108,14 @@ mod tests {
     #[test]
     fn parse_no_args_returns_defaults() {
         let a = parse_args(&[]).unwrap();
-        assert_eq!(a, SaveCanvasArgs { path: None, block: None, open: false });
+        assert_eq!(
+            a,
+            SaveCanvasArgs {
+                path: None,
+                block: None,
+                open: false
+            }
+        );
     }
 
     #[test]
@@ -157,13 +162,19 @@ mod tests {
         let cwd = tmp.path();
         let canvases = vec![(ContentBlockId(0), "<p>hi</p>".to_string())];
         let r = dispatch(
-            SaveCanvasArgs { path: None, block: None, open: true },
+            SaveCanvasArgs {
+                path: None,
+                block: None,
+                open: true,
+            },
             &canvases,
             cwd,
         )
         .unwrap();
         assert!(r.path.exists());
         assert_eq!(r.effects.len(), 1);
-        assert!(matches!(&r.effects[0], Effect::OpenUrl { target, .. } if *target == UrlTarget::SystemBrowser));
+        assert!(
+            matches!(&r.effects[0], Effect::OpenUrl { target, .. } if *target == UrlTarget::SystemBrowser)
+        );
     }
 }

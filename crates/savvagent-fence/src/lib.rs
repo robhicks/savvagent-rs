@@ -67,14 +67,9 @@ impl FenceParser {
         self.buf.push_str(fragment);
 
         // Walk line-by-line, but keep any trailing incomplete line in `buf`.
-        loop {
-            match self.buf.find('\n') {
-                Some(nl) => {
-                    let line: String = self.buf.drain(..=nl).collect();
-                    self.consume_line(&line, &mut out);
-                }
-                None => break,
-            }
+        while let Some(nl) = self.buf.find('\n') {
+            let line: String = self.buf.drain(..=nl).collect();
+            self.consume_line(&line, &mut out);
         }
 
         // Eagerly flush any safe prefix of the partial-line tail so per-token
@@ -108,7 +103,7 @@ impl FenceParser {
     }
 
     fn consume_line(&mut self, line: &str, out: &mut Vec<FenceChunk>) {
-        let trimmed = line.trim_end_matches(|c: char| c == '\n' || c == '\r');
+        let trimmed = line.trim_end_matches(['\n', '\r']);
         if !self.inside_canvas {
             if trimmed.trim_start() == "```html-canvas" {
                 self.inside_canvas = true;
