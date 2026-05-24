@@ -7,14 +7,12 @@ use serde::Deserialize;
 use crate::plugin::builtin::user_agents::spec::{AgentSpec, ToolsScope};
 
 #[derive(Debug)]
-#[allow(dead_code)] // Consumed by Task 18 (discovery) once wired through.
 pub struct FrontmatterResult {
     pub spec: AgentSpec,
     pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
-#[allow(dead_code)] // Fields read via serde; consumer wired in Task 18.
 struct RawFrontmatter {
     name: Option<String>,
     description: Option<String>,
@@ -24,13 +22,11 @@ struct RawFrontmatter {
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
-#[allow(dead_code)] // Consumed by Task 18 (discovery).
 enum ToolsField {
     Str(String),
     List(Vec<String>),
 }
 
-#[allow(dead_code)] // Consumed by Task 18 (discovery).
 pub fn parse(raw: &str, filename_slug: &str) -> Result<FrontmatterResult, String> {
     let (front, body) = split_frontmatter(raw)?;
     let raw_front: RawFrontmatter =

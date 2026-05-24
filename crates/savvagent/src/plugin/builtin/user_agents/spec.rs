@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields populated by Task 16 (frontmatter) + Task 17 (body).
+#[allow(dead_code)] // `description`, `tools`, `model` consumed by Tasks 19/20.
 pub struct AgentSpec {
     pub name: String,
     pub description: String,

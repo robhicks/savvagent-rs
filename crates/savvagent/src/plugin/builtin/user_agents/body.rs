@@ -6,13 +6,11 @@
 
 use std::path::Path;
 
-#[allow(dead_code)] // Consumed by Task 18 (discovery).
 pub struct BodyResult {
     pub body: String,
     pub warnings: Vec<String>,
 }
 
-#[allow(dead_code)] // Consumed by Task 18 (discovery).
 pub fn expand(body: &str, base_dir: &Path) -> BodyResult {
     let mut out = String::with_capacity(body.len());
     let mut warnings = Vec::new();
@@ -49,7 +47,10 @@ pub fn expand(body: &str, base_dir: &Path) -> BodyResult {
         }
     }
 
-    BodyResult { body: out, warnings }
+    BodyResult {
+        body: out,
+        warnings,
+    }
 }
 
 #[cfg(test)]
