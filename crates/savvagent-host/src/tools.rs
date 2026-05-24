@@ -588,11 +588,9 @@ impl ToolRegistry {
     ///
     /// If a handler is already registered for `spec.name`, it is replaced.
     ///
-    /// Currently unused outside tests; landed alongside the in-process
-    /// registration plumbing in preparation for the SubHost wiring
-    /// (Task 7+) that will register the `task` tool here.
-    #[allow(dead_code)]
-    pub(crate) async fn register_in_process_tool(
+    /// Called from the TUI by `apply_pending_in_process_tools` in
+    /// response to an `Effect::RegisterInProcessTool`.
+    pub async fn register_in_process_tool(
         &self,
         spec: ToolDef,
         handler: savvagent_plugin::InProcessToolHandlerArc,

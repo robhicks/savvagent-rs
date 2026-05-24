@@ -406,6 +406,18 @@ pub struct Host {
     /// installs itself via [`Host::set_pre_tool_gate`].
     pre_tool_gate:
         tokio::sync::RwLock<Option<std::sync::Arc<dyn crate::pre_tool_gate::PreToolUseGate>>>,
+    /// Stable identifier for this `Host` instance. Surfaced to in-process
+    /// tools via [`crate::ToolCallContext`] so subagent hooks can correlate
+    /// across nesting levels. Defaults to a fresh UUID v4 at construction
+    /// time; embedders that want to thread an external session id through
+    /// can set it via [`HostConfig::session_id`].
+    session_id: String,
+    /// `Weak<Self>` populated post-construction by [`Host::wire_self_weak`].
+    /// `run_turn_inner` upgrades it when dispatching an in-process tool so
+    /// the handler's [`crate::ToolCallContext::host`] receives a real
+    /// `Arc<Host>` reference back to this host. Tests that never register
+    /// in-process tools can skip the wiring without harm.
+    self_weak: std::sync::OnceLock<std::sync::Weak<Self>>,
 }
 
 struct SessionState {
@@ -547,6 +559,7 @@ impl Host {
             .collect();
 
         let initial_model = config.model.clone();
+        let config_session_id = config.session_id.clone();
         let mut startup_notes: Vec<String> = Vec::new();
         let routing_rules = match config.routing_rules_path.as_ref() {
             Some(path) => match crate::router::RoutingRules::load_from_path(path) {
@@ -589,6 +602,8 @@ impl Host {
                 crate::resources::ResourceCache::default(),
             )),
             pre_tool_gate: tokio::sync::RwLock::new(None),
+            session_id: config_session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            self_weak: std::sync::OnceLock::new(),
         };
         host.wire_self_into_resolver().await;
         // Spawn the resource pump. It owns the receiver, the cache handle,
@@ -663,6 +678,7 @@ impl Host {
         cancel_signal_map.insert(default_id.clone(), broadcast::channel(8).0);
 
         let initial_model = config.model.clone();
+        let config_session_id = config.session_id.clone();
         let mut startup_notes: Vec<String> = Vec::new();
         let routing_rules = match config.routing_rules_path.as_ref() {
             Some(path) => match crate::router::RoutingRules::load_from_path(path) {
@@ -705,6 +721,8 @@ impl Host {
                 crate::resources::ResourceCache::default(),
             )),
             pre_tool_gate: tokio::sync::RwLock::new(None),
+            session_id: config_session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            self_weak: std::sync::OnceLock::new(),
         };
         host.wire_self_into_resolver().await;
         // Spawn the resource pump. Mirrors the spawn in `Host::start`.
@@ -972,9 +990,22 @@ impl Host {
             }
         }
 
+        // Use the async `tool_defs()` aggregator so the model sees both
+        // stdio-served tools AND any in-process tools registered via
+        // `Effect::RegisterInProcessTool` (e.g. the `task` tool from
+        // the user-agents plugin). The previous code read `defs.clone()`
+        // directly, which only captured the stdio set and silently hid
+        // in-process tools from the parent model's tool list.
         let tool_defs = {
             let guard = self.tools.lock().await;
-            guard.as_ref().map(|t| t.defs.clone()).unwrap_or_default()
+            match guard.as_ref() {
+                Some(registry) => {
+                    let registry = Arc::clone(registry);
+                    drop(guard);
+                    registry.tool_defs().await
+                }
+                None => Vec::new(),
+            }
         };
 
         let mut tool_calls: Vec<ToolCall> = Vec::new();
@@ -1261,6 +1292,18 @@ impl Host {
                                 })
                                 .await;
                         }
+                        // Snapshot the registry up front so we can check
+                        // in-process membership before consulting the
+                        // pre-tool gate. Cloning the Arc is cheap; the
+                        // lock is dropped immediately after.
+                        let registry_arc: Option<Arc<crate::tools::ToolRegistry>> = {
+                            let guard = self.tools.lock().await;
+                            guard.as_ref().map(Arc::clone)
+                        };
+                        let is_in_process = match &registry_arc {
+                            Some(r) => r.in_process_has(&name).await,
+                            None => false,
+                        };
                         let outcome = if name == crate::tools::READ_RESOURCE_TOOL_NAME {
                             // Synthetic read_resource: parse uri, look up owner via
                             // resource cache, dispatch via the registry helper.
@@ -1295,6 +1338,44 @@ impl Host {
                         } else if let Some(blocked) = self.check_pre_tool_gate(&name, &input).await
                         {
                             blocked
+                        } else if is_in_process {
+                            // In-process tool — dispatch via
+                            // `call_in_process` with a `ToolCallContext`
+                            // so handlers can downcast to get back a
+                            // typed reference to the host + cancellation
+                            // token. `self_arc()` returns None if the
+                            // embedder forgot to call `wire_self_arc`;
+                            // in that case we surface a clear error
+                            // rather than fail open.
+                            match (registry_arc, self.self_arc()) {
+                                (Some(registry), Some(host_arc)) => {
+                                    let ctx_value =
+                                        std::sync::Arc::new(crate::tools::ToolCallContext {
+                                            host: host_arc,
+                                            subagent: None,
+                                            cancellation: tokio_util::sync::CancellationToken::new(
+                                            ),
+                                        });
+                                    let ctx: std::sync::Arc<dyn std::any::Any + Send + Sync> =
+                                        ctx_value;
+                                    match registry.call_in_process(&name, input.clone(), ctx).await
+                                    {
+                                        Ok(v) => crate::tools::ToolCallOutcome::success(match v {
+                                            serde_json::Value::String(s) => s,
+                                            other => other.to_string(),
+                                        }),
+                                        Err(e) => crate::tools::ToolCallOutcome::error(e),
+                                    }
+                                }
+                                (None, _) => crate::tools::ToolCallOutcome::error(
+                                    "in-process tool: registry unavailable".to_string(),
+                                ),
+                                (_, None) => crate::tools::ToolCallOutcome::error(
+                                    "in-process tool: Host::wire_self_arc was not called; \
+                                     cannot construct ToolCallContext"
+                                        .to_string(),
+                                ),
+                            }
                         } else {
                             let guard = self.tools.lock().await;
                             let registry = guard.as_ref().expect("tools registry present");
@@ -1963,6 +2044,38 @@ impl Host {
     ) {
         let mut g = self.pre_tool_gate.write().await;
         *g = Some(gate);
+    }
+
+    /// Stable session identifier for this `Host` instance. Set at
+    /// construction time via [`HostConfig::with_session_id`] or defaulted
+    /// to a fresh UUID v4. Surfaced to in-process tool handlers through
+    /// [`crate::ToolCallContext`] so subagent hooks can correlate
+    /// across nesting levels.
+    pub fn session_id(&self) -> String {
+        self.session_id.clone()
+    }
+
+    /// Register an `Arc<Self>` reference so that `run_turn_inner` can
+    /// hand a real `Arc<Host>` to in-process tool handlers via
+    /// [`crate::ToolCallContext::host`]. Must be called by the embedder
+    /// after wrapping the host in `Arc`. Idempotent — subsequent calls
+    /// after the first are no-ops.
+    ///
+    /// Embedders that never dispatch in-process tools can skip this
+    /// wiring; the parent dispatch path falls back to a synthesized
+    /// error result in that case.
+    pub fn wire_self_arc(self: &std::sync::Arc<Self>) {
+        let weak = std::sync::Arc::downgrade(self);
+        let _ = self.self_weak.set(weak);
+    }
+
+    /// Try to upgrade the stored `Weak<Self>` into an `Arc<Self>`.
+    /// Returns `None` when [`Self::wire_self_arc`] was never called, or
+    /// when every other `Arc<Self>` has been dropped (impossible while
+    /// `&self` is live since the caller necessarily holds one, but the
+    /// fallible API keeps the contract honest).
+    fn self_arc(&self) -> Option<std::sync::Arc<Self>> {
+        self.self_weak.get().and_then(|w| w.upgrade())
     }
 
     /// Borrow the currently-installed gate. Used by the dispatch path.

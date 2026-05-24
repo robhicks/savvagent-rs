@@ -72,14 +72,13 @@ impl InProcessToolHandler for TaskToolHandler {
         let next_depth = parent_depth + 1;
 
         // Reuse the parent's session id when this is a nested subagent
-        // so hooks can correlate across levels. The parent-level case
-        // (no `subagent`) defaults to empty for now; Task 21 wires the
-        // App's session id through the in-process dispatch path.
-        let parent_session_id = tool_ctx
-            .subagent
-            .as_ref()
-            .map(|s| s.parent_session_id.clone())
-            .unwrap_or_default();
+        // so hooks can correlate across levels. The top-level case
+        // (no `subagent`) reads the host's session_id field — wired
+        // through by Task 21 via the in-process dispatch path.
+        let parent_session_id = match tool_ctx.subagent.as_ref() {
+            Some(s) => s.parent_session_id.clone(),
+            None => tool_ctx.host.session_id(),
+        };
 
         let sub_ctx = SubagentContext {
             depth: next_depth,

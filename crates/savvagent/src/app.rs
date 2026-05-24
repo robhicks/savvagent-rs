@@ -491,6 +491,18 @@ pub struct App {
     /// `None` when no gate is queued.
     pub pending_gate: Option<std::sync::Arc<dyn savvagent_host::PreToolUseGate>>,
 
+    /// Queued by `Effect::RegisterInProcessTool`; drained by
+    /// `main.rs::apply_pending_in_process_tool` which has host-slot
+    /// access. Holds `(ToolDef, InProcessToolHandlerArc)` pairs so
+    /// multiple plugins can register tools in the same startup pass
+    /// (currently only `internal:user-agents` registers `task`, but the
+    /// vector keeps the door open for future registrants without a
+    /// follow-up refactor).
+    pub pending_in_process_tools: Vec<(
+        savvagent_protocol::ToolDef,
+        savvagent_plugin::InProcessToolHandlerArc,
+    )>,
+
     /// Queued by `Effect::ReloadRoutingRules`; drained by
     /// `main.rs::apply_pending_routing_reload`.
     pub pending_routing_reload: Option<PendingRoutingAction>,
@@ -685,6 +697,7 @@ impl App {
             pending_model_change: None,
             pending_pool_add: None,
             pending_gate: None,
+            pending_in_process_tools: Vec::new(),
             pending_routing_reload: None,
             pending_routing_show: None,
             pending_prompt_prefix: None,
