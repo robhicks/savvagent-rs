@@ -1943,7 +1943,21 @@ impl Host {
         let name = tool_name.to_string();
         let input_owned = input.clone();
         let gate_owned = gate.clone();
-        let join = tokio::spawn(async move { gate_owned.check(&name, &input_owned).await }).await;
+        // Propagate the `SUBAGENT_NAME` task-local across the `tokio::spawn`
+        // boundary — task-locals do not auto-inherit into spawned tasks, so
+        // read the current value here and re-enter a scope inside the
+        // spawned future. Outside any subagent scope this is `None` and
+        // the re-entered scope is harmless.
+        let subagent = crate::subhost::SUBAGENT_NAME
+            .try_with(|v| v.clone())
+            .ok()
+            .flatten();
+        let join = tokio::spawn(async move {
+            crate::subhost::SUBAGENT_NAME
+                .scope(subagent, gate_owned.check(&name, &input_owned))
+                .await
+        })
+        .await;
         match join {
             Ok(crate::pre_tool_gate::PreToolDecision::Allow) => None,
             Ok(crate::pre_tool_gate::PreToolDecision::Block(reason)) => Some(

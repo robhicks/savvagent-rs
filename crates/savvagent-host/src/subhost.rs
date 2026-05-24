@@ -15,6 +15,19 @@ use crate::Host;
 use crate::scoped_registry::ScopedToolRegistry;
 use crate::tools::{NetOverride, SubagentContext, ToolCallContext, ToolCallOutcome};
 
+tokio::task_local! {
+    /// The name of the currently-executing subagent, if any. Set by
+    /// [`SubHost::dispatch_tool`] for the lifetime of the gate +
+    /// dispatch call so cross-crate plugins can read the value
+    /// without an explicit signature.
+    ///
+    /// Carried as `Option<String>` so the absence-of-subagent case
+    /// (parent turn) is `Some(None)` inside a scope and `Err(_)`
+    /// outside any scope, both of which `try_with(...).ok().flatten()`
+    /// collapses to `None`.
+    pub static SUBAGENT_NAME: Option<String>;
+}
+
 const DEFAULT_MAX_DEPTH: u8 = 3;
 
 /// Read `SAVVAGENT_AGENT_MAX_DEPTH` (default 3). Parse failures fall
@@ -220,6 +233,12 @@ impl SubHost {
     /// Dispatch a single tool call. Honors the per-subagent allowlist,
     /// the parent's `PreToolUseGate`, and the in-process vs. stdio
     /// routing on the parent's `ToolRegistry`.
+    ///
+    /// The allowlist check runs *outside* [`SUBAGENT_NAME`]'s scope —
+    /// it's a purely local guard that doesn't reach any cross-crate
+    /// hook surface, and keeping it out of the scope makes the
+    /// task-local's lifetime exactly the surface where it is observed
+    /// (the gate's payload builder and any in-process tool handler).
     async fn dispatch_tool(&self, call: &PendingToolCall) -> savvagent_protocol::ContentBlock {
         use savvagent_protocol::ContentBlock;
 
@@ -234,6 +253,17 @@ impl SubHost {
                 is_error: true,
             };
         }
+
+        let agent = Some(self.ctx.agent_name.clone());
+        SUBAGENT_NAME.scope(agent, self.dispatch_inner(call)).await
+    }
+
+    /// Gate + dispatch portion of [`SubHost::dispatch_tool`]. Always
+    /// invoked inside a [`SUBAGENT_NAME`] scope, so any code on its
+    /// call path (the parent's `PreToolUseGate`, in-process tool
+    /// handlers) can read the subagent name via the task-local.
+    async fn dispatch_inner(&self, call: &PendingToolCall) -> savvagent_protocol::ContentBlock {
+        use savvagent_protocol::ContentBlock;
 
         // 2. PreToolUseGate — shared with the parent's gate.
         if let Some(blocked) = self
