@@ -39,7 +39,7 @@ impl PreToolUseGate for UserHooksPreToolGate {
             transcript_path: &transcript,
             cwd: &self.project_root,
         };
-        let payload = payload::pre_tool_use(&ctx, tool_name, input);
+        let payload = payload::pre_tool_use(&ctx, tool_name, input, None);
         for group in groups {
             if !group.matcher.is_match(tool_name) {
                 continue;

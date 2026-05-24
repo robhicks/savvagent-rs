@@ -104,6 +104,7 @@ impl UserHooksPlugin {
             "<unknown>",
             &json!({}),
             &json!({ "success": success }),
+            None,
         );
 
         let mut effects: Vec<Effect> = Vec::new();
