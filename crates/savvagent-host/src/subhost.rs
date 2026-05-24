@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Host;
 use crate::scoped_registry::ScopedToolRegistry;
-use crate::tools::SubagentContext;
+use crate::tools::{NetOverride, SubagentContext, ToolCallContext, ToolCallOutcome};
 
 /// Sub-Host configuration. Built by `TaskToolHandler` from an
 /// `AgentSpec` and a parent `ToolCallContext`.
@@ -68,19 +68,231 @@ impl SubHost {
 
     /// Drive the subagent loop to its `end_turn`. Returns the final
     /// assistant text or an error.
-    #[allow(dead_code)] // Wired up in Task 7.
+    ///
+    /// Mirrors `Host::run_turn_inner`'s shape but with:
+    ///
+    /// - A local message vector (the subagent's history is private —
+    ///   it never touches the parent's `SessionState`).
+    /// - A per-call tool allowlist (`ScopedToolRegistry`).
+    /// - A child `CancellationToken` so the parent can abort the
+    ///   subagent without affecting its own turn.
+    /// - `events: None` on `provider.complete` — Task 23 wires
+    ///   private subagent streaming.
+    #[allow(dead_code)] // Wired up to a real call site in Task 20.
     pub async fn run_subagent(&self, prompt: String) -> Result<String, SubHostError> {
-        let _ = prompt;
-        Err(SubHostError::Unimplemented)
+        use savvagent_protocol::{CompleteRequest, ContentBlock, Message, Role, StopReason};
+
+        let mut messages: Vec<Message> = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: prompt }],
+        }];
+
+        // Take a single lease for the whole subagent loop. The lease's
+        // RAII guard keeps the provider client alive even if the parent
+        // pool entry is drained concurrently — same discipline as
+        // `Host::run_turn_inner`.
+        let lease = self
+            .parent
+            .active_provider_lease()
+            .await
+            .map_err(|e| SubHostError::Provider(e.to_string()))?;
+        let client = Arc::clone(lease.client());
+
+        let model = match &self.model {
+            Some(m) => m.clone(),
+            None => self.parent.current_model_snapshot().await,
+        };
+
+        loop {
+            if self.cancellation.is_cancelled() {
+                return Err(SubHostError::Cancelled);
+            }
+
+            let req = CompleteRequest {
+                model: model.clone(),
+                messages: messages.clone(),
+                system: Some(self.system_prompt.clone()),
+                tools: self.tool_defs.clone(),
+                temperature: None,
+                top_p: None,
+                max_tokens: self.parent.config().max_tokens,
+                stop_sequences: Vec::new(),
+                stream: false,
+                thinking: None,
+                metadata: None,
+            };
+
+            let resp = client
+                .complete(req, None)
+                .await
+                .map_err(|e| SubHostError::Provider(e.to_string()))?;
+
+            // Echo the assistant turn into local history so the next
+            // `complete` sees it.
+            messages.push(Message {
+                role: Role::Assistant,
+                content: resp.content.clone(),
+            });
+
+            match resp.stop_reason {
+                StopReason::EndTurn => return finalize_text(&resp.content),
+                StopReason::ToolUse => {
+                    let calls = extract_tool_calls(&resp.content);
+                    if calls.is_empty() {
+                        // Provider quirk: `stop_reason == ToolUse` but no
+                        // `tool_use` block. Treat as end_turn (content is
+                        // authoritative).
+                        return finalize_text(&resp.content);
+                    }
+                    let mut results: Vec<ContentBlock> = Vec::with_capacity(calls.len());
+                    for call in &calls {
+                        results.push(self.dispatch_tool(call).await);
+                    }
+                    messages.push(Message {
+                        role: Role::User,
+                        content: results,
+                    });
+                }
+                other => {
+                    return Err(SubHostError::Provider(format!(
+                        "subagent: unexpected stop_reason {other:?}"
+                    )));
+                }
+            }
+        }
+    }
+
+    /// Dispatch a single tool call. Honors the per-subagent allowlist,
+    /// the parent's `PreToolUseGate`, and the in-process vs. stdio
+    /// routing on the parent's `ToolRegistry`.
+    async fn dispatch_tool(&self, call: &PendingToolCall) -> savvagent_protocol::ContentBlock {
+        use savvagent_protocol::ContentBlock;
+
+        // 1. Per-subagent allowlist check. A model that hallucinates a
+        //    tool name from training data trips here.
+        if !self.tools.allows(&call.name) {
+            return ContentBlock::ToolResult {
+                tool_use_id: call.id.clone(),
+                content: vec![ContentBlock::Text {
+                    text: format!("{} not available to this subagent", call.name),
+                }],
+                is_error: true,
+            };
+        }
+
+        // 2. PreToolUseGate — shared with the parent's gate.
+        if let Some(blocked) = self
+            .parent
+            .check_pre_tool_gate(&call.name, &call.input)
+            .await
+        {
+            return outcome_to_tool_result(&call.id, blocked);
+        }
+
+        // 3. Dispatch on the parent's `ToolRegistry`. In-process tools
+        //    take an `Arc<ToolCallContext>` so the handler can see we
+        //    are running inside a subagent.
+        let registry = self.tools.inner();
+        if registry.in_process_has(&call.name).await {
+            let ctx_value = Arc::new(ToolCallContext {
+                host: Arc::clone(&self.parent),
+                subagent: Some(self.ctx.clone()),
+                cancellation: self.cancellation.child_token(),
+            });
+            let ctx: Arc<dyn std::any::Any + Send + Sync> = ctx_value;
+            match registry
+                .call_in_process(&call.name, call.input.clone(), ctx)
+                .await
+            {
+                Ok(v) => ContentBlock::ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: vec![ContentBlock::Text {
+                        text: match v {
+                            serde_json::Value::String(s) => s,
+                            other => other.to_string(),
+                        },
+                    }],
+                    is_error: false,
+                },
+                Err(e) => ContentBlock::ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: vec![ContentBlock::Text { text: e }],
+                    is_error: true,
+                },
+            }
+        } else {
+            let outcome = registry
+                .call_with_bash_net_override(&call.name, call.input.clone(), NetOverride::Inherit)
+                .await;
+            outcome_to_tool_result(&call.id, outcome)
+        }
+    }
+}
+
+/// Internal: a pending tool invocation parsed out of an assistant
+/// response. Mirrors `ContentBlock::ToolUse` but as an owned struct so
+/// we can pass it through the dispatch helpers without borrowing the
+/// content vector.
+struct PendingToolCall {
+    id: String,
+    name: String,
+    input: serde_json::Value,
+}
+
+/// Internal: pull every `ToolUse` block out of an assistant response.
+fn extract_tool_calls(content: &[savvagent_protocol::ContentBlock]) -> Vec<PendingToolCall> {
+    use savvagent_protocol::ContentBlock;
+    content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, input } => Some(PendingToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Internal: concatenate every `Text` block in `content` with newline
+/// separators. Errors with [`SubHostError::EmptyOutput`] if no text
+/// blocks were present — the subagent contract requires a non-empty
+/// final answer.
+fn finalize_text(content: &[savvagent_protocol::ContentBlock]) -> Result<String, SubHostError> {
+    use savvagent_protocol::ContentBlock;
+    let mut out = String::new();
+    for block in content {
+        if let ContentBlock::Text { text } = block {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+    }
+    if out.is_empty() {
+        Err(SubHostError::EmptyOutput)
+    } else {
+        Ok(out)
+    }
+}
+
+/// Internal: convert a [`ToolCallOutcome`] into a `tool_result`
+/// content block tagged with `tool_use_id`.
+fn outcome_to_tool_result(id: &str, outcome: ToolCallOutcome) -> savvagent_protocol::ContentBlock {
+    use savvagent_protocol::ContentBlock;
+    ContentBlock::ToolResult {
+        tool_use_id: id.to_string(),
+        content: vec![ContentBlock::Text {
+            text: outcome.payload,
+        }],
+        is_error: outcome.is_error,
     }
 }
 
 /// Errors produced by [`SubHost::run_subagent`].
 #[derive(Debug, thiserror::Error)]
 pub enum SubHostError {
-    /// Placeholder for Task 6 — the loop body lands in Task 7.
-    #[error("subagent loop not yet implemented")]
-    Unimplemented,
     /// The subagent's `CancellationToken` was tripped.
     #[error("subagent cancelled")]
     Cancelled,
@@ -105,11 +317,50 @@ mod tests {
     #[test]
     fn sub_host_error_variants_compile() {
         // Smoke test: each variant constructs.
-        let _ = SubHostError::Unimplemented;
         let _ = SubHostError::Cancelled;
         let _ = SubHostError::DepthExceeded;
         let _ = SubHostError::EmptyOutput;
         let _ = SubHostError::Provider("p".into());
         let _ = SubHostError::Tool("t".into());
+    }
+
+    #[test]
+    fn finalize_text_concatenates_text_blocks() {
+        use savvagent_protocol::ContentBlock;
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "hello".into(),
+            },
+            ContentBlock::Text {
+                text: "world".into(),
+            },
+        ];
+        let out = finalize_text(&blocks).expect("text");
+        assert_eq!(out, "hello\nworld");
+    }
+
+    #[test]
+    fn finalize_text_empty_blocks_errors() {
+        let out = finalize_text(&[]);
+        assert!(matches!(out, Err(SubHostError::EmptyOutput)));
+    }
+
+    #[test]
+    fn extract_tool_calls_filters_text() {
+        use savvagent_protocol::ContentBlock;
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "thinking".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "1".into(),
+                name: "tool".into(),
+                input: serde_json::json!({}),
+            },
+        ];
+        let calls = extract_tool_calls(&blocks);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "tool");
+        assert_eq!(calls[0].id, "1");
     }
 }

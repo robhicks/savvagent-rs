@@ -1652,6 +1652,31 @@ impl Host {
         guard.as_ref().map(Arc::clone)
     }
 
+    /// Acquire a [`ProviderLease`] on the currently-active provider.
+    /// Used by [`crate::SubHost`] to drive its own turn loop on the
+    /// parent's pool. Mirrors the lease-acquisition discipline in
+    /// `run_turn_inner`: the pool read guard is taken and dropped
+    /// before any `.await`, so callers can hold the lease across
+    /// `provider.complete` without blocking pool writers.
+    ///
+    /// Returns [`HostError::NoActiveProvider`] when the pool has no
+    /// entry for the active provider id (e.g. mid-disconnect).
+    pub(crate) async fn active_provider_lease(&self) -> Result<ProviderLease, HostError> {
+        let active = self.active_provider.read().await.clone();
+        let pool = self.pool.read().await;
+        let Some(entry) = pool.get(&active) else {
+            return Err(HostError::NoActiveProvider);
+        };
+        Ok(entry.lease())
+    }
+
+    /// Snapshot the model id forwarded in every `CompleteRequest`. Used
+    /// by [`crate::SubHost`] when a subagent doesn't override the model
+    /// in its frontmatter.
+    pub(crate) async fn current_model_snapshot(&self) -> String {
+        self.current_model.read().await.clone()
+    }
+
     /// The currently-active provider id. Turns are routed to this entry.
     pub async fn active_provider(&self) -> savvagent_protocol::ProviderId {
         self.active_provider.read().await.clone()
