@@ -12,10 +12,6 @@
 #![warn(missing_docs)]
 
 mod canvas;
-// Consumed by Phase 2 Task 7 (`HtmlCanvas::focusable_elements`); allow
-// dead_code in the interim so CI (-D warnings) stays green between
-// per-task PRs in this phase.
-#[allow(dead_code)]
 mod focus;
 mod subset;
 

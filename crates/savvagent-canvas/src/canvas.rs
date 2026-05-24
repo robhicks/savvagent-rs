@@ -4,13 +4,39 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use savvagent_plugin::{ContentBlockId, ContentRenderer, Frame, PixelFormat, PixelSize};
+use savvagent_plugin::{
+    ContentBlockId, ContentRenderer, FocusableElement, Frame, PixelFormat, PixelSize,
+};
+
+use crate::focus;
 
 /// Static HTML canvas renderer. Phase 1: render-only; Phase 2 adds
 /// event dispatch + focus + freeze/thaw.
 pub struct HtmlCanvas {
     id: ContentBlockId,
     source: String,
+    /// Cached focusable-element list from the most recent render.
+    /// `None` before the first render.
+    focusable_cache: Option<Vec<(u32, FocusableElement)>>,
+    /// Index into `focusable_cache` that's currently focused.
+    focused: Option<u32>,
+    /// Phase 2: frozen flag (wired in Task 8, declared here so the field exists).
+    #[allow(dead_code)]
+    frozen: bool,
+    // NOTE on the "retain Blitz document on self" item in the Task 7 plan:
+    // `blitz_html::HtmlDocument` contains `dyn HtmlParserProvider` and
+    // `dyn FontMetricsProvider` trait objects that are neither `Send` nor
+    // `Sync`. `ContentRenderer: Send` therefore makes it impossible to
+    // store the document as a field of `HtmlCanvas` without `unsafe impl
+    // Send`, which is forbidden by `#![forbid(unsafe_code)]` at the crate
+    // root. We keep the parse-on-every-render model from Phase 1 and
+    // snapshot only the post-render data we actually need (the focusable
+    // cache below). The downstream tasks that depend on retained DOM
+    // state (Task 8 freeze/thaw, Task 13 dispatch, Task 16 restore) will
+    // need to either (a) wrap document access in a Send-safe shim that
+    // pins it to a dedicated thread, or (b) reconstruct state from a
+    // serializable snapshot rather than retaining the document. That
+    // design decision is deferred to those tasks.
 }
 
 impl fmt::Debug for HtmlCanvas {
@@ -18,6 +44,12 @@ impl fmt::Debug for HtmlCanvas {
         f.debug_struct("HtmlCanvas")
             .field("id", &self.id)
             .field("source_len", &self.source.len())
+            .field(
+                "focusable_cache_len",
+                &self.focusable_cache.as_ref().map(Vec::len),
+            )
+            .field("focused", &self.focused)
+            .field("frozen", &self.frozen)
             .finish()
     }
 }
@@ -29,6 +61,9 @@ impl HtmlCanvas {
         Self {
             id,
             source: source.to_string(),
+            focusable_cache: None,
+            focused: None,
+            frozen: false,
         }
     }
 
@@ -45,18 +80,52 @@ impl ContentRenderer for HtmlCanvas {
     }
 
     fn render(&mut self, size: PixelSize) -> Frame {
-        render_html_to_rgba(&self.source, size.width)
+        render_html_to_rgba(self, size.width)
+    }
+
+    fn focusable_elements(&self) -> Vec<FocusableElement> {
+        self.focusable_cache
+            .as_ref()
+            .map(|v| v.iter().map(|(_, fe)| fe.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn focused_index(&self) -> Option<u32> {
+        self.focused
+    }
+
+    fn set_focus(&mut self, index: Option<u32>) {
+        if let Some(i) = index {
+            let len = self
+                .focusable_cache
+                .as_ref()
+                .map(|v| v.len() as u32)
+                .unwrap_or(0);
+            if i >= len {
+                self.focused = None;
+                return;
+            }
+        }
+        self.focused = index;
     }
 }
 
-/// Headless Blitz pipeline: parse `source` → resolve at the requested
-/// width → measure natural height → repaint at exact natural height →
-/// return an Rgba8 [`Frame`].
+/// Headless Blitz pipeline: parse `canvas.source` → resolve at the
+/// requested width → measure natural height → repaint at exact natural
+/// height → return an Rgba8 [`Frame`]. After the paint, refresh
+/// `canvas.focusable_cache` from the just-resolved layout so
+/// `focusable_elements()` reflects what's on screen.
+///
+/// Refactor choice (Task 7): we *don't* retain the `HtmlDocument` on
+/// `self`. See the comment on `HtmlCanvas` — Blitz's document is
+/// `!Send`, and the `ContentRenderer: Send` bound prevents storing it
+/// in a `Send` renderer without `unsafe impl`. The focusable cache
+/// (which is `Send`) is the only post-render artefact we keep.
 ///
 /// The implementation follows the Phase 0 spike notes
 /// (`docs/superpowers/notes/2026-05-21-blitz-spike.md` §"Static
 /// rendering" / §"Pixel-buffer access" / §"Natural height").
-fn render_html_to_rgba(source: &str, width: u32) -> Frame {
+fn render_html_to_rgba(canvas: &mut HtmlCanvas, width: u32) -> Frame {
     use anyrender::{ImageRenderer as _, PaintScene as _};
     use anyrender_vello_cpu::VelloCpuImageRenderer;
     use blitz_dom::{BaseDocument, DocumentConfig, StyleThreading};
@@ -82,7 +151,7 @@ fn render_html_to_rgba(source: &str, width: u32) -> Frame {
 
     // ---- Measure pass: parse + resolve at requested width to get natural height.
     let mut document = HtmlDocument::from_html(
-        source,
+        &canvas.source,
         DocumentConfig {
             base_url: None,
             net_provider: None,
@@ -171,6 +240,27 @@ fn render_html_to_rgba(source: &str, width: u32) -> Frame {
         out
     };
 
+    // Refresh the focusable-element cache from the just-resolved layout so
+    // `focusable_elements()` reflects what's on screen. We extract this
+    // before `document` drops; the cache is `Send` even though the
+    // document itself isn't.
+    {
+        let base: &BaseDocument = document.as_ref();
+        canvas.focusable_cache = Some(focus::collect(base));
+    }
+    // Clamp `focused` to the new cache length so a removed element doesn't
+    // leave a stale out-of-range index behind across re-renders.
+    if let Some(i) = canvas.focused {
+        let len = canvas
+            .focusable_cache
+            .as_ref()
+            .map(|v| v.len() as u32)
+            .unwrap_or(0);
+        if i >= len {
+            canvas.focused = None;
+        }
+    }
+
     // Sanity-check the buffer length matches the trait contract.
     // anyrender_vello_cpu produces RGBA8 row-major top-down, which is
     // exactly what `PixelFormat::Rgba8` is defined to be.
@@ -219,5 +309,42 @@ mod tests {
     fn canvas_id_round_trips() {
         let c = HtmlCanvas::new(ContentBlockId(42), TINY_HTML);
         assert_eq!(c.id(), ContentBlockId(42));
+    }
+
+    #[test]
+    fn focusable_elements_returns_walk_results() {
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(1),
+            "<!doctype html><body><a href='x'>link</a><button>b</button></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+        let elements = c.focusable_elements();
+        assert_eq!(elements.len(), 2, "got {elements:#?}");
+        assert_ne!(elements[0].id, elements[1].id);
+    }
+
+    #[test]
+    fn set_focus_updates_focused_index() {
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(2),
+            "<!doctype html><body><a href='x'>l1</a><a href='y'>l2</a></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+        assert_eq!(c.focused_index(), None);
+        c.set_focus(Some(1));
+        assert_eq!(c.focused_index(), Some(1));
+        c.set_focus(None);
+        assert_eq!(c.focused_index(), None);
+    }
+
+    #[test]
+    fn set_focus_out_of_range_clears() {
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(3),
+            "<!doctype html><body><a href='x'>l1</a></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+        c.set_focus(Some(99));
+        assert_eq!(c.focused_index(), None, "out-of-range set_focus should clear");
     }
 }
