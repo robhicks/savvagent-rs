@@ -895,9 +895,10 @@ impl App {
                     .push(Entry::Note(format!("resource updated: {uri} — {summary}")));
             }
             TurnEvent::SubagentStop { .. } => {
-                // No UI side-effect today. Task 13 wires this through the
-                // TurnEvent→HostEvent translator so the user_hooks plugin
-                // can fire a `SubagentStop` shell hook.
+                // Translated to HostEvent::SubagentStop by
+                // translate_turn_event_to_host_event so the user_hooks
+                // plugin sees it. No TUI-side rendering needed (the
+                // collapsible block work lands in Task 22).
             }
         }
     }

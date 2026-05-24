@@ -82,11 +82,6 @@ pub fn stop(ctx: &HookContext<'_>, stop_hook_active: bool) -> Value {
 /// cleanly with `end_turn`. The `agent_name` identifies which
 /// subagent definition produced the run; `stop_hook_active` mirrors
 /// the parent-turn `Stop` flag so hooks can detect loop-back chains.
-///
-/// Wired into dispatch in Task 13 — `#[allow(dead_code)]` is the
-/// temporary bridge until the user_hooks plugin subscribes to
-/// `HostKind::SubagentStop`.
-#[allow(dead_code)]
 pub fn subagent_stop(ctx: &HookContext<'_>, agent_name: &str, stop_hook_active: bool) -> Value {
     base(ctx, HookEvent::SubagentStop).extend(&[
         ("subagent", json!(agent_name)),
