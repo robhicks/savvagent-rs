@@ -14,4 +14,7 @@
 mod canvas;
 mod subset;
 
+/// Cell ↔ pixel coordinate translation helpers.
+pub mod coords;
 pub use canvas::HtmlCanvas;
+pub use coords::{cell_to_pixel, contains_cell, CellPixelSize, CellRect};
