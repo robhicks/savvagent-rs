@@ -44,3 +44,43 @@ impl AgentIndex {
         names
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::builtin::user_agents::spec::{AgentSpec, ToolsScope};
+
+    fn agent(name: &str) -> AgentSpec {
+        AgentSpec {
+            name: name.into(),
+            description: format!("{name} agent"),
+            tools: ToolsScope::Inherit,
+            model: None,
+            body: format!("you are {name}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_makes_agents_visible() {
+        let index = AgentIndex::empty();
+        index.replace(vec![agent("a"), agent("b")]).await;
+        assert_eq!(index.len().await, 2);
+        let a = index.get("a").await.expect("agent a");
+        assert_eq!(a.description, "a agent");
+    }
+
+    #[tokio::test]
+    async fn names_snapshot_returns_sorted_list() {
+        let index = AgentIndex::empty();
+        index.replace(vec![agent("b"), agent("a"), agent("c")]).await;
+        let names = index.names_snapshot().await;
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn empty_index_reports_is_empty() {
+        let index = AgentIndex::empty();
+        assert!(index.is_empty().await);
+        assert_eq!(index.len().await, 0);
+    }
+}
