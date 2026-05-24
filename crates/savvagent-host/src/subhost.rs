@@ -15,6 +15,17 @@ use crate::Host;
 use crate::scoped_registry::ScopedToolRegistry;
 use crate::tools::{NetOverride, SubagentContext, ToolCallContext, ToolCallOutcome};
 
+const DEFAULT_MAX_DEPTH: u8 = 3;
+
+/// Read `SAVVAGENT_AGENT_MAX_DEPTH` (default 3). Parse failures fall
+/// back to the default with no warning.
+pub fn max_depth_from_env() -> u8 {
+    std::env::var("SAVVAGENT_AGENT_MAX_DEPTH")
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(DEFAULT_MAX_DEPTH)
+}
+
 /// Sub-Host configuration. Built by `TaskToolHandler` from an
 /// `AgentSpec` and a parent `ToolCallContext`.
 ///
@@ -41,8 +52,13 @@ impl SubHost {
     /// (typically `TaskToolHandler`) own the filtering policy.
     ///
     /// Async because pulling the parent's `Arc<ToolRegistry>` out of
-    /// its `Mutex<Option<_>>` requires the async lock. If the parent
-    /// has already been shut down this returns `None`.
+    /// its `Mutex<Option<_>>` requires the async lock.
+    ///
+    /// Returns:
+    /// - `Err(SubHostError::DepthExceeded)` if `ctx.depth` exceeds
+    ///   [`max_depth_from_env`].
+    /// - `Err(SubHostError::HostShutDown)` if the parent host has
+    ///   already been shut down (no `Arc<ToolRegistry>` to share).
     #[allow(dead_code)] // Constructed by TaskToolHandler in Task 20.
     pub async fn new(
         parent: Arc<Host>,
@@ -52,10 +68,17 @@ impl SubHost {
         allowed_names: HashSet<String>,
         tool_defs: Vec<ToolDef>,
         cancellation: CancellationToken,
-    ) -> Option<Self> {
-        let registry = parent.tool_registry_arc().await?;
+    ) -> Result<Self, SubHostError> {
+        // Depth check BEFORE pulling the registry (cheaper to fail fast).
+        if ctx.depth > max_depth_from_env() {
+            return Err(SubHostError::DepthExceeded);
+        }
+        let registry = parent
+            .tool_registry_arc()
+            .await
+            .ok_or(SubHostError::HostShutDown)?;
         let tools = ScopedToolRegistry::new(registry, allowed_names);
-        Some(Self {
+        Ok(Self {
             parent,
             ctx,
             system_prompt,
@@ -302,6 +325,9 @@ pub enum SubHostError {
     /// The subagent reached `end_turn` without producing assistant text.
     #[error("subagent produced no output")]
     EmptyOutput,
+    /// The parent host has been shut down — no `Arc<ToolRegistry>` to share.
+    #[error("parent host has been shut down")]
+    HostShutDown,
     /// The provider client returned an error.
     #[error("provider error: {0}")]
     Provider(String),
@@ -320,6 +346,7 @@ mod tests {
         let _ = SubHostError::Cancelled;
         let _ = SubHostError::DepthExceeded;
         let _ = SubHostError::EmptyOutput;
+        let _ = SubHostError::HostShutDown;
         let _ = SubHostError::Provider("p".into());
         let _ = SubHostError::Tool("t".into());
     }

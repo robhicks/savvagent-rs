@@ -63,7 +63,7 @@ pub use session::{
     TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError, TranscriptFile,
     TurnEvent, TurnOutcome,
 };
-pub use subhost::{SubHost, SubHostError};
+pub use subhost::{SubHost, SubHostError, max_depth_from_env};
 pub use tools::{BashNetContext, BashNetResolver, NetOverride, SubagentContext, ToolCallContext};
 
 /// `PreToolUseGate` trait and `PreToolDecision` enum.

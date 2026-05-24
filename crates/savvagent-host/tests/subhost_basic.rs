@@ -14,8 +14,8 @@ use savvagent_host::{
 };
 use savvagent_mcp::ProviderClient;
 use savvagent_protocol::{
-    CompleteRequest, CompleteResponse, ContentBlock, ListModelsResponse, ProviderError,
-    ProviderId, StopReason, StreamEvent,
+    CompleteRequest, CompleteResponse, ContentBlock, ListModelsResponse, ProviderError, ProviderId,
+    StopReason, StreamEvent,
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -106,11 +106,8 @@ async fn subhost_returns_text_on_end_turn() {
         cancellation,
     )
     .await
-    .expect("SubHost::new succeeds");
+    .expect("SubHost::new returns Ok");
 
-    let result = sub
-        .run_subagent("hi".into())
-        .await
-        .expect("subagent ok");
+    let result = sub.run_subagent("hi".into()).await.expect("subagent ok");
     assert_eq!(result, "hello from subagent");
 }
