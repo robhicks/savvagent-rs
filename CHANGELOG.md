@@ -8,6 +8,8 @@ boundary changes and PATCH captures fixes).
 
 ## [Unreleased]
 
+## 0.17.0 - 2026-05-23
+
 ### Added
 - User-defined slash commands. Drop markdown files under
   `.savvagent/commands/` (project), `.claude/commands/` (project-claude),
