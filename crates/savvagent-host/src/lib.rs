@@ -36,6 +36,7 @@ mod permissions;
 mod project;
 mod provider;
 mod sandbox;
+mod scoped_registry;
 pub mod sensitive_paths;
 mod session;
 mod tools;
