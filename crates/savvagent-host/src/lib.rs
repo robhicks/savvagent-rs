@@ -61,7 +61,7 @@ pub use session::{
     TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError, TranscriptFile,
     TurnEvent, TurnOutcome,
 };
-pub use tools::{BashNetContext, BashNetResolver, NetOverride};
+pub use tools::{BashNetContext, BashNetResolver, NetOverride, SubagentContext, ToolCallContext};
 
 /// `PreToolUseGate` trait and `PreToolDecision` enum.
 pub mod pre_tool_gate;

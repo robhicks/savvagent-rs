@@ -36,6 +36,7 @@ use rmcp::{
 use savvagent_protocol::ToolDef;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::ToolEndpoint;
 use crate::logging::tool_stderr_log_file;
@@ -102,6 +103,34 @@ impl<'a> BashNetContext<'a> {
             command: Some(command),
         }
     }
+}
+
+/// Per-subagent context passed through the in-process tool path.
+/// Carried inside [`ToolCallContext::subagent`] as an `Option`: `None`
+/// means the call originates from the parent's main turn loop.
+#[derive(Debug, Clone)]
+pub struct SubagentContext {
+    /// Nesting depth. Parent's first `task` call → depth 1; that
+    /// subagent's `task` call → depth 2; and so on. Capped at
+    /// `SAVVAGENT_AGENT_MAX_DEPTH` (default 3).
+    pub depth: u8,
+    /// The agent name (slug) currently executing.
+    pub agent_name: String,
+    /// The parent (top-level) session ID. Stable across subagent
+    /// nesting so hooks can correlate across levels.
+    pub parent_session_id: String,
+}
+
+/// Concrete context passed to `InProcessToolHandler::call`. Handlers
+/// downcast `Arc<dyn Any>` to `Arc<ToolCallContext>` to obtain this.
+pub struct ToolCallContext {
+    /// The parent `Host`. In-process handlers use this to clone the
+    /// provider client, tool registry, gate, permissions, etc.
+    pub host: Arc<crate::Host>,
+    /// `Some` iff this call originates from a Sub-Host.
+    pub subagent: Option<SubagentContext>,
+    /// Cancellation token; child of the parent turn's token.
+    pub cancellation: CancellationToken,
 }
 
 /// Resolver invoked by [`ToolRegistry::call_with_bash_net_override`] when a
@@ -1225,5 +1254,27 @@ mod tool_call_outcome_tests {
             "transport-error payload must self-identify: {}",
             outcome.payload
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subagent_context_carries_depth_and_name() {
+        let ctx = SubagentContext {
+            depth: 1,
+            agent_name: "code-reviewer".into(),
+            parent_session_id: "abc-123".into(),
+        };
+        assert_eq!(ctx.depth, 1);
+        assert_eq!(ctx.agent_name, "code-reviewer");
+    }
+
+    #[test]
+    fn tool_call_context_struct_compiles() {
+        fn _accepts_ctx(_ctx: ToolCallContext) {}
+        // Type-only smoke; no construction (requires Arc<Host> which is impractical here).
     }
 }
