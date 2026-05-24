@@ -32,15 +32,24 @@ use crate::tools::{
 /// Current transcript file schema version.
 ///
 /// Increment when the on-disk shape changes incompatibly. The loader rejects
-/// files whose `schema_version` doesn't match this constant with
+/// files whose `schema_version` is unknown with
 /// [`TranscriptError::SchemaMismatch`], which lets callers surface a clear
 /// error rather than silently misinterpreting old data.
+///
+/// **v2 (current):** adds the `subagent_transcripts` sidecar map keyed by the
+/// parent `task` tool-call id. Populated by the user-agents plugin's task
+/// tool handler when a subagent run completes; absent (empty map, elided
+/// from JSON) when no subagent ran.
+///
+/// **v1:** the original wrapper format — `schema_version`, `model`,
+/// `saved_at`, `messages`. Still accepted by the loader (a warn-log is
+/// emitted noting that subagent transcripts will be absent).
 ///
 /// **Pre-resume files** (written before this version field was introduced)
 /// lack the `schema_version` field entirely. They are accepted as v1
 /// transcripts — the only field they carry is the raw `Vec<Message>` array,
-/// which is identical in shape to `TranscriptFile::messages` in v1.
-pub const TRANSCRIPT_SCHEMA_VERSION: u32 = 1;
+/// which is identical in shape to `TranscriptFile::messages` in v1/v2.
+pub const TRANSCRIPT_SCHEMA_VERSION: u32 = 2;
 
 /// On-disk transcript format.
 ///
@@ -57,6 +66,28 @@ pub struct TranscriptFile {
     /// Unix timestamp (seconds) of when the transcript was saved.
     pub saved_at: u64,
     /// Conversation messages in chronological order.
+    pub messages: Vec<Message>,
+    /// Map from parent `task` tool-call id → subagent transcript.
+    /// Empty in transcripts where no subagent ran. Added in schema v2.
+    ///
+    /// `#[serde(default)]` lets v1 transcripts deserialize cleanly with an
+    /// empty map; `skip_serializing_if` keeps the output clean when no
+    /// subagent ran.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub subagent_transcripts: HashMap<String, SubagentTranscript>,
+}
+
+/// A subagent's full message history, embedded in [`TranscriptFile`]
+/// under its parent `task` tool call's id. Populated by the user-agents
+/// plugin's task tool handler when a subagent run completes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentTranscript {
+    /// Agent name (slug) that ran.
+    pub agent_name: String,
+    /// Per-agent model override that was active for this run, or
+    /// `None` if the parent's active model was used.
+    pub model: Option<String>,
+    /// Subagent message history in chronological order.
     pub messages: Vec<Message>,
 }
 
@@ -1360,6 +1391,10 @@ impl Host {
             model: self.current_model.read().await.clone(),
             saved_at,
             messages,
+            // Sidecar populated by SubHost when subagents run; empty here
+            // since this path is the parent host's save flow and we don't
+            // yet plumb the map through.
+            subagent_transcripts: HashMap::new(),
         };
         let json = serde_json::to_vec_pretty(&record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -1402,7 +1437,16 @@ impl Host {
             serde_json::Value::Object(map) if map.contains_key("schema_version") => {
                 let record: TranscriptFile = serde_json::from_value(root)
                     .map_err(|e| TranscriptError::Malformed(e.to_string()))?;
-                if record.schema_version != TRANSCRIPT_SCHEMA_VERSION {
+                if record.schema_version == 1 {
+                    // v1 is forward-compatible with v2 — the only new field
+                    // is `subagent_transcripts`, which `#[serde(default)]`
+                    // already populated as an empty map. Warn so an operator
+                    // who tails logs can see they're loading an older shape.
+                    tracing::warn!(
+                        path = %path.display(),
+                        "loading transcript written with schema v1; subagent_transcripts will be absent"
+                    );
+                } else if record.schema_version != TRANSCRIPT_SCHEMA_VERSION {
                     return Err(TranscriptError::SchemaMismatch {
                         found: record.schema_version,
                         expected: TRANSCRIPT_SCHEMA_VERSION,
@@ -1419,6 +1463,7 @@ impl Host {
                     model: self.current_model.read().await.clone(),
                     saved_at: 0,
                     messages,
+                    subagent_transcripts: HashMap::new(),
                 }
             }
             _ => {
@@ -3575,6 +3620,113 @@ mod transcript_tests {
         let record = host.load_transcript(&path).await.unwrap();
         assert_eq!(record.messages, messages);
         assert_eq!(record.schema_version, TRANSCRIPT_SCHEMA_VERSION);
+    }
+
+    /// Pin the schema version constant so accidental rollbacks fail loudly.
+    #[tokio::test]
+    async fn transcript_schema_version_is_two() {
+        assert_eq!(TRANSCRIPT_SCHEMA_VERSION, 2);
+    }
+
+    /// A `TranscriptFile` carrying a `subagent_transcripts` entry round-trips
+    /// through serde without losing the sidecar payload.
+    #[tokio::test]
+    async fn subagent_transcript_round_trip() {
+        let mut map: HashMap<String, SubagentTranscript> = HashMap::new();
+        map.insert(
+            "toolu_abc".into(),
+            SubagentTranscript {
+                agent_name: "code-reviewer".into(),
+                model: Some("claude-sonnet-4-6".into()),
+                messages: vec![Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "review this".into(),
+                    }],
+                }],
+            },
+        );
+        let original = TranscriptFile {
+            schema_version: TRANSCRIPT_SCHEMA_VERSION,
+            model: "m".into(),
+            saved_at: 1234,
+            messages: vec![],
+            subagent_transcripts: map,
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: TranscriptFile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.subagent_transcripts.len(), 1);
+        let sub = parsed.subagent_transcripts.get("toolu_abc").expect("entry");
+        assert_eq!(sub.agent_name, "code-reviewer");
+        assert_eq!(sub.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(sub.messages.len(), 1);
+    }
+
+    /// v1 transcripts (no `subagent_transcripts` field) deserialize cleanly
+    /// thanks to `#[serde(default)]`, with an empty sidecar map.
+    #[tokio::test]
+    async fn transcript_v1_without_subagent_field_loads_clean() {
+        let v1_json = serde_json::json!({
+            "schema_version": 1,
+            "model": "m",
+            "saved_at": 1234,
+            "messages": []
+        });
+        let parsed: TranscriptFile = serde_json::from_value(v1_json).expect("v1 deserializes");
+        assert_eq!(parsed.schema_version, 1);
+        assert!(parsed.subagent_transcripts.is_empty());
+    }
+
+    /// `load_transcript` accepts a v1 file (warn-logged), returning a record
+    /// whose `schema_version` is still 1 and whose sidecar map is empty.
+    #[tokio::test]
+    async fn load_transcript_accepts_v1_with_warn_log() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("v1.json");
+        let v1_content = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "model": "m",
+            "saved_at": 0,
+            "messages": []
+        }))
+        .unwrap();
+        tokio::fs::write(&path, v1_content).await.unwrap();
+
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        let record = host
+            .load_transcript(&path)
+            .await
+            .expect("v1 transcript should load");
+        assert_eq!(record.schema_version, 1);
+        assert!(record.subagent_transcripts.is_empty());
+        assert!(record.messages.is_empty());
+    }
+
+    /// Saving omits an empty `subagent_transcripts` from the JSON output so
+    /// transcripts that don't use subagents stay visually clean.
+    #[tokio::test]
+    async fn save_transcript_omits_empty_subagent_map_from_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("clean.json");
+
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+        host.save_transcript(&path).await.unwrap();
+
+        let on_disk = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            !on_disk.contains("subagent_transcripts"),
+            "empty sidecar map must be skipped in serialized form; got:\n{on_disk}"
+        );
     }
 
     /// `run_turn_streaming_with_blocks` must push the caller's blocks
