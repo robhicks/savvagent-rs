@@ -3771,6 +3771,7 @@ dependencies = [
  "resource-tool",
  "rmcp",
  "savvagent-mcp",
+ "savvagent-plugin",
  "savvagent-protocol",
  "serde",
  "serde_json",
