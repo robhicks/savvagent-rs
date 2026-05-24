@@ -128,7 +128,11 @@ impl Plugin for ToolTaskSummaryPlugin {
         let mut spans = vec![span(snippet, ThemeColor::Muted)];
         if line_count > 1 {
             spans.push(span(
-                format!(" (+{} more line{})", line_count - 1, if line_count > 2 { "s" } else { "" }),
+                format!(
+                    " (+{} more line{})",
+                    line_count - 1,
+                    if line_count > 2 { "s" } else { "" }
+                ),
                 ThemeColor::Muted,
             ));
         }
