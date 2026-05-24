@@ -192,7 +192,8 @@ pub struct ContentRendererSpec {
 }
 
 /// Describes which screen context a keybinding is active in.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum KeyScope {
     /// Active everywhere (home view and any screen).
     Global,
@@ -200,6 +201,10 @@ pub enum KeyScope {
     OnHome,
     /// Active only when the named screen is on top of the stack.
     OnScreen(String),
+    /// Active iff `AppFocus == Canvas(_)`. Built-in canvas keys
+    /// (Tab, Shift-Tab, Esc, Ctrl-J, Ctrl-K, Ctrl-O) take precedence;
+    /// plugin bindings in this scope fire only on a built-in miss.
+    OnFocusedCanvas,
 }
 
 #[cfg(test)]
@@ -278,6 +283,15 @@ mod tests {
         };
         assert_eq!(m.contributions.tool_summaries.len(), 2);
         assert_eq!(m.contributions.tool_summaries[0].tool_name, "read_file");
+    }
+
+    #[test]
+    fn key_scope_on_focused_canvas() {
+        let scope = KeyScope::OnFocusedCanvas;
+        let s = serde_json::to_string(&scope).unwrap();
+        assert_eq!(s, "\"on_focused_canvas\"");
+        let back: KeyScope = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, scope);
     }
 
     #[test]
