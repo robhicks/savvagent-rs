@@ -152,6 +152,27 @@ mod trait_smoke {
         }
     }
 
+    #[tokio::test]
+    async fn default_snapshot_returns_none_and_restore_is_ok() {
+        use crate::content::{ContentBlockId, ContentRenderer, Frame, PixelFormat, PixelSize};
+
+        struct Stub;
+        #[async_trait::async_trait]
+        impl ContentRenderer for Stub {
+            fn id(&self) -> ContentBlockId { ContentBlockId(0) }
+            fn render(&mut self, _: PixelSize) -> Frame {
+                Frame {
+                    width: 1, height: 1, format: PixelFormat::Rgba8,
+                    bytes: vec![0, 0, 0, 0],
+                }
+            }
+        }
+
+        let mut s = Stub;
+        assert!(s.snapshot_state().is_none());
+        assert!(s.restore_state(b"anything").is_ok());
+    }
+
     #[test]
     fn frame_round_trips_through_pixel_format() {
         use crate::content::{Frame, PixelFormat, PixelSize};

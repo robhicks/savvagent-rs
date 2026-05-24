@@ -191,4 +191,27 @@ pub trait ContentRenderer: Send {
 
     /// Phase 2: programmatically move focus.
     fn set_focus(&mut self, _index: Option<u32>) {}
+
+    /// Serialize the renderer's interactive state to an opaque byte
+    /// blob. Returns `None` when there is nothing recoverable: the
+    /// document has no stateful elements, all state is at defaults,
+    /// or (for streaming renderers) the source isn't complete yet.
+    ///
+    /// Default returns `None`. Renderers that opt into persistence
+    /// override this method.
+    fn snapshot_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Restore renderer state previously produced by `snapshot_state`.
+    /// Returns [`PluginError::StateRestoreFailed`] if the bytes are
+    /// corrupt or schema-incompatible; the host then falls back to
+    /// "no restored state" and logs a warning.
+    ///
+    /// Default returns `Ok(())` (no-op) so renderers that don't opt
+    /// into persistence compile against the Phase 2 trait without
+    /// code change.
+    fn restore_state(&mut self, _bytes: &[u8]) -> Result<(), PluginError> {
+        Ok(())
+    }
 }
