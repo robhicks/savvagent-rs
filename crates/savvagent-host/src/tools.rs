@@ -275,7 +275,7 @@ impl ClientHandler for ResourceCapturingHandler {
 }
 
 /// Aggregate view of all connected tool servers.
-pub(crate) struct ToolRegistry {
+pub struct ToolRegistry {
     /// Eager (always-spawned) tool servers. Indices in `routes` for
     /// non-bash tools point into this vector.
     eager_servers: Vec<ToolServer>,
@@ -396,7 +396,7 @@ impl ToolRegistry {
     ///
     /// `bash_net_resolver` is invoked on every `tool-bash` call to resolve
     /// the `allow_net` for that call's spawn. See [`BashNetResolver`].
-    pub async fn connect(
+    pub(crate) async fn connect(
         endpoints: &[ToolEndpoint],
         project_root: &Path,
         sandbox: &SandboxConfig,
@@ -664,7 +664,7 @@ impl ToolRegistry {
     /// For non-bash tools, `net_override` is ignored. For bash tools, the
     /// override is passed to the resolver and to the spawn logic; see
     /// [`LazyBash`] for the spawn-vs-reuse decision.
-    pub async fn call_with_bash_net_override(
+    pub(crate) async fn call_with_bash_net_override(
         &self,
         name: &str,
         input: Value,
@@ -729,7 +729,7 @@ impl ToolRegistry {
     }
 
     /// Cancel each tool server session, draining its child process.
-    pub async fn shutdown(self) {
+    pub(crate) async fn shutdown(self) {
         for s in self.eager_servers {
             if let Err(e) = s.service.cancel().await {
                 tracing::warn!("error closing tool server {}: {e}", s.label);

@@ -12,7 +12,7 @@ use std::sync::Arc;
 /// through the wrapped registry via [`Self::inner`]; this type's only job
 /// is name filtering.
 #[derive(Clone)]
-pub(crate) struct ScopedToolRegistry {
+pub struct ScopedToolRegistry {
     inner: Arc<ToolRegistry>,
     allowed: Arc<HashSet<String>>,
 }

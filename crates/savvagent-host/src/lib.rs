@@ -39,6 +39,7 @@ mod sandbox;
 mod scoped_registry;
 pub mod sensitive_paths;
 mod session;
+mod subhost;
 mod tools;
 
 pub use capabilities::{
@@ -62,6 +63,7 @@ pub use session::{
     TRANSCRIPT_SCHEMA_VERSION, ToolCall, ToolCallStatus, TranscriptError, TranscriptFile,
     TurnEvent, TurnOutcome,
 };
+pub use subhost::{SubHost, SubHostError};
 pub use tools::{BashNetContext, BashNetResolver, NetOverride, SubagentContext, ToolCallContext};
 
 /// `PreToolUseGate` trait and `PreToolDecision` enum.

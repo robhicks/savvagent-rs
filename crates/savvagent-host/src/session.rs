@@ -299,7 +299,7 @@ pub struct Host {
     /// `/model <id>`. A separate lock (not a mutable `config`) so that
     /// concurrent readers of `config` remain unaffected.
     current_model: tokio::sync::RwLock<String>,
-    tools: Mutex<Option<ToolRegistry>>,
+    tools: Mutex<Option<Arc<ToolRegistry>>>,
     state: Mutex<SessionState>,
     system_prompt: Option<String>,
     /// Layered permission policy: sensitive-path floor + SAVVAGENT.md
@@ -527,7 +527,7 @@ impl Host {
             pool: tokio::sync::RwLock::new(pool_map),
             active_provider: tokio::sync::RwLock::new(active_id),
             current_model: tokio::sync::RwLock::new(initial_model),
-            tools: Mutex::new(Some(tools)),
+            tools: Mutex::new(Some(Arc::new(tools))),
             state: Mutex::new(SessionState {
                 messages: Vec::new(),
             }),
@@ -643,7 +643,7 @@ impl Host {
             pool: tokio::sync::RwLock::new(pool_map),
             active_provider: tokio::sync::RwLock::new(default_id),
             current_model: tokio::sync::RwLock::new(initial_model),
-            tools: Mutex::new(Some(tools)),
+            tools: Mutex::new(Some(Arc::new(tools))),
             state: Mutex::new(SessionState {
                 messages: Vec::new(),
             }),
@@ -1618,14 +1618,38 @@ impl Host {
     /// Cleanly shut down tool-server children. The provider session is
     /// dropped along with `self`. Idempotent — calling twice is a no-op for
     /// the second call.
+    ///
+    /// The wrapped `ToolRegistry::shutdown(self)` consumes the registry,
+    /// so we use `Arc::into_inner` to recover ownership. If any clones
+    /// of the registry are still outstanding (e.g. a live `SubHost`),
+    /// we log a warning and skip the cleanup — the child processes will
+    /// be reaped when the last `Arc` drops.
     pub async fn shutdown(&self) {
         let registry = {
             let mut guard = self.tools.lock().await;
             guard.take()
         };
         if let Some(r) = registry {
-            r.shutdown().await;
+            match Arc::into_inner(r) {
+                Some(reg) => reg.shutdown().await,
+                None => {
+                    tracing::warn!(
+                        "Host::shutdown: ToolRegistry still has outstanding Arc references; \
+                         skipping explicit child cleanup (drop-time cleanup will run)"
+                    );
+                }
+            }
         }
+    }
+
+    /// Clone the underlying `Arc<ToolRegistry>` for sharing with a
+    /// `SubHost`. Returns `None` if the host has already been shut down.
+    /// Internal API surfaced for the in-process tool path (consumed by
+    /// the SubHost loop in Task 7+).
+    #[allow(dead_code)]
+    pub async fn tool_registry_arc(&self) -> Option<Arc<crate::tools::ToolRegistry>> {
+        let guard = self.tools.lock().await;
+        guard.as_ref().map(Arc::clone)
     }
 
     /// The currently-active provider id. Turns are routed to this entry.
