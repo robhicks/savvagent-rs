@@ -894,6 +894,11 @@ impl App {
                 self.entries
                     .push(Entry::Note(format!("resource updated: {uri} — {summary}")));
             }
+            TurnEvent::SubagentStop { .. } => {
+                // No UI side-effect today. Task 13 wires this through the
+                // TurnEvent→HostEvent translator so the user_hooks plugin
+                // can fire a `SubagentStop` shell hook.
+            }
         }
     }
 

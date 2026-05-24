@@ -2373,6 +2373,9 @@ fn translate_turn_event_to_host_event(
             })
         }
         // No analog — these stay TUI-private.
+        // `SubagentStop` will gain a `HostEvent::SubagentStop` arm in
+        // Task 13 (user_hooks plugin subscription); for now keep the
+        // event TUI-private.
         TurnEvent::RouteSelected { .. }
         | TurnEvent::ModalityWarning { .. }
         | TurnEvent::TextDelta { .. }
@@ -2381,7 +2384,8 @@ fn translate_turn_event_to_host_event(
         | TurnEvent::ToolCallDenied { .. }
         | TurnEvent::Cancelled { .. }
         | TurnEvent::AbortedAfterGrace { .. }
-        | TurnEvent::ResourceUpdated { .. } => None,
+        | TurnEvent::ResourceUpdated { .. }
+        | TurnEvent::SubagentStop { .. } => None,
     }
 }
 

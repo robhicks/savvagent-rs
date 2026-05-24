@@ -267,6 +267,18 @@ pub enum TurnEvent {
         /// Final outcome — same value `run_turn_streaming` returns.
         outcome: TurnOutcome,
     },
+    /// Fired by a [`SubHost`] when its subagent loop reaches a clean
+    /// `end_turn`. Not fired for cancelled subagent turns. The TUI's
+    /// `TurnEvent → HostEvent` translator forwards this as
+    /// `HostEvent::SubagentStop` so the user-hooks plugin can fire a
+    /// `SubagentStop` shell hook.
+    SubagentStop {
+        /// Name (slug) of the agent whose turn just ended.
+        agent_name: String,
+        /// Whether the turn ended cleanly (always `true` in v1 — kept
+        /// for forward-compat with future failure-pathway variants).
+        success: bool,
+    },
     /// A cooperative cancel signal was received and acted upon. The turn
     /// did not complete normally; the in-flight `complete` future was
     /// dropped. Emitted before returning [`HostError::Cancelled`].

@@ -41,6 +41,11 @@ pub struct SubHost {
     pub(crate) tools: ScopedToolRegistry,
     pub(crate) tool_defs: Vec<ToolDef>,
     pub(crate) cancellation: CancellationToken,
+    /// Optional channel used to emit lifecycle events (currently just
+    /// [`TurnEvent::SubagentStop`]) into the parent's per-turn
+    /// `TurnEvent` stream. `None` in tests or contexts that don't
+    /// need lifecycle visibility.
+    pub(crate) events: Option<tokio::sync::mpsc::Sender<crate::TurnEvent>>,
 }
 
 impl SubHost {
@@ -60,6 +65,7 @@ impl SubHost {
     /// - `Err(SubHostError::HostShutDown)` if the parent host has
     ///   already been shut down (no `Arc<ToolRegistry>` to share).
     #[allow(dead_code)] // Constructed by TaskToolHandler in Task 20.
+    #[allow(clippy::too_many_arguments)] // Builder-shaped ctor; refactor deferred to Task 20.
     pub async fn new(
         parent: Arc<Host>,
         ctx: SubagentContext,
@@ -68,6 +74,7 @@ impl SubHost {
         allowed_names: HashSet<String>,
         tool_defs: Vec<ToolDef>,
         cancellation: CancellationToken,
+        events: Option<tokio::sync::mpsc::Sender<crate::TurnEvent>>,
     ) -> Result<Self, SubHostError> {
         // Depth check BEFORE pulling the registry (cheaper to fail fast).
         if ctx.depth > max_depth_from_env() {
@@ -86,6 +93,7 @@ impl SubHost {
             tools,
             tool_defs,
             cancellation,
+            events,
         })
     }
 
@@ -158,14 +166,24 @@ impl SubHost {
             });
 
             match resp.stop_reason {
-                StopReason::EndTurn => return finalize_text(&resp.content),
+                StopReason::EndTurn => {
+                    let result = finalize_text(&resp.content);
+                    if result.is_ok() {
+                        self.emit_subagent_stop().await;
+                    }
+                    return result;
+                }
                 StopReason::ToolUse => {
                     let calls = extract_tool_calls(&resp.content);
                     if calls.is_empty() {
                         // Provider quirk: `stop_reason == ToolUse` but no
                         // `tool_use` block. Treat as end_turn (content is
                         // authoritative).
-                        return finalize_text(&resp.content);
+                        let result = finalize_text(&resp.content);
+                        if result.is_ok() {
+                            self.emit_subagent_stop().await;
+                        }
+                        return result;
                     }
                     let mut results: Vec<ContentBlock> = Vec::with_capacity(calls.len());
                     for call in &calls {
@@ -182,6 +200,20 @@ impl SubHost {
                     )));
                 }
             }
+        }
+    }
+
+    /// Emit a [`TurnEvent::SubagentStop`] for this subagent's
+    /// `(agent_name, success=true)` if an event sender was provided at
+    /// construction time. Best-effort: a closed receiver is ignored.
+    async fn emit_subagent_stop(&self) {
+        if let Some(events) = &self.events {
+            let _ = events
+                .send(crate::TurnEvent::SubagentStop {
+                    agent_name: self.ctx.agent_name.clone(),
+                    success: true,
+                })
+                .await;
         }
     }
 

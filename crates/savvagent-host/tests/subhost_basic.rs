@@ -104,6 +104,7 @@ async fn subhost_returns_text_on_end_turn() {
         HashSet::new(),
         vec![],
         cancellation,
+        None, // events
     )
     .await
     .expect("SubHost::new returns Ok");
