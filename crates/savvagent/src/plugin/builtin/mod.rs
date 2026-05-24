@@ -104,6 +104,10 @@ pub mod tool_fs_summary;
 /// `tool-grep` `search` tool.
 pub mod tool_grep_summary;
 
+/// `internal:tool-task-summary` — renders one-line summaries for the
+/// `task` tool (in-process subagent dispatch from `internal:user-agents`).
+pub mod tool_task_summary;
+
 /// Fullscreen read-only file viewer; opened via `/view <path>`.
 pub mod view_file;
 
