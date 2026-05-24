@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // `description`, `tools`, `model` consumed by Tasks 19/20.
+#[allow(dead_code)] // `description` consumed by Task 22 (TUI collapsible block).
 pub struct AgentSpec {
     pub name: String,
     pub description: String,
@@ -13,7 +13,6 @@ pub struct AgentSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Consumed by ScopedToolRegistry filter in Task 20.
 pub enum ToolsScope {
     /// `tools:` key absent — inherit parent's full tool set.
     Inherit,

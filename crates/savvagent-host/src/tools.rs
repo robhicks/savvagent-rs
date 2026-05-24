@@ -609,13 +609,10 @@ impl ToolRegistry {
     /// stdio-served ones (eager + lazy bash, plus the synthetic
     /// `read_resource`) followed by any in-process tools registered via
     /// [`Self::register_in_process_tool`]. Used by the host when
-    /// building the provider's tool list.
-    ///
-    /// Currently unused outside tests; landed alongside the in-process
-    /// registration plumbing in preparation for the SubHost wiring
-    /// (Task 7+) that will surface in-process tool defs to the model.
-    #[allow(dead_code)]
-    pub(crate) async fn tool_defs(&self) -> Vec<ToolDef> {
+    /// building the provider's tool list and by
+    /// [`crate::SubHost`] callers (e.g. `TaskToolHandler`) that need
+    /// the full parent-tool view to compute a per-subagent allowlist.
+    pub async fn tool_defs(&self) -> Vec<ToolDef> {
         let mut out: Vec<ToolDef> = self.defs.clone();
         let in_proc = self.in_process_defs.read().await;
         for def in in_proc.values() {

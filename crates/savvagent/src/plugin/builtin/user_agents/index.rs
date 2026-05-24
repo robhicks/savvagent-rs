@@ -25,7 +25,6 @@ impl AgentIndex {
         *self.inner.write().await = map;
     }
 
-    #[allow(dead_code)] // Consumed by TaskToolHandler in Task 20.
     pub async fn get(&self, name: &str) -> Option<Arc<AgentSpec>> {
         self.inner.read().await.get(name).cloned()
     }
@@ -72,7 +71,9 @@ mod tests {
     #[tokio::test]
     async fn names_snapshot_returns_sorted_list() {
         let index = AgentIndex::empty();
-        index.replace(vec![agent("b"), agent("a"), agent("c")]).await;
+        index
+            .replace(vec![agent("b"), agent("a"), agent("c")])
+            .await;
         let names = index.names_snapshot().await;
         assert_eq!(names, vec!["a", "b", "c"]);
     }

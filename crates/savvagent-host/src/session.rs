@@ -1701,9 +1701,8 @@ impl Host {
 
     /// Clone the underlying `Arc<ToolRegistry>` for sharing with a
     /// `SubHost`. Returns `None` if the host has already been shut down.
-    /// Internal API surfaced for the in-process tool path (consumed by
-    /// the SubHost loop in Task 7+).
-    #[allow(dead_code)]
+    /// Internal API surfaced for the in-process tool path; consumed by
+    /// the `task` tool handler when it builds a `SubHost`.
     pub async fn tool_registry_arc(&self) -> Option<Arc<crate::tools::ToolRegistry>> {
         let guard = self.tools.lock().await;
         guard.as_ref().map(Arc::clone)

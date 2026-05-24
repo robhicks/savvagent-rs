@@ -45,7 +45,6 @@ pub fn max_depth_from_env() -> u8 {
 /// Fields are `pub(crate)` because the subagent loop and helpers live
 /// inside `savvagent-host`; external constructors go through
 /// [`SubHost::new`].
-#[allow(dead_code)] // Fields consumed in Task 7+.
 pub struct SubHost {
     pub(crate) parent: Arc<Host>,
     pub(crate) ctx: SubagentContext,
@@ -77,8 +76,7 @@ impl SubHost {
     ///   [`max_depth_from_env`].
     /// - `Err(SubHostError::HostShutDown)` if the parent host has
     ///   already been shut down (no `Arc<ToolRegistry>` to share).
-    #[allow(dead_code)] // Constructed by TaskToolHandler in Task 20.
-    #[allow(clippy::too_many_arguments)] // Builder-shaped ctor; refactor deferred to Task 20.
+    #[allow(clippy::too_many_arguments)] // Builder-shaped ctor; refactor deferred to follow-up.
     pub async fn new(
         parent: Arc<Host>,
         ctx: SubagentContext,
@@ -122,7 +120,6 @@ impl SubHost {
     ///   subagent without affecting its own turn.
     /// - `events: None` on `provider.complete` — Task 23 wires
     ///   private subagent streaming.
-    #[allow(dead_code)] // Wired up to a real call site in Task 20.
     pub async fn run_subagent(&self, prompt: String) -> Result<String, SubHostError> {
         use savvagent_protocol::{CompleteRequest, ContentBlock, Message, Role, StopReason};
 
