@@ -543,4 +543,36 @@ mod tests_in_process_tool {
             _ => panic!("wrong variant"),
         }
     }
+
+    #[test]
+    fn handler_arc_partial_eq_uses_pointer_identity() {
+        let a = crate::InProcessToolHandlerArc::new(Stub);
+        let b = a.clone();
+        assert_eq!(a, b, "clones of the same Arc compare equal");
+
+        let c = crate::InProcessToolHandlerArc::new(Stub);
+        assert_ne!(a, c, "independently-constructed handlers compare unequal");
+    }
+
+    #[test]
+    fn effect_debug_renders_handler_opaquely() {
+        let spec = ToolDef {
+            name: "task".into(),
+            description: "spawn a subagent".into(),
+            input_schema: serde_json::json!({}),
+        };
+        let effect = Effect::RegisterInProcessTool {
+            spec,
+            handler: crate::InProcessToolHandlerArc::new(Stub),
+        };
+        let rendered = format!("{effect:?}");
+        assert!(
+            rendered.contains("RegisterInProcessTool"),
+            "expected RegisterInProcessTool variant name in debug output, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("<dyn InProcessToolHandler>"),
+            "expected opaque handler placeholder, got: {rendered}"
+        );
+    }
 }

@@ -35,7 +35,7 @@ pub trait InProcessToolHandler: Send + Sync + 'static {
 /// of [`crate::Effect`] need (they only ever check `==` to detect
 /// "same handler re-emitted").
 #[derive(Clone)]
-pub struct InProcessToolHandlerArc(pub Arc<dyn InProcessToolHandler>);
+pub struct InProcessToolHandlerArc(Arc<dyn InProcessToolHandler>);
 
 impl InProcessToolHandlerArc {
     /// Construct from any concrete `InProcessToolHandler`.
