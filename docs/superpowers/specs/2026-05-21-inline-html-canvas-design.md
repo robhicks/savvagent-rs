@@ -336,7 +336,11 @@ content array. Today it concatenates `text` items into a single
 
 - `text` items continue to concatenate into a `Text` block.
 - `html` items each become their own `ContentBlock::Html { source }`
-  block, preserving the per-item HTML source verbatim.
+  block, preserving the per-item HTML source verbatim. **The host
+  assigns the `ContentBlockId`** — tools do not (and cannot) know
+  about it. The id is allocated from the same monotonic counter the
+  host uses for model-emitted blocks, so ids stay unique within a
+  turn regardless of who produced the block.
 - Block order in the output matches the order the tool emitted them
   (text-then-html, text-html-text, etc.).
 - Unknown content types are stringified into a fallback `Text` block
@@ -346,7 +350,12 @@ This bypasses the fence parser entirely — the tool's HTML is already
 typed; no sentinel scanning is needed. The host treats the source
 identically to model-emitted HTML once it's in `ContentBlock::Html`
 form: the registered `internal:html-canvas` renderer takes over from
-there.
+there. **Subset enforcement is also identical** — the same advisory
+validator runs and emits the same `tracing::warn!` lines for tool
+HTML as for model HTML. We do NOT escalate to errors for tool HTML
+even though "tools should know better": uniformity beats discipline
+here, and tool bugs are fixable. The warnings give tool authors the
+same diagnostic signal model prompt-tuners get.
 
 ### Tool author contract
 
@@ -356,6 +365,8 @@ A tool that emits HTML promises:
   supported; the renderer parses fresh on each `restore_state`
   cycle.
 - The HTML stays within the documented subset (§ *HTML+CSS subset*).
+  Subset violations get a `tracing::warn!` from the renderer (same
+  treatment as model-emitted HTML); they do not fail the tool call.
 - No network resources (`http://`, `https://`, `file://`). Inline
   styles and `data:` URIs only.
 - The tool does NOT include `\`\`\`html-canvas` fences inside the
@@ -489,10 +500,19 @@ pub trait ContentRenderer: Send {
 
     /// **Phase 2 amendment.** Serialize the renderer's interactive
     /// state (form values, scroll offsets, expanded `<details>` set,
-    /// focused-element id) to an opaque byte blob. Returns `None` if
-    /// the renderer has no recoverable state (e.g. the document has
-    /// no focusable or stateful elements). The bytes are persisted
-    /// in the transcript JSON alongside the source.
+    /// focused-element id) to an opaque byte blob. Returns `None`
+    /// when there is nothing recoverable, including:
+    /// - The document has no focusable or stateful elements.
+    /// - All persistable state is at its initial value (every form
+    ///   field empty, no `<details>` open, nothing focused, scroll
+    ///   at the origin). A `None` return is cheaper than serializing
+    ///   an empty-everything blob and equivalent under restore.
+    /// - The canvas is still streaming its source (the host should
+    ///   not call `snapshot_state` on a streaming canvas; the
+    ///   renderer returns `None` defensively if it does).
+    ///
+    /// The bytes are persisted in the transcript JSON alongside the
+    /// source.
     ///
     /// Default returns `None` so plugins authored against the
     /// Phase 1 trait surface compile against the Phase 2 trait
@@ -505,9 +525,11 @@ pub trait ContentRenderer: Send {
     /// renderer is free to interpret the bytes however it likes;
     /// the host treats them as opaque.
     ///
-    /// Returns an error if the bytes are corrupt or schema-
-    /// incompatible. The host falls back to "no restored state" and
-    /// logs a warning; the renderer proceeds as if newly constructed.
+    /// Returns [`PluginError::StateRestoreFailed`] if the bytes are
+    /// corrupt or schema-incompatible. The host falls back to "no
+    /// restored state" and logs a warning; the renderer proceeds as
+    /// if newly constructed (i.e. with whatever defaults `new(source)`
+    /// produced).
     ///
     /// Default returns `Ok(())` (no-op) so plugins authored against
     /// the Phase 1 trait surface compile against the Phase 2 trait
@@ -517,6 +539,26 @@ pub trait ContentRenderer: Send {
     }
 }
 ```
+
+#### New `PluginError` variant
+
+```rust
+// crates/savvagent-plugin/src/error.rs
+pub enum PluginError {
+    // ... existing variants ...
+
+    /// `ContentRenderer::restore_state` could not interpret the
+    /// supplied bytes (corrupt, schema-incompatible, or the renderer's
+    /// own decoder returned an error). The host treats this as a
+    /// soft failure: log a warning, drop the bytes, continue rendering
+    /// from defaults.
+    StateRestoreFailed(String),
+}
+```
+
+The `String` is a free-form renderer-supplied reason ("expected JSON,
+got binary"; "schema v2 not understood by this build"; etc.) included
+in the warning log to aid debugging.
 
 ### Plugin manifest extension
 
@@ -1171,8 +1213,15 @@ A sub-agent manifest may opt into specific segments via:
 pub struct SubAgentManifest {
     // ... existing fields ...
     /// Plugin SystemPromptSegment ids to compose into THIS sub-agent's
-    /// system prompt. Composition order: sub-agent's own system field,
-    /// then each segment in this list (in order). Empty by default.
+    /// system prompt. Each item is a fully-qualified segment id in
+    /// the form `"<plugin_id>:<segment_name>"` — the same string
+    /// shape `SystemPromptSegment::id` uses and the same shape
+    /// `SlashSpec::suppress_prompt_segments` filters on. Items that
+    /// don't match any registered segment are silently ignored
+    /// (logged at `debug` level for plugin authors to spot typos).
+    /// Composition order: sub-agent's own system field first, then
+    /// each segment in this list joined by blank lines.
+    /// Empty by default.
     pub inherit_segments: Vec<String>,
 }
 ```
@@ -1181,14 +1230,32 @@ The mechanism resembles the per-slash suppression (§ *Prompt
 contention and suppression*) but inverted: slashes opt *out* of host
 defaults; sub-agents opt *in* to specific segments.
 
-**Why this asymmetry**: a slash command runs inside the same agent
-loop as normal chat; suppression is a targeted exception. A sub-
-agent is a different agent with its own identity and instructions;
-inheritance is a deliberate borrow.
+**Why opt-in for sub-agents, opt-out for slashes**: a slash command
+runs inside the same agent loop as normal chat — it inherits the
+host's full prompt by default and surgically removes pieces.
+A sub-agent is a different agent with its own identity, prompt, and
+purpose — leaking host segments would frequently produce nonsense
+(`"prefer HTML canvas output"` makes no sense when the sub-agent's
+job is to emit a JSON-only summary). Default-deny is the safe
+posture; inheritance is a deliberate borrow.
+
+**Composition order is consistent with slash composition**, not
+asymmetric:
+
+| Surface | Order |
+|---|---|
+| Normal chat / slash | host default → project context (`SAVVAGENT.md`) → plugin segments (in registration order) → suppression filter |
+| Sub-agent | sub-agent's own system field → inherited plugin segments (in `inherit_segments` order) |
+
+Both surfaces put the "root" prompt first and append segments. The
+sub-agent simply lacks the host-default + project-context layers
+because it is its own root. Plugin segments always append, never
+prepend.
 
 Phase 2 ships only the spec; the code change lands with the sub-
 agent feature itself. When that PR is written, it MUST honor this
-contract — no leak by default, opt-in via `inherit_segments`.
+contract — no leak by default, opt-in via `inherit_segments`, qualified
+id strings, append-order composition.
 
 ### Multiple prompt-contributing plugins
 
@@ -1211,14 +1278,28 @@ language precisely. Conflict detection is out of scope; this is a
 
 ## Persistence
 
+### Transcript schema versions
+
+| Version | Introduced by | What's new |
+|---|---|---|
+| **v1** | pre-canvas | Baseline: text, tool-call, tool-result Entries only. |
+| **v2** | Phase 1 (PR #97, 2026-05-23) | Adds `Html { source }` content block; adds `Canvas` Entry variant. |
+| **v3** | Phase 2 | Adds optional `state` field on `Canvas` Entries (interactive-state persistence). |
+
+The transcript header carries an integer `schema_version` field. Older
+builds reading newer transcripts must degrade gracefully (§
+*Cross-build compatibility matrix* below).
+
+### Phase 1 (v2)
+
 - Transcripts JSON gains the new `Html` content block type. The block
   carries `{ type: "html", source: "..." }`. Existing transcripts
-  load unchanged (no `Html` blocks present). *(Phase 1.)*
-- The on-disk schema version of transcripts (if any) is bumped to
-  signal the new block type. Older builds loading newer transcripts
-  log a warning and render `Html` blocks as raw source. *(Phase 1.)*
+  load unchanged (no `Html` blocks present).
+- The on-disk schema version moves from v1 → v2 to signal the new
+  block + Entry types. Older builds loading newer transcripts log a
+  warning and render `Html` blocks as raw source.
 
-### Interactive-state persistence
+### Interactive-state persistence (v3)
 
 > *Phase 2 amendment. The original spec said interactive state is NOT
 > persisted; Phase 2 adds it.*
@@ -1242,29 +1323,88 @@ opaque `state` field:
   renderer's choice; `HtmlCanvas` serializes a `serde_json`-shaped
   struct of `{ form_values: Map<NodeId, FormValue>, scroll: Map<NodeId,
   (u32, u32)>, open_details: Set<NodeId>, focused: Option<NodeId> }`.
-- NodeId stability: Blitz assigns node ids during parsing; the same
-  source parses to the same node ids deterministically, so a snapshot
-  taken in session A can be restored in session B after re-parsing the
-  same source. If the source changes between save and resume (it
-  shouldn't — the source is in the same JSON record), `restore_state`
-  best-effort applies what still matches and logs a warning for the
-  rest.
-- The transcript schema version bumps again to signal the new field.
-  Older builds loading newer transcripts ignore `state` and render
-  the source fresh — graceful fallback, no data loss except
-  interactive state.
+- **NodeId stability is a load-bearing assumption that this spec
+  does not yet prove.** The expectation is that Blitz (via html5ever)
+  assigns node ids deterministically — the same source parses to the
+  same ids across processes — so a snapshot taken in session A can
+  be restored in session B after re-parsing the same source.
+  html5ever is a tree builder, so the assumption is plausible, but
+  Blitz's specific id-assignment scheme (`NodeId(u32)` from a
+  monotonically-incremented counter inside `BaseDocument`) was not
+  verified to be process-deterministic during the Phase 0 spike.
+  **The Phase 2 plan MUST include a verification task** — a short
+  mini-spike that parses the same HTML in two processes and asserts
+  byte-equal NodeId-to-element mapping. If the assumption fails,
+  `HtmlCanvas` falls back to keying on `(tag, nth-of-type-among-
+  siblings)` or a CSS-selector-style path instead of NodeId. If
+  the source changes between save and resume (it shouldn't — the
+  source is in the same JSON record), `restore_state` best-effort
+  applies what still matches and logs a warning for the rest.
+- The transcript schema version bumps v2 → v3. Older builds (v1, v2)
+  loading v3 transcripts ignore `state` and render the source fresh
+  — graceful fallback, no data loss except interactive state.
 - A snapshot is taken at: `TurnComplete`, before manual `/save`,
-  and at clean TUI shutdown. A snapshot is NOT taken on
-  every input event (too expensive — events are frequent and most
-  don't change persistable state).
+  and at clean TUI shutdown. A snapshot is NOT taken on every input
+  event (too expensive — events are frequent and most don't change
+  persistable state).
+- A snapshot is NOT taken for canvases whose source is still
+  streaming (`source_preview.is_some()`). The host skips them; their
+  `Canvas` Entry serializes with `state` absent.
+
+#### State-loss tradeoff
+
+The snapshot triggers above mean any state change that happens *between*
+the last TurnComplete (or `/save`) and an unclean exit (kill -9,
+SIGSEGV, power loss) is lost. Concretely: a user expands a
+`<details>` three turns after the canvas was created, then the TUI
+crashes before the next TurnComplete — that expansion is gone on
+`/resume`.
+
+This is an accepted tradeoff. The alternatives — snapshot on every
+input event (expensive: input events fire at ~60 Hz from mouse-move
+debouncing) or snapshot on a debounce timer (added complexity for
+limited recovery benefit) — both pay regular cost for a rare loss.
+Real-world interactive state is also re-creatable: a `<details>` re-
+expansion is one click. If a user reports losing meaningful state to
+a crash, we revisit; for v1 we accept the gap.
 
 ### Cross-build compatibility matrix
 
-| Build / transcript | Pre-canvas | Phase 1 | Phase 2 |
+| Build → reading transcript ↓ | Pre-canvas (v1) | Phase 1 (v2) | Phase 2 (v3) |
 |---|---|---|---|
-| Pre-canvas build  | works | warns + renders `Html` as source | warns + renders `Html` as source, ignores `state` |
-| Phase 1 build     | works | works | works (silently ignores `state` field — no consumer) |
-| Phase 2 build     | works | works (no `state` to restore) | works (full restore) |
+| Pre-canvas build | works | **load error unless `serde(other)` fallback present — see below** | same error mode |
+| Phase 1 build    | works (older format) | works | works; silently ignores `state` field (no consumer) |
+| Phase 2 build    | works | works (no `state` to restore — initial defaults) | works (full restore) |
+
+#### Pre-canvas compatibility requires a serde fallback
+
+A pre-canvas-build's `Entry` enum has variants like `Text`,
+`ToolCall`, `ToolResult` — but no `Canvas`. Default `serde_json`
+deserialization of an externally-tagged enum **fails** when it
+encounters an unknown tag. So a pre-canvas build loading a v2 or v3
+transcript would `Err` on the first `Canvas` Entry, not "warn and
+render as source" as I initially wrote.
+
+For graceful pre-canvas degradation, the `Entry` enum needs a
+`#[serde(other)]` (or equivalent) variant that absorbs unknown
+tags and renders them as a degraded "[unknown entry type]" placeholder
+in the transcript view.
+
+**This is a Phase 1 followup, not Phase 2 work** — but it must be
+noted here because the pre-canvas row of the matrix above can only
+be honest about "graceful degradation" if the fallback ships. Without
+it, pre-canvas users can't load any post-canvas transcript without an
+error. If we don't backport the fallback to a Phase-1 dot release, the
+matrix above must drop the "graceful" claim and the pre-canvas row
+must say "load error."
+
+The Phase 2 plan will:
+
+1. Add `#[serde(other)] Unknown` (or similar — pick the cleanest
+   serde idiom for tagged enums) to `Entry` in `savvagent-protocol`.
+2. Cut a Phase-1 dot release that includes only that backport
+   (matches the v0.16.x line) so existing v0.16.x users get
+   graceful loading before Phase 2's v0.17.0 hits.
 
 ## Testing strategy
 
@@ -1448,6 +1588,25 @@ chunk of the "I don't read markdown plans" problem.
   takes over from here. Per `feedback_phase_release_rollup`, this
   is the first tag push for the inline-canvas initiative.
 
+#### Windows CI carries forward Phase 1's exclusion
+
+Phase 1 excluded `savvagent-canvas` and `savvagent` from the
+`test (windows-latest)` CI job because Blitz's static init hangs
+on the GitHub-hosted windows-latest runner image (root cause is
+font enumeration via DirectWrite; the runner image lacks fonts
+Blitz expects, or its enumeration path blocks). Phase 2 grows both
+crates substantially but does **not** address this — the hang is in
+Blitz/upstream, not in our code. The Phase 2 PR keeps the same
+exclusion in `.github/workflows/ci.yml` and CHANGELOG calls it out.
+
+A separate follow-up investigation (out of scope for Phase 2) will
+attempt one of: (a) install fonts into the runner image via apt-
+equivalent / vcpkg, (b) shim Blitz's font discovery to a fixed
+bundled font, (c) wait for an upstream Blitz fix and re-evaluate.
+Until that resolves, Linux + macOS coverage carries the Blitz-
+linking test surface; local Windows dev runs continue to exercise
+canvas code normally.
+
 ### Phase 0 (spike, before Phase 1 implementation begins)
 
 - Pin a Blitz version, build a minimal example that:
@@ -1534,12 +1693,19 @@ chunk of the "I don't read markdown plans" problem.
   `anyrender_vello_cpu = "0.12"`, `peniko = "0.6"`. Spike notes at
   `docs/superpowers/notes/2026-05-21-blitz-spike.md`.
 - **Default `UrlTarget`** for `<a href>` follow: **Resolved by Phase 2
-  amendment (2026-05-23).** Absolute URLs (`http://`, `https://`,
-  `mailto:`, etc.) → `SystemBrowser`. Relative paths and bare
-  filenames → `ContinueConversation` (the model probably means "look
-  at this file in the project," so we route it as a new user prompt
-  rather than try to `xdg-open` a path that may not exist or that the
-  user may not want opened in a separate process).
+  amendment (2026-05-23).** The router classifies the href by URL
+  scheme and routes accordingly:
+
+  | href shape | Disposition | Rationale |
+  |---|---|---|
+  | `http://...`, `https://...` | `Effect::OpenUrl { target: SystemBrowser }` | Standard web link; user expects browser open. |
+  | `mailto:...` | `Effect::OpenUrl { target: SystemBrowser }` | `xdg-open`/`open` route to the default mail client. |
+  | `tel:...`, `sms:...` | `Effect::OpenUrl { target: SystemBrowser }` | Same path; OS handlers route to the right app (or fail gracefully if none registered). |
+  | `data:...` | **No effect emitted; log at `debug`.** | Data URLs encode content inline; shelling out is meaningless. The user clicking is almost always a misunderstanding of what the link does. |
+  | `javascript:...` | **Blocked; log at `warn`.** | XSS-adjacent. The renderer never emits an effect for these even if Blitz somehow surfaces the click. |
+  | `file://...` | **No effect emitted; log at `debug`.** | The subset (§ *HTML+CSS subset*) excludes file:// resources, so this should not appear; if it does, treat as a subset violation. |
+  | bare path (no scheme, no `//`) — e.g. `./foo.md`, `docs/spec.md`, `foo.rs` | `Effect::OpenUrl { target: ContinueConversation }` | Model probably means "look at this file in the project." Routing it as a new user prompt is safer than blindly shelling `xdg-open` on a path that may not exist or that the user did not consent to open externally. |
+  | anything else (unknown scheme) | **No effect emitted; log at `warn`.** | Conservative default: model bug or malformed URL. |
 - **Whether `internal:html-canvas` is Core or Optional.** Lean:
   Optional in v1 (allow users to turn it off if Blitz misbehaves on
   their setup); promote to Core in a later release once stable.
