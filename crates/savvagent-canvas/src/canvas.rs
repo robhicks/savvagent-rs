@@ -176,6 +176,26 @@ impl ContentRenderer for HtmlCanvas {
     fn thaw(&mut self) {
         self.frozen = false;
     }
+
+    fn snapshot_state(&self) -> Option<Vec<u8>> {
+        // Start from the live state log (open_details + form_values, kept
+        // current by dispatch's collect_state).
+        let mut state = self.canvas_state.clone();
+        state.schema_version = 1;
+        // Fold in the currently-focused element: translate the focusable
+        // index (self.focused) to its NodeId string.
+        state.focused = self.focused.and_then(|idx| {
+            self.focusable_cache
+                .as_ref()
+                .and_then(|cache| cache.get(idx as usize))
+                .map(|(node_id, _)| node_id.to_string())
+        });
+        if state.is_empty() {
+            None
+        } else {
+            Some(state.to_bytes())
+        }
+    }
 }
 
 /// Parse `source` into a fresh, not-yet-resolved `HtmlDocument` at the
@@ -673,5 +693,52 @@ mod tests {
             c.canvas_state.open_details.is_empty(),
             "second click should toggle the details closed again"
         );
+    }
+
+    #[test]
+    fn snapshot_empty_canvas_returns_none() {
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(20),
+            "<!doctype html><body><p>plain</p></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+        assert!(c.snapshot_state().is_none(), "no stateful elements → None");
+    }
+
+    #[tokio::test]
+    async fn snapshot_captures_open_details_after_toggle() {
+        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(21),
+            "<!doctype html><body><details><summary style='display:block;width:80px;height:20px'>s</summary><p>y</p></details></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+        let summary = c.focusable_elements().into_iter().next().expect("summary focusable");
+        let ev = InputEvent::Mouse(MouseEventPortable {
+            kind: MouseEventKind::Press, button: Some(MouseButton::Left),
+            x_pixel: summary.bounds.x + summary.bounds.width / 2,
+            y_pixel: summary.bounds.y + summary.bounds.height / 2,
+            modifiers: KeyMods::default(),
+        });
+        c.dispatch(ev).await.expect("dispatch ok");
+        let snap = c.snapshot_state().expect("non-empty after toggle");
+        let state = crate::state::CanvasState::from_bytes(&snap).unwrap();
+        assert!(!state.open_details.is_empty(), "open details should be captured");
+    }
+
+    #[test]
+    fn snapshot_includes_focused_nodeid() {
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(22),
+            "<!doctype html><body><a href='x'>l1</a><a href='y'>l2</a></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+        c.set_focus(Some(1));
+        let snap = c.snapshot_state().expect("focus makes state non-empty");
+        let state = crate::state::CanvasState::from_bytes(&snap).unwrap();
+        assert!(state.focused.is_some(), "focused NodeId should be recorded");
+        // The focused id should be the NodeId of the 2nd focusable (index 1).
+        // (We can't assert the exact number, but it must be present + parseable.)
+        assert!(state.focused.as_ref().unwrap().parse::<u32>().is_ok());
     }
 }
