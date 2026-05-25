@@ -20,8 +20,8 @@ pub struct HtmlCanvas {
     focusable_cache: Option<Vec<(u32, FocusableElement)>>,
     /// Index into `focusable_cache` that's currently focused.
     focused: Option<u32>,
-    /// Phase 2: frozen flag (wired in Task 8, declared here so the field exists).
-    #[allow(dead_code)]
+    /// Phase 2: frozen flag. Set/cleared by `freeze`/`thaw`; soft-freeze
+    /// just pauses event dispatch (no re-layout, no re-paint).
     frozen: bool,
     // NOTE on the "retain Blitz document on self" item in the Task 7 plan:
     // `blitz_html::HtmlDocument` contains `dyn HtmlParserProvider` and
@@ -107,6 +107,14 @@ impl ContentRenderer for HtmlCanvas {
             }
         }
         self.focused = index;
+    }
+
+    fn freeze(&mut self) {
+        self.frozen = true;
+    }
+
+    fn thaw(&mut self) {
+        self.frozen = false;
     }
 }
 
@@ -281,6 +289,13 @@ fn render_html_to_rgba(canvas: &mut HtmlCanvas, width: u32) -> Frame {
 }
 
 #[cfg(test)]
+impl HtmlCanvas {
+    fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -346,5 +361,18 @@ mod tests {
         c.render(PixelSize { width: 200, height: 0 });
         c.set_focus(Some(99));
         assert_eq!(c.focused_index(), None, "out-of-range set_focus should clear");
+    }
+
+    #[test]
+    fn freeze_and_thaw_flip_internal_flag() {
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(3),
+            "<!doctype html><body><a href='x'>l</a></body>",
+        );
+        c.render(PixelSize { width: 100, height: 0 });
+        c.freeze();
+        assert!(c.is_frozen());
+        c.thaw();
+        assert!(!c.is_frozen());
     }
 }
