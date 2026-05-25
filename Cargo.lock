@@ -5106,6 +5106,8 @@ dependencies = [
  "blitz-traits",
  "peniko",
  "savvagent-plugin",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
