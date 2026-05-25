@@ -18,6 +18,8 @@ blitz-traits = { workspace = true }
 anyrender = { workspace = true }
 anyrender_vello_cpu = { workspace = true }
 peniko = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

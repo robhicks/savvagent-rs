@@ -21,9 +21,13 @@ mod focus;
 // the dead-code allow lives on `intercept` itself. `classify_url` and its
 // tests exercise the pure path.
 mod interceptor;
+// `CanvasState` is `pub use`'d below because the host/TUI needs it for
+// transcript persistence in later tasks (13/15/16/18+).
+mod state;
 mod subset;
 
 /// Cell ↔ pixel coordinate translation helpers.
 pub mod coords;
 pub use canvas::HtmlCanvas;
 pub use coords::{cell_to_pixel, contains_cell, CellPixelSize, CellRect};
+pub use state::CanvasState;
