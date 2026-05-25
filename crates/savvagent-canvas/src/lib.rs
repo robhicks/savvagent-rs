@@ -17,6 +17,10 @@ mod canvas;
 #[allow(dead_code)]
 mod events;
 mod focus;
+// `interceptor::intercept` is consumed by `HtmlCanvas::dispatch` in Task 13;
+// the dead-code allow lives on `intercept` itself. `classify_url` and its
+// tests exercise the pure path.
+mod interceptor;
 mod subset;
 
 /// Cell ↔ pixel coordinate translation helpers.

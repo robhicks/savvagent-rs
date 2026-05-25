@@ -274,4 +274,54 @@ mod tests {
         assert_eq!(out.target_node, None);
         assert!(!out.dirty);
     }
+
+    #[test]
+    fn link_click_produces_open_url_effect() {
+        let mut d = HtmlDocument::from_html(
+            "<!doctype html><body><a id='lnk' href='https://example.com'>x</a></body>",
+            DocumentConfig {
+                base_url: None,
+                net_provider: None,
+                style_threading: StyleThreading::Sequential,
+                viewport: Some(Viewport::new(800, 600, 1.0, ColorScheme::Light)),
+                ..Default::default()
+            },
+        );
+        {
+            let base: &mut BaseDocument = d.as_mut();
+            base.resolve(0.0);
+        }
+        let base = d.as_ref();
+        let lnk_id = find_node_by_tag(base, "a").expect("a element present");
+        let effect = crate::interceptor::intercept(base, Some(lnk_id));
+        match effect {
+            Some(savvagent_plugin::Effect::OpenUrl { url, target }) => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(target, savvagent_plugin::UrlTarget::SystemBrowser);
+            }
+            other => panic!("expected OpenUrl, got {other:?}"),
+        }
+    }
+
+    /// Depth-first search for the first element whose local tag name
+    /// matches `tag`, returning its node id. Mirrors `focus.rs`'s walk:
+    /// Blitz node ids and `node.children` entries are `usize` slab keys;
+    /// we cast to `u32` only at the boundary the interceptor expects.
+    fn find_node_by_tag(base: &BaseDocument, tag: &str) -> Option<u32> {
+        fn walk(base: &BaseDocument, id: usize, tag: &str) -> Option<usize> {
+            let node = base.get_node(id)?;
+            if let Some(e) = node.data.downcast_element()
+                && *e.name.local == *tag
+            {
+                return Some(id);
+            }
+            for c in node.children.iter().copied() {
+                if let Some(found) = walk(base, c, tag) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        walk(base, base.root_element().id, tag).map(|id| id as u32)
+    }
 }
