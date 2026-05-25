@@ -12,6 +12,10 @@
 #![warn(missing_docs)]
 
 mod canvas;
+// `events::dispatch_raw` is consumed by `HtmlCanvas::dispatch` in Task 13;
+// until then the public-in-module fns are unreferenced outside tests.
+#[allow(dead_code)]
+mod events;
 mod focus;
 mod subset;
 
