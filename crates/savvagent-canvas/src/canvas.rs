@@ -500,6 +500,24 @@ fn render_html_to_rgba(canvas: &mut HtmlCanvas, width: u32) -> Frame {
             canvas.focused = None;
         }
     }
+    // Re-sync the focus index from the state log. If `restore_state` ran
+    // before any render, `self.focused` is still None even though the
+    // restored NodeId survives in `canvas_state.focused`. Now that the cache
+    // is freshly built, translate that NodeId back into an index so focus
+    // restoration is robust regardless of restore/render ordering.
+    if canvas.focused.is_none()
+        && let Some(node_id) = canvas
+            .canvas_state
+            .focused
+            .as_ref()
+            .and_then(|s| s.parse::<u32>().ok())
+        && let Some(cache) = canvas.focusable_cache.as_ref()
+    {
+        canvas.focused = cache
+            .iter()
+            .position(|(id, _)| *id == node_id)
+            .map(|i| i as u32);
+    }
 
     // Sanity-check the buffer length matches the trait contract.
     // anyrender_vello_cpu produces RGBA8 row-major top-down, which is
@@ -800,5 +818,68 @@ mod tests {
             matches!(err, savvagent_plugin::PluginError::StateRestoreFailed(_)),
             "expected StateRestoreFailed, got {err:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn form_value_round_trips_through_snapshot_restore() {
+        // A named input with a value attribute. `snapshot_state` reads
+        // `self.canvas_state`, which is only populated by `dispatch`'s
+        // `collect_state` — a render alone never folds form values in. So a
+        // snapshot taken right after render is None (nothing changed from
+        // default). To meaningfully exercise the form_values round-trip we
+        // construct a CanvasState with form_values directly, serialize it,
+        // restore it into a canvas, and assert the value survives a
+        // snapshot → restore → snapshot cycle.
+        let source = "<!doctype html><body><form><input type='text' name='title' value='hello'></form></body>";
+
+        // Confirm the documented behavior: a fresh render captures no form
+        // values (collect_state only runs on dispatch).
+        let mut a = HtmlCanvas::new(ContentBlockId(40), source);
+        a.render(PixelSize { width: 200, height: 0 });
+        assert!(
+            a.snapshot_state().is_none(),
+            "render alone must not capture form values (collect_state runs only on dispatch)"
+        );
+
+        // Build a CanvasState carrying a form value keyed by a NodeId and
+        // round-trip it through restore → snapshot. The NodeId need not
+        // resolve in the document for the state log to survive a round-trip;
+        // `apply_state`/`collect_state` only touch the rendered document.
+        let mut seed = crate::state::CanvasState {
+            schema_version: 1,
+            ..crate::state::CanvasState::default()
+        };
+        seed.form_values.insert("title".into(), "hello".into());
+        let bytes = seed.to_bytes();
+
+        let mut b = HtmlCanvas::new(ContentBlockId(41), source);
+        b.render(PixelSize { width: 200, height: 0 });
+        b.restore_state(&bytes).expect("restore ok");
+        let snap_b = b.snapshot_state().expect("non-empty after restore");
+        let state_b = crate::state::CanvasState::from_bytes(&snap_b).unwrap();
+        assert_eq!(
+            state_b.form_values, seed.form_values,
+            "form values must round-trip through restore → snapshot"
+        );
+    }
+
+    #[test]
+    fn focus_index_restores_when_restore_precedes_render() {
+        // restore_state called BEFORE any render (empty cache), then render
+        // must re-sync self.focused from canvas_state.focused.
+        let source = "<!doctype html><body><a href='x'>l1</a><a href='y'>l2</a></body>";
+        // Build a snapshot that focuses the 2nd link.
+        let mut a = HtmlCanvas::new(ContentBlockId(42), source);
+        a.render(PixelSize { width: 200, height: 0 });
+        a.set_focus(Some(1));
+        let snap = a.snapshot_state().expect("focused → non-empty");
+
+        // Fresh canvas: restore BEFORE render (cache empty at restore time).
+        let mut b = HtmlCanvas::new(ContentBlockId(43), source);
+        b.restore_state(&snap).expect("restore ok");
+        // Cache is empty now, so self.focused may be None here.
+        b.render(PixelSize { width: 200, height: 0 });
+        // After render rebuilds the cache, focus must be re-synced to index 1.
+        assert_eq!(b.focused_index(), Some(1), "focus index must restore after render");
     }
 }
