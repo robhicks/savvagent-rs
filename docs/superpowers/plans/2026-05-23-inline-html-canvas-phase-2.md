@@ -1802,12 +1802,40 @@ git commit -m "feat(canvas): interceptor for form submit"
 
 ---
 
+> **PLAN AMENDMENT (2026-05-25, during execution):** Task 7 discovered
+> that Blitz's `HtmlDocument` is `!Send` while `ContentRenderer: Send`
+> and the crate is `#![forbid(unsafe_code)]`, so `HtmlCanvas` **cannot
+> retain the document** between calls. Tasks 13/15/16 are therefore
+> re-sequenced and redesigned around a **re-parse + replay** model:
+>
+> - **Execution order: do Task 14 (`CanvasState`) BEFORE Task 13.**
+> - `HtmlCanvas` holds a `canvas_state: CanvasState` field (the
+>   `Send` interactive-state log). It does NOT hold a document.
+> - A shared helper `apply_state(base, &CanvasState)` replays the log
+>   onto a freshly-parsed document; `collect_state(base) -> CanvasState`
+>   re-derives the log from a document. Both live in `canvas.rs` (or a
+>   small `state_apply` module).
+> - `render`: parse source → `apply_state` → resolve → paint (+ refresh
+>   focusable cache). (Phase 1 already parses every render; this just
+>   adds the replay step.)
+> - `dispatch`: parse source → `apply_state` → resolve → `dispatch_raw`
+>   → `intercept_mut` → if dirty re-resolve → `collect_state` back into
+>   `self.canvas_state` → discard document → return `InputOutcome`.
+> - `snapshot_state`: serialize `self.canvas_state` (None if empty).
+> - `restore_state`: deserialize bytes into `self.canvas_state`.
+>
+> Net effect: NodeId keys still work (the Task 1 spike proved cross-
+> process determinism), state survives across calls via the `Send` log
+> rather than a retained DOM, and Tasks 15/16 become trivial
+> serialize/deserialize wrappers. The task text below is kept for
+> reference; follow the amended model where they conflict.
+
 ## Task 13: `HtmlCanvas::dispatch` — wire raw + interceptor + dirty re-resolve
 
 **Files:**
 - Modify: `crates/savvagent-canvas/src/canvas.rs`
 
-Promote the no-op default `dispatch` to: drop events when frozen; call raw dispatch; call the interceptor; if interceptor reported dirty, re-resolve the document so the next render reflects the mutation; return `InputOutcome { effects, dirty }`.
+Promote the no-op default `dispatch` to: drop events when frozen; parse a fresh document from source; replay `self.canvas_state` via `apply_state`; resolve; call raw dispatch; call the interceptor (`intercept_mut`); if dirty, re-resolve; re-derive `self.canvas_state` via `collect_state`; return `InputOutcome { effects, dirty }`.
 
 - [ ] **Step 1: Write the failing test**
 
