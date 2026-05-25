@@ -196,6 +196,23 @@ impl ContentRenderer for HtmlCanvas {
             Some(state.to_bytes())
         }
     }
+
+    fn restore_state(&mut self, bytes: &[u8]) -> Result<(), savvagent_plugin::PluginError> {
+        let state = crate::state::CanvasState::from_bytes(bytes)
+            .map_err(savvagent_plugin::PluginError::StateRestoreFailed)?;
+        // Sync the focus index if the focusable cache is already populated
+        // (best-effort; a subsequent render rebuilds the cache anyway).
+        if let Some(focused_id) = state.focused.as_ref().and_then(|s| s.parse::<u32>().ok())
+            && let Some(cache) = self.focusable_cache.as_ref()
+        {
+            self.focused = cache
+                .iter()
+                .position(|(id, _)| *id == focused_id)
+                .map(|i| i as u32);
+        }
+        self.canvas_state = state;
+        Ok(())
+    }
 }
 
 /// Parse `source` into a fresh, not-yet-resolved `HtmlDocument` at the
@@ -740,5 +757,48 @@ mod tests {
         // The focused id should be the NodeId of the 2nd focusable (index 1).
         // (We can't assert the exact number, but it must be present + parseable.)
         assert!(state.focused.as_ref().unwrap().parse::<u32>().is_ok());
+    }
+
+    #[tokio::test]
+    async fn restore_state_round_trips_open_details() {
+        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        // Build canvas A, toggle a <details> open, snapshot it.
+        let mut a = HtmlCanvas::new(
+            ContentBlockId(30),
+            "<!doctype html><body><details><summary style='display:block;width:80px;height:20px'>s</summary><p>y</p></details></body>",
+        );
+        a.render(PixelSize { width: 200, height: 0 });
+        let summary = a.focusable_elements().into_iter().next().expect("summary");
+        let ev = InputEvent::Mouse(MouseEventPortable {
+            kind: MouseEventKind::Press, button: Some(MouseButton::Left),
+            x_pixel: summary.bounds.x + summary.bounds.width / 2,
+            y_pixel: summary.bounds.y + summary.bounds.height / 2,
+            modifiers: KeyMods::default(),
+        });
+        a.dispatch(ev).await.expect("dispatch ok");
+        let snap = a.snapshot_state().expect("non-empty after toggle");
+
+        // Fresh canvas B with the SAME source; restore the snapshot.
+        let mut b = HtmlCanvas::new(
+            ContentBlockId(31),
+            "<!doctype html><body><details><summary style='display:block;width:80px;height:20px'>s</summary><p>y</p></details></body>",
+        );
+        b.render(PixelSize { width: 200, height: 0 });
+        b.restore_state(&snap).expect("restore ok");
+        // Snapshot B; its open_details should now match A's.
+        let snap_b = b.snapshot_state().expect("non-empty after restore");
+        let state_b = crate::state::CanvasState::from_bytes(&snap_b).unwrap();
+        assert!(!state_b.open_details.is_empty(), "restored open details");
+    }
+
+    #[test]
+    fn restore_state_returns_error_on_garbage() {
+        let mut c = HtmlCanvas::new(ContentBlockId(32), "<!doctype html><body></body>");
+        c.render(PixelSize { width: 100, height: 0 });
+        let err = c.restore_state(b"not json").unwrap_err();
+        assert!(
+            matches!(err, savvagent_plugin::PluginError::StateRestoreFailed(_)),
+            "expected StateRestoreFailed, got {err:?}",
+        );
     }
 }
