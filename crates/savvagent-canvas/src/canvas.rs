@@ -23,6 +23,13 @@ pub struct HtmlCanvas {
     /// Phase 2: frozen flag. Set/cleared by `freeze`/`thaw`; soft-freeze
     /// just pauses event dispatch (no re-layout, no re-paint).
     frozen: bool,
+    /// Interactive-state log. Replayed onto each freshly-parsed document
+    /// (render + dispatch); re-derived after each mutating dispatch.
+    canvas_state: crate::state::CanvasState,
+    /// Width (px) of the most recent render. dispatch must parse + resolve
+    /// at this width so hit-test pixel coords line up with what's on screen.
+    /// `None` before the first render.
+    last_render_width: Option<u32>,
     // NOTE on the "retain Blitz document on self" item in the Task 7 plan:
     // `blitz_html::HtmlDocument` contains `dyn HtmlParserProvider` and
     // `dyn FontMetricsProvider` trait objects that are neither `Send` nor
@@ -50,6 +57,7 @@ impl fmt::Debug for HtmlCanvas {
             )
             .field("focused", &self.focused)
             .field("frozen", &self.frozen)
+            .field("last_render_width", &self.last_render_width)
             .finish()
     }
 }
@@ -64,6 +72,8 @@ impl HtmlCanvas {
             focusable_cache: None,
             focused: None,
             frozen: false,
+            canvas_state: crate::state::CanvasState::default(),
+            last_render_width: None,
         }
     }
 
@@ -81,6 +91,56 @@ impl ContentRenderer for HtmlCanvas {
 
     fn render(&mut self, size: PixelSize) -> Frame {
         render_html_to_rgba(self, size.width)
+    }
+
+    async fn dispatch(
+        &mut self,
+        event: savvagent_plugin::InputEvent,
+    ) -> Result<savvagent_plugin::InputOutcome, savvagent_plugin::PluginError> {
+        use blitz_dom::BaseDocument;
+
+        if self.frozen {
+            return Ok(savvagent_plugin::InputOutcome {
+                effects: Vec::new(),
+                dirty: false,
+            });
+        }
+        // dispatch must hit-test against the same layout the user sees, so it
+        // re-parses + resolves at the last render width. Before the first
+        // render there is no width and nothing has been painted, so drop.
+        let width = match self.last_render_width {
+            Some(w) => w.max(1),
+            None => {
+                return Ok(savvagent_plugin::InputOutcome {
+                    effects: Vec::new(),
+                    dirty: false,
+                });
+            }
+        };
+
+        // Parse fresh at the last render width, replay current state, resolve.
+        let mut document = parse_and_apply(&self.source, width, &self.canvas_state);
+        {
+            let base: &mut BaseDocument = document.as_mut();
+            base.resolve(0.0);
+        }
+
+        let base: &mut BaseDocument = document.as_mut();
+        let raw = crate::events::dispatch_raw(base, &event);
+        let outcome = crate::interceptor::intercept_mut(base, raw.target_node);
+        if outcome.dirty {
+            base.resolve(0.0);
+        }
+        // Re-derive state so this event's mutation persists to the next parse.
+        // Preserve host-managed `focused` (collect_state never sets it).
+        let focused = self.canvas_state.focused.take();
+        self.canvas_state = collect_state(base);
+        self.canvas_state.focused = focused;
+
+        Ok(savvagent_plugin::InputOutcome {
+            effects: outcome.effect.into_iter().collect(),
+            dirty: raw.dirty || outcome.dirty,
+        })
     }
 
     fn focusable_elements(&self) -> Vec<FocusableElement> {
@@ -118,6 +178,156 @@ impl ContentRenderer for HtmlCanvas {
     }
 }
 
+/// Parse `source` into a fresh, not-yet-resolved `HtmlDocument` at the
+/// given measure viewport width, then replay `state`'s semantic
+/// mutations onto it via [`apply_state`]. The caller must
+/// `base.resolve(0.0)` afterwards.
+///
+/// Shared by `render` (measure pass) and `dispatch` so both see an
+/// identical replayed document; the `!Send` document never escapes the
+/// caller's stack frame.
+fn parse_and_apply(
+    source: &str,
+    width: u32,
+    state: &crate::state::CanvasState,
+) -> blitz_html::HtmlDocument {
+    use blitz_dom::{BaseDocument, DocumentConfig, StyleThreading};
+    use blitz_html::HtmlDocument;
+    use blitz_traits::shell::{ColorScheme, Viewport};
+
+    // Generous measure-pass height; render replaces it with the natural
+    // height before the final paint, and dispatch only needs a viewport big
+    // enough that hit-testable content isn't clipped.
+    let measure_height: u32 = 100_000;
+    let mut document = HtmlDocument::from_html(
+        source,
+        DocumentConfig {
+            base_url: None,
+            net_provider: None,
+            // Sequential: Blitz's default Parallel threading panics with
+            // `already mutably borrowed` when two HtmlCanvas instances resolve
+            // concurrently against Stylo's global thread pool (blitz #430).
+            style_threading: StyleThreading::Sequential,
+            viewport: Some(Viewport::new(
+                width,
+                measure_height,
+                1.0,
+                ColorScheme::Light,
+            )),
+            ..Default::default()
+        },
+    );
+    {
+        let base: &mut BaseDocument = document.as_mut();
+        apply_state(base, state);
+    }
+    document
+}
+
+/// Replay a [`CanvasState`](crate::state::CanvasState)'s semantic
+/// mutations onto a freshly-parsed, not-yet-resolved document: sets the
+/// `open` attribute on the `<details>` nodes in `open_details` and the
+/// `value` attribute on the form fields in `form_values`. Call BEFORE
+/// `base.resolve(0.0)`.
+///
+/// NodeId keys are stringified `usize` slab keys (e.g. `"42"`); the
+/// Task 1 spike proved they're stable across parses of identical source,
+/// so a key collected from one parse is valid on the next. Keys that no
+/// longer resolve, or resolve to the wrong element kind, are skipped.
+fn apply_state(base: &mut blitz_dom::BaseDocument, state: &crate::state::CanvasState) {
+    use blitz_dom::qual_name;
+
+    // Collect the concrete (id, attr-value) edits up front under immutable
+    // borrows, then apply them through a single mutator scope so the
+    // immutable borrows are released before the mutable one is taken.
+    let mut details_to_open: Vec<usize> = Vec::new();
+    for key in &state.open_details {
+        let Ok(id) = key.parse::<usize>() else {
+            continue;
+        };
+        let is_details = base
+            .get_node(id)
+            .and_then(|n| n.data.downcast_element())
+            .map(|e| *e.name.local == *"details")
+            .unwrap_or(false);
+        if is_details {
+            details_to_open.push(id);
+        }
+    }
+
+    let mut field_values: Vec<(usize, String)> = Vec::new();
+    for (key, val) in &state.form_values {
+        let Ok(id) = key.parse::<usize>() else {
+            continue;
+        };
+        let is_field = base
+            .get_node(id)
+            .and_then(|n| n.data.downcast_element())
+            .map(|e| {
+                let local = &e.name.local;
+                *local == *"input" || *local == *"select" || *local == *"textarea"
+            })
+            .unwrap_or(false);
+        if is_field {
+            field_values.push((id, val.clone()));
+        }
+    }
+
+    if details_to_open.is_empty() && field_values.is_empty() {
+        return;
+    }
+
+    let mut mutator = base.mutate();
+    for id in details_to_open {
+        // `<details open>` is a boolean attribute; empty value is canonical.
+        mutator.set_attribute(id, qual_name!("open"), "");
+    }
+    for (id, val) in field_values {
+        mutator.set_attribute(id, qual_name!("value"), &val);
+    }
+    // Drop flushes the mutator's pending mutations; must happen before the
+    // caller's `resolve`.
+    drop(mutator);
+}
+
+/// Re-derive a [`CanvasState`](crate::state::CanvasState) by walking a
+/// document (resolved or not): collects open `<details>` ids and named
+/// form-field values. Does NOT set `focused` (host-managed via
+/// `set_focus`; the dispatch path folds the prior `focused` back in).
+fn collect_state(base: &blitz_dom::BaseDocument) -> crate::state::CanvasState {
+    use blitz_dom::{BaseDocument, local_name};
+
+    fn walk(base: &BaseDocument, id: usize, state: &mut crate::state::CanvasState) {
+        let Some(node) = base.get_node(id) else {
+            return;
+        };
+        if let Some(e) = node.data.downcast_element() {
+            let local = &e.name.local;
+            let is_field =
+                *local == *"input" || *local == *"select" || *local == *"textarea";
+            if *local == *"details" && e.attr(local_name!("open")).is_some() {
+                state.open_details.insert(format!("{id}"));
+            } else if is_field
+                && let Some(name) = e.attr(local_name!("name"))
+                && !name.is_empty()
+            {
+                let value = e.attr(local_name!("value")).unwrap_or("").to_string();
+                state.form_values.insert(format!("{id}"), value);
+            }
+        }
+        for c in node.children.iter().copied() {
+            walk(base, c, state);
+        }
+    }
+
+    let mut state = crate::state::CanvasState {
+        schema_version: 1,
+        ..crate::state::CanvasState::default()
+    };
+    walk(base, base.root_element().id, &mut state);
+    state
+}
+
 /// Headless Blitz pipeline: parse `canvas.source` → resolve at the
 /// requested width → measure natural height → repaint at exact natural
 /// height → return an Rgba8 [`Frame`]. After the paint, refresh
@@ -136,8 +346,7 @@ impl ContentRenderer for HtmlCanvas {
 fn render_html_to_rgba(canvas: &mut HtmlCanvas, width: u32) -> Frame {
     use anyrender::{ImageRenderer as _, PaintScene as _};
     use anyrender_vello_cpu::VelloCpuImageRenderer;
-    use blitz_dom::{BaseDocument, DocumentConfig, StyleThreading};
-    use blitz_html::HtmlDocument;
+    use blitz_dom::BaseDocument;
     use blitz_paint::paint_scene;
     use blitz_traits::shell::{ColorScheme, Viewport};
     use peniko::{
@@ -152,30 +361,16 @@ fn render_html_to_rgba(canvas: &mut HtmlCanvas, width: u32) -> Frame {
     // Width must be > 0 — guard against accidental 0 by clamping to 1px.
     // (The trait contract says `size.width > 0`; we never want a panic.)
     let width = width.max(1);
-    // Initial measure pass uses a generous viewport height; we replace it
-    // with the document's natural height before the final paint.
-    let measure_height: u32 = 100_000;
+    // Record the width dispatch must re-parse at so hit-test pixel coords
+    // line up with the frame we're about to paint.
+    canvas.last_render_width = Some(width);
     let scale: f32 = 1.0;
 
-    // ---- Measure pass: parse + resolve at requested width to get natural height.
-    let mut document = HtmlDocument::from_html(
-        &canvas.source,
-        DocumentConfig {
-            base_url: None,
-            net_provider: None,
-            // Sequential: Blitz's default Parallel threading panics with
-            // `already mutably borrowed` when two HtmlCanvas instances resolve
-            // concurrently against Stylo's global thread pool (blitz #430).
-            style_threading: StyleThreading::Sequential,
-            viewport: Some(Viewport::new(
-                width,
-                measure_height,
-                scale,
-                ColorScheme::Light,
-            )),
-            ..Default::default()
-        },
-    );
+    // ---- Measure pass: parse + replay state + resolve at requested width to
+    // get natural height. `parse_and_apply` replays `canvas_state` (details
+    // toggles, form values) onto the fresh document before we resolve, so the
+    // painted frame reflects prior interactions.
+    let mut document = parse_and_apply(&canvas.source, width, &canvas.canvas_state);
     {
         let base: &mut BaseDocument = document.as_mut();
         base.resolve(0.0);
@@ -374,5 +569,109 @@ mod tests {
         assert!(c.is_frozen());
         c.thaw();
         assert!(!c.is_frozen());
+    }
+
+    #[tokio::test]
+    async fn dispatch_link_click_returns_open_url_effect() {
+        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(10),
+            "<!doctype html><body><a href='https://example.com' style='display:block;width:100px;height:50px'>x</a></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+        let ev = InputEvent::Mouse(MouseEventPortable {
+            kind: MouseEventKind::Press,
+            button: Some(MouseButton::Left),
+            x_pixel: 16,
+            y_pixel: 24,
+            modifiers: KeyMods::default(),
+        });
+        let outcome = c.dispatch(ev).await.expect("dispatch ok");
+        assert_eq!(outcome.effects.len(), 1, "expected one effect");
+        let savvagent_plugin::Effect::OpenUrl { url, target } =
+            outcome.effects.into_iter().next().unwrap()
+        else {
+            panic!("expected OpenUrl");
+        };
+        assert_eq!(url, "https://example.com");
+        assert_eq!(target, savvagent_plugin::UrlTarget::SystemBrowser);
+    }
+
+    #[tokio::test]
+    async fn dispatch_drops_events_when_frozen() {
+        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(11),
+            "<!doctype html><body><a href='x'>x</a></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+        c.freeze();
+        let ev = InputEvent::Mouse(MouseEventPortable {
+            kind: MouseEventKind::Press,
+            button: Some(MouseButton::Left),
+            x_pixel: 16,
+            y_pixel: 24,
+            modifiers: KeyMods::default(),
+        });
+        let outcome = c.dispatch(ev).await.expect("dispatch ok");
+        assert!(outcome.effects.is_empty(), "frozen canvas must drop effects");
+        assert!(!outcome.dirty);
+    }
+
+    /// End-to-end proof of the amended re-parse + state-log replay model:
+    /// a `<details>` toggle from one dispatch must survive into the next
+    /// freshly-parsed document. We click the summary twice; both clicks
+    /// report `dirty`, which is only possible if the first toggle's `open`
+    /// attribute was re-derived into `canvas_state` and replayed before the
+    /// second dispatch (a fresh parse starts closed, so without the replay
+    /// the second click would just re-open and produce identical results —
+    /// but more importantly the toggle would be lost). We additionally
+    /// assert the state log itself records the open `<details>` after the
+    /// first click and is empty again after the second.
+    #[tokio::test]
+    async fn details_toggle_persists_across_dispatch_via_state_log() {
+        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        let mut c = HtmlCanvas::new(
+            ContentBlockId(12),
+            "<!doctype html><body><details><summary style='display:block;width:80px;height:20px'>s</summary><p>body</p></details></body>",
+        );
+        c.render(PixelSize { width: 200, height: 0 });
+
+        // Click the summary at its laid-out center.
+        let summary = c
+            .focusable_elements()
+            .into_iter()
+            .next()
+            .expect("summary focusable");
+        let cx = (summary.bounds.x + summary.bounds.width / 2).max(1);
+        let cy = (summary.bounds.y + summary.bounds.height / 2).max(1);
+        let click = |cx: u32, cy: u32| {
+            InputEvent::Mouse(MouseEventPortable {
+                kind: MouseEventKind::Press,
+                button: Some(MouseButton::Left),
+                x_pixel: cx,
+                y_pixel: cy,
+                modifiers: KeyMods::default(),
+            })
+        };
+
+        let outcome = c.dispatch(click(cx, cy)).await.expect("dispatch ok");
+        assert!(outcome.dirty, "summary toggle should be dirty");
+        assert_eq!(
+            c.canvas_state.open_details.len(),
+            1,
+            "first click should record the details as open in the state log"
+        );
+
+        // A SECOND identical click must toggle it back to closed. This only
+        // works if the first toggle persisted: the second dispatch re-parses
+        // from source (closed), replays the open state, then the click flips
+        // it shut again — proving the replay round-trip.
+        let outcome2 = c.dispatch(click(cx, cy)).await.expect("dispatch ok");
+        assert!(outcome2.dirty, "second toggle should also be dirty");
+        assert!(
+            c.canvas_state.open_details.is_empty(),
+            "second click should toggle the details closed again"
+        );
     }
 }
