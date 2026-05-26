@@ -49,6 +49,22 @@ impl CanvasRegistry {
         self.renderers.get_mut(&id)
     }
 
+    /// Freeze the renderer for `id` (no-op if no such renderer). Used by
+    /// the focus state machine when focus leaves a canvas.
+    pub fn freeze(&mut self, id: ContentBlockId) {
+        if let Some(r) = self.renderers.get_mut(&id) {
+            r.freeze();
+        }
+    }
+
+    /// Thaw the renderer for `id` (no-op if no such renderer). Used by the
+    /// focus state machine when focus enters a canvas.
+    pub fn thaw(&mut self, id: ContentBlockId) {
+        if let Some(r) = self.renderers.get_mut(&id) {
+            r.thaw();
+        }
+    }
+
     /// Expose the image picker for rendering (Task 16 uses this to produce
     /// `StatefulProtocol` instances from rendered `Frame`s).
     #[allow(dead_code)]
@@ -270,6 +286,21 @@ pub enum InputMode {
     },
     /// Transcript picker open — selecting a file for `/resume`.
     SelectingTranscript,
+    /// Focus is inside an inline HTML canvas. Key/mouse events route to
+    /// the canvas's renderer (Tasks 21-25). `element_idx` is the index
+    /// into the canvas's `focusable_elements()` list (None = focused the
+    /// canvas but no specific element yet).
+    Canvas {
+        /// Which canvas holds focus (key into `App::canvas_registry`).
+        id: savvagent_plugin::ContentBlockId,
+        /// Currently focused element index within the canvas, if any.
+        ///
+        /// `#[allow(dead_code)]`: stored now, read by the key/mouse
+        /// routing in Tasks 22-25; `-D warnings` flags the unused field
+        /// until then.
+        #[allow(dead_code)]
+        element_idx: Option<u32>,
+    },
 }
 
 /// Queued model-change request emitted by the model picker. The `run_app`
@@ -786,6 +817,42 @@ pub(crate) enum WheelDirection {
 }
 
 impl App {
+    /// True iff input focus is on the given canvas.
+    ///
+    /// `#[allow(dead_code)]`: only exercised by tests until the focus
+    /// routing lands in Tasks 21-25, but `-D warnings` treats unused
+    /// non-test items in this binary crate as errors.
+    #[allow(dead_code)]
+    pub(crate) fn is_canvas_focused(&self, id: savvagent_plugin::ContentBlockId) -> bool {
+        matches!(self.input_mode, InputMode::Canvas { id: x, .. } if x == id)
+    }
+
+    /// Move focus into a canvas. Freezes any previously-focused (different)
+    /// canvas and thaws the incoming one.
+    #[allow(dead_code)]
+    pub(crate) fn focus_canvas(
+        &mut self,
+        id: savvagent_plugin::ContentBlockId,
+        element_idx: Option<u32>,
+    ) {
+        if let InputMode::Canvas { id: prev, .. } = self.input_mode {
+            if prev != id {
+                self.canvas_registry.freeze(prev);
+            }
+        }
+        self.canvas_registry.thaw(id);
+        self.input_mode = InputMode::Canvas { id, element_idx };
+    }
+
+    /// Leave canvas focus, returning to the prompt editor. Freezes the canvas.
+    #[allow(dead_code)]
+    pub(crate) fn unfocus_canvas(&mut self) {
+        if let InputMode::Canvas { id, .. } = self.input_mode {
+            self.canvas_registry.freeze(id);
+        }
+        self.input_mode = InputMode::Editing;
+    }
+
     /// Build TUI state. The host runs out-of-band; the app only carries the
     /// model name (for the header), the directory transcripts get written
     /// into, and the conversation log it builds from streaming events.
@@ -2522,6 +2589,7 @@ mod tests {
             InputMode::PermissionPrompt => "PermissionPrompt",
             InputMode::BashNetworkPrompt { .. } => "BashNetworkPrompt",
             InputMode::SelectingTranscript => "SelectingTranscript",
+            InputMode::Canvas { .. } => "Canvas",
         }
     }
 
@@ -2709,6 +2777,31 @@ mod tests {
             written.contains("source_len=8"),
             "expected source_len in transcript, got: {written}"
         );
+    }
+
+    #[test]
+    fn focus_canvas_sets_input_mode_and_is_focused() {
+        let mut app = fresh_app();
+        let id = savvagent_plugin::ContentBlockId(7);
+        // No renderer registered for `id`; freeze/thaw must no-op gracefully.
+        app.focus_canvas(id, Some(2));
+        assert!(app.is_canvas_focused(id));
+        if let InputMode::Canvas { id: x, element_idx } = app.input_mode {
+            assert_eq!(x, id);
+            assert_eq!(element_idx, Some(2));
+        } else {
+            panic!("expected Canvas input mode");
+        }
+    }
+
+    #[test]
+    fn unfocus_canvas_returns_to_editing() {
+        let mut app = fresh_app();
+        let id = savvagent_plugin::ContentBlockId(8);
+        app.focus_canvas(id, None);
+        app.unfocus_canvas();
+        assert!(matches!(app.input_mode, InputMode::Editing));
+        assert!(!app.is_canvas_focused(id));
     }
 
     #[test]

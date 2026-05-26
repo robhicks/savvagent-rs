@@ -3525,6 +3525,8 @@ async fn run_app(
                 }
                 _ => {}
             },
+            // canvas key routing wired in Tasks 22-25
+            InputMode::Canvas { .. } => {}
         }
     }
 }
