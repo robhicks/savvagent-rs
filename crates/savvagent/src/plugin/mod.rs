@@ -157,6 +157,45 @@ mod tests {
     use crate::plugin::registry::PluginRegistry;
     use savvagent_plugin::PluginId;
 
+    /// Reproduce the exact runtime canvas-renderer resolution path:
+    /// full builtin set → registry → indexes → `content_renderer_for("html")`
+    /// → `registry.get(id).create_renderer("html")`. This guards against the
+    /// `ContentRendererNotFound("html")` runtime failure seen in the field by
+    /// proving the index entry and the registered plugin instance agree.
+    #[tokio::test]
+    async fn html_renderer_resolves_through_registry_and_indexes() {
+        use crate::plugin::manifests::Indexes;
+        use crate::plugin::registry::PluginRegistry;
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+        let set = register_builtins(
+            Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            Arc::new(tokio::sync::RwLock::new(
+                crate::plugin::builtin::user_hooks::discovery::HooksIndex::default(),
+            )),
+            "test-session".into(),
+            std::path::PathBuf::from("/tmp"),
+            Arc::new(tokio::sync::RwLock::new(std::path::PathBuf::from(
+                "/t.json",
+            ))),
+        );
+        let registry = PluginRegistry::new(set);
+        let indexes = Indexes::build(&registry).await.expect("indexes build");
+        let pid = indexes
+            .content_renderer_for("html")
+            .expect("html renderer must be indexed")
+            .clone();
+        assert_eq!(pid.as_str(), "internal:html-canvas");
+        let handle = registry.get(&pid).expect("plugin must be in registry");
+        let guard = handle.lock().await;
+        let r = guard.create_renderer("html", savvagent_plugin::ContentBlockId(0), "<p>x</p>");
+        assert!(
+            r.is_ok(),
+            "registry-resolved plugin must create an html renderer, got {:?}",
+            r.err()
+        );
+    }
+
     #[tokio::test]
     async fn register_builtins_pr8_complete() {
         use std::collections::BTreeMap;

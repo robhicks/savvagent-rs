@@ -355,6 +355,15 @@ impl Plugin for BoxedPlugin {
     fn themes(&self) -> Vec<savvagent_plugin::ThemeEntry> {
         self.0.themes()
     }
+
+    fn create_renderer(
+        &self,
+        block_type: &str,
+        id: savvagent_plugin::ContentBlockId,
+        source: &str,
+    ) -> Result<Box<dyn savvagent_plugin::ContentRenderer>, savvagent_plugin::PluginError> {
+        self.0.create_renderer(block_type, id, source)
+    }
 }
 
 #[cfg(test)]
