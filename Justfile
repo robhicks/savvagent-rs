@@ -10,7 +10,7 @@
 # repo so day-to-day `cargo test` doesn't need the wasm toolchain.
 
 # Build all wasm fixtures and copy them into the test fixtures dir.
-build-fixtures: build-fixture-static build-fixture-interactive
+build-fixtures: build-fixture-static build-fixture-interactive build-fixture-provider
 
 # Build the `plugin-static` world fixture and copy to tests/fixtures/static.wasm.
 #
@@ -35,5 +35,11 @@ build-fixture-interactive:
     cp crates/savvagent-plugin-wasm/tests/fixtures-src/interactive/target/wasm32-unknown-unknown/release/fixture_interactive.wasm \
        crates/savvagent-plugin-wasm/tests/fixtures/interactive.wasm
 
-# Task 6 will append `build-fixture-provider` recipe here (and the
-# matching source dir).
+# Build the `plugin-provider` world fixture and copy to
+# tests/fixtures/provider.wasm. Same `wasm32-unknown-unknown` target as the
+# static / interactive fixtures.
+build-fixture-provider:
+    cd crates/savvagent-plugin-wasm/tests/fixtures-src/provider && \
+        cargo component build --target wasm32-unknown-unknown --release
+    cp crates/savvagent-plugin-wasm/tests/fixtures-src/provider/target/wasm32-unknown-unknown/release/fixture_provider.wasm \
+       crates/savvagent-plugin-wasm/tests/fixtures/provider.wasm

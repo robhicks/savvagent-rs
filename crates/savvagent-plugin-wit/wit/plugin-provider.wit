@@ -23,9 +23,11 @@ world plugin-provider {
     import progress-capability;
 
     // ---- Exports -----------------------------------------------------
-    // `init` returns a provider manifest the host uses to register the
-    // plugin's models (and the default-model id, if any).
-    export init: func() -> result<provider-manifest, plugin-error>;
+    // `manifest` returns a provider manifest the host uses to register the
+    // plugin's models (and the default-model id, if any). Named `manifest`
+    // (not `init`) to align with the `plugin-static` and `plugin-interactive`
+    // worlds, which both export `manifest()` as the discovery entry point.
+    export manifest: func() -> result<provider-manifest, plugin-error>;
 
     // Core SPP `complete` call. Provider errors flow back as
     // `provider-error`; plugin-side bugs (panics, unsupported config) flow

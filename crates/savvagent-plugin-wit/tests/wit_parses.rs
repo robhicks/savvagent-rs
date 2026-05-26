@@ -147,7 +147,7 @@ fn plugin_provider_world_shape() {
     // function imports keep their plain name.
     assert_world_shape(
         "plugin-provider",
-        &["init", "complete", "list-models", "count-tokens"],
+        &["manifest", "complete", "list-models", "count-tokens"],
         &[
             "log",
             "savvagent:plugin/http-capability@0.1.0",

@@ -85,11 +85,23 @@ pub mod interactive_world {
 }
 
 /// Host bindings for the `plugin-provider` world.
+///
+/// Like the interactive world, this aliases the shared
+/// `savvagent:plugin/types` interface to the *same* Rust types the static
+/// world emits — so `LogLevel`, `PluginManifest`, and `PluginError`
+/// resolve to identical types across the three worlds (callers can pass
+/// a `wit::LogLevel` from any world's bindings to the shared host
+/// imports without per-world dispatch). The `spp` interface is *not*
+/// aliased: it has no counterpart in the other worlds, so per-world
+/// duplicates would be empty anyway.
 #[allow(missing_docs, clippy::needless_lifetimes)]
 pub mod provider_world {
     wasmtime::component::bindgen!({
         path: "../savvagent-plugin-wit/wit",
         world: "plugin-provider",
         async: true,
+        with: {
+            "savvagent:plugin/types@0.1.0": crate::static_world::savvagent::plugin::types,
+        },
     });
 }

@@ -4287,7 +4287,10 @@ version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "keyring",
  "proptest",
+ "reqwest 0.13.3",
+ "savvagent-mcp",
  "savvagent-plugin",
  "savvagent-plugin-wit",
  "savvagent-protocol",
@@ -4299,6 +4302,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "url",
  "walkdir",
  "wasmtime",
 ]
@@ -5758,6 +5762,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
