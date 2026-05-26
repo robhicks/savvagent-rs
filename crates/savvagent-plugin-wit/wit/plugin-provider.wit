@@ -1,0 +1,10 @@
+package savvagent:plugin@0.1.0;
+
+// `plugin-provider` world — plugins implementing a `ProviderClient` over
+// the SPP types in `spp.wit`. Skeleton only in Task 1; fully fleshed out
+// in Task 2 (adds http/keyring/progress imports and `complete`,
+// `list-models`, `count-tokens` exports).
+world plugin-provider {
+    use types.{plugin-manifest, plugin-error};
+    export manifest: func() -> result<plugin-manifest, plugin-error>;
+}

@@ -1519,6 +1519,9 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heck"
@@ -3810,6 +3813,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "savvagent-plugin-wit"
+version = "0.17.0"
+dependencies = [
+ "wit-parser 0.250.0",
+]
+
+[[package]]
 name = "savvagent-protocol"
 version = "0.17.0"
 dependencies = [
@@ -5377,7 +5387,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "990065f2fe63003fe337b932cfb5e3b80e0b4d0f5ff650e6985b1048f62c8319"
 dependencies = [
  "leb128fmt",
- "wasmparser",
+ "wasmparser 0.244.0",
 ]
 
 [[package]]
@@ -5389,7 +5399,7 @@ dependencies = [
  "anyhow",
  "indexmap",
  "wasm-encoder",
- "wasmparser",
+ "wasmparser 0.244.0",
 ]
 
 [[package]]
@@ -5413,6 +5423,17 @@ checksum = "47b807c72e1bac69382b3a6fb3dbe8ea4c0ed87ff5629b8685ae6b9a611028fe"
 dependencies = [
  "bitflags 2.11.1",
  "hashbrown 0.15.5",
+ "indexmap",
+ "semver",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.250.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "071d99cdfb8111603ed05500506c3298a940b58d609dd0259d3981785dd33556"
+dependencies = [
+ "bitflags 2.11.1",
  "indexmap",
  "semver",
 ]
@@ -5958,7 +5979,7 @@ checksum = "ea61de684c3ea68cb082b7a88508a8b27fcc8b797d738bfc99a82facf1d752dc"
 dependencies = [
  "anyhow",
  "heck",
- "wit-parser",
+ "wit-parser 0.244.0",
 ]
 
 [[package]]
@@ -6007,8 +6028,8 @@ dependencies = [
  "serde_json",
  "wasm-encoder",
  "wasm-metadata",
- "wasmparser",
- "wit-parser",
+ "wasmparser 0.244.0",
+ "wit-parser 0.244.0",
 ]
 
 [[package]]
@@ -6026,7 +6047,26 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "unicode-xid",
- "wasmparser",
+ "wasmparser 0.244.0",
+]
+
+[[package]]
+name = "wit-parser"
+version = "0.250.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7be74761ad42af22e13d82d89804369aa7298d4d67ae1523aa694f2b30e6b7a"
+dependencies = [
+ "anyhow",
+ "hashbrown 0.17.0",
+ "id-arena",
+ "indexmap",
+ "log",
+ "semver",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "unicode-xid",
+ "wasmparser 0.250.0",
 ]
 
 [[package]]

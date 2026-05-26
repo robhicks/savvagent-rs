@@ -1,0 +1,181 @@
+package savvagent:plugin@0.1.0;
+
+// SPP (Streamed Provider Protocol) types, mirrored from `savvagent-protocol`
+// field-for-field. Used by the `plugin-provider` world.
+//
+// Reality reconciliation vs the design spec (§3): the spec sketched these
+// under a separate `savvagent:spp@0.1.0` package. Keeping a second package
+// alongside `savvagent:plugin@0.1.0` in the same `wit/` directory would
+// force the WIT loader to walk a `deps/` subdir per the multi-package
+// convention, which complicates both `wit-parser` consumption (Task 1's
+// sanity test) and `wasmtime::component::bindgen!` (Task 2's host bindings).
+// Inlining SPP into the `savvagent:plugin` package under a sibling `spp`
+// interface keeps the directory flat, single-package, and unblocks both
+// callsites; the `From`/`Into` impls between `savvagent-protocol` and the
+// generated bindings land in Task 2's `spp_convert.rs` regardless of
+// package shape.
+interface spp {
+    // SPP types mirrored from savvagent-protocol field-for-field.
+    // From/Into impls live in savvagent-plugin-wasm/src/spp_convert.rs.
+
+    record complete-request {
+        model: string,
+        system: option<string>,
+        messages: list<message>,
+        tools: list<tool-def>,
+        max-tokens: option<u32>,
+        streaming: option<streaming-config>,
+        thinking: option<thinking-config>,
+    }
+
+    record message {
+        role: role,
+        content: list<content-block>,
+    }
+
+    variant role { user, assistant, system }
+
+    variant content-block {
+        text(string),
+        tool-use(tool-use-block),
+        tool-result(tool-result-block),
+        image(image-block),
+        thinking(thinking-block),
+    }
+
+    record tool-use-block {
+        id: string,
+        name: string,
+        input-json: string,
+    }
+
+    record tool-result-block {
+        tool-use-id: string,
+        content: string,
+        is-error: bool,
+    }
+
+    record image-block {
+        media-type: string,
+        data-base64: string,
+    }
+
+    record thinking-block {
+        text: string,
+        signature: option<string>,
+    }
+
+    record tool-def {
+        name: string,
+        description: string,
+        input-schema-json: string,
+    }
+
+    record streaming-config { enabled: bool }
+    record thinking-config { budget-tokens: u32 }
+
+    record complete-response {
+        id: string,
+        model: string,
+        content: list<content-block>,
+        stop-reason: stop-reason,
+        usage: usage,
+    }
+
+    variant stop-reason {
+        end-turn,
+        max-tokens,
+        stop-sequence,
+        tool-use,
+        unknown(string),
+    }
+
+    record usage {
+        input-tokens: u32,
+        output-tokens: u32,
+    }
+
+    // ---- Streaming events ------------------------------------------
+    variant stream-event {
+        message-start(message-meta),
+        content-block-start(content-block-start-evt),
+        content-block-delta(content-block-delta-evt),
+        content-block-stop(u32),
+        message-delta(message-delta-evt),
+        message-stop(stop-info),
+        ping,
+    }
+
+    record message-meta {
+        id: string,
+        model: string,
+    }
+
+    record content-block-start-evt {
+        index: u32,
+        block: content-block,
+    }
+
+    record content-block-delta-evt {
+        index: u32,
+        delta: content-block-delta,
+    }
+
+    variant content-block-delta {
+        text-delta(string),
+        input-json-delta(string),
+        thinking-delta(string),
+        signature-delta(string),
+    }
+
+    record message-delta-evt {
+        stop-reason: option<stop-reason>,
+        usage: option<usage>,
+    }
+
+    record stop-info {
+        usage: usage,
+    }
+
+    // ---- Models & tokens -------------------------------------------
+    record model-info {
+        id: string,
+        display-name: string,
+        context-window: u32,
+    }
+
+    record count-tokens-request {
+        model: string,
+        messages: list<message>,
+    }
+
+    record count-tokens-response {
+        input-tokens: u32,
+    }
+
+    record provider-manifest {
+        provider-id: string,
+        models: list<model-info>,
+        default-model: option<string>,
+    }
+
+    // ---- Provider error variants -----------------------------------
+    variant provider-error {
+        auth-failed(string),
+        rate-limited(rate-limit-info),
+        bad-request(string),
+        upstream(upstream-error),
+        transport(string),
+        cancelled,
+    }
+
+    record rate-limit-info {
+        retry-after-secs: option<u32>,
+        reason: string,
+    }
+
+    record upstream-error {
+        status: u16,
+        body: string,
+    }
+}

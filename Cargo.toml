@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/savvagent",
     "crates/savvagent-plugin",
+    "crates/savvagent-plugin-wit",
     "crates/savvagent-protocol",
     "crates/savvagent-mcp",
     "crates/savvagent-host",
@@ -29,6 +30,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 # Local crates
 savvagent-plugin = { path = "crates/savvagent-plugin", version = "0.17.0" }
+savvagent-plugin-wit = { path = "crates/savvagent-plugin-wit", version = "0.17.0" }
 savvagent-protocol = { path = "crates/savvagent-protocol", version = "0.17.0" }
 savvagent-mcp = { path = "crates/savvagent-mcp", version = "0.17.0" }
 savvagent-host = { path = "crates/savvagent-host", version = "0.17.0" }
@@ -101,6 +103,12 @@ grep-regex = "0.1"
 grep-searcher = "0.1"
 ignore = "0.4"
 globset = "0.4"
+
+# External-plugin (sub-project D) WIT tooling. `wit-bindgen` is the guest-side
+# code generator; host bindings will land in Task 2 via `wasmtime::component::bindgen!`
+# inside `savvagent-plugin-wasm`. This workspace pin reserves a single source
+# of truth for the version downstream tasks pick up.
+wit-bindgen = "0.57"
 
 # Misc
 uuid = { version = "1", features = ["v4", "serde"] }

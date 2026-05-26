@@ -1,0 +1,10 @@
+package savvagent:plugin@0.1.0;
+
+// `plugin-static` world — stateless plugins: slash commands, hooks, themes,
+// keybindings, render-slots. Skeleton only in Task 1; fully fleshed out in
+// Task 2 (imports `log`, `current-theme`; exports `on-event`,
+// `handle-slash`, `render-slot`, `themes`, etc).
+world plugin-static {
+    use types.{plugin-manifest, plugin-error};
+    export manifest: func() -> result<plugin-manifest, plugin-error>;
+}

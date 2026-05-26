@@ -1,0 +1,9 @@
+package savvagent:plugin@0.1.0;
+
+// `plugin-interactive` world — plugins owning screens with per-open state.
+// Skeleton only in Task 1; fully fleshed out in Task 2 (adds draw imports
+// and `create-screen`/`handle-key`/`render` exports).
+world plugin-interactive {
+    use types.{plugin-manifest, plugin-error};
+    export manifest: func() -> result<plugin-manifest, plugin-error>;
+}
