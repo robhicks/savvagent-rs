@@ -316,16 +316,46 @@ directly.
 
 > *Phase 2 amendment. Not in the original 2026-05-21 spec.*
 
-A second producer of `ContentBlock::Html` is MCP tools. The MCP tool-
-result contract already supports a content-array shape with `type`
-discriminators (`text`, `image`, etc.); a tool can include items of
-type `html`:
+A second producer of `ContentBlock::Html` is MCP tools.
+
+> **Implementation amendment (2026-05-25):** The original spec assumed a
+> `{"type":"html","source":"..."}` content item. The pinned `rmcp`
+> (1.6.0) `RawContent` enum has no `html` variant (`Text`, `Image`,
+> `Resource`, `Audio`, `ResourceLink` only), so that shape is not
+> representable without forking rmcp. Tool-emitted HTML instead rides
+> the standard MCP **embedded resource** primitive with
+> `mimeType: "text/html"` — an idiomatic, fork-free carrier. A tool
+> emits:
+>
+> ```json
+> {
+>   "content": [
+>     {"type": "text", "text": "Wrote 3 files. Diff:"},
+>     {"type": "resource", "resource": {
+>        "uri": "canvas://tool-output",
+>        "mimeType": "text/html",
+>        "text": "<!doctype html><html><body>…</body></html>"
+>     }}
+>   ]
+> }
+> ```
+>
+> The host detects `Resource` content items whose
+> `TextResourceContents.mime_type == Some("text/html")` and turns each
+> into a `ContentBlock::Html { source: <text> }`. Non-html resources
+> and unknown content types fall through to the existing text-flatten
+> path. The conceptual contract below ("html items each become their
+> own `ContentBlock::Html`") is unchanged; only the wire detection
+> differs.
+
+Conceptually a tool's result content array maps to a sequence of
+content blocks:
 
 ```json
 {
   "content": [
     {"type": "text", "text": "Wrote 3 files. Diff:"},
-    {"type": "html", "source": "<!doctype html><html><body>…</body></html>"}
+    {"type": "resource", "resource": {"mimeType": "text/html", "text": "<!doctype html>…", "uri": "canvas://x"}}
   ]
 }
 ```
