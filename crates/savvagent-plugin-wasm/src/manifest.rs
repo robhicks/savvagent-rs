@@ -253,7 +253,14 @@ fn validate_version_range(range: &str) -> Result<(), String> {
     let stripped = range
         .strip_prefix('^')
         .ok_or("must be caret-prefixed (e.g. ^0.18)")?;
-    if !stripped.starts_with(CURRENT_WIT_VERSION) {
+    // Match `CURRENT_WIT_VERSION` either exactly, or followed by `.`
+    // (a patch segment). Reject hyphenless continuations like `"0.189"`
+    // that would otherwise satisfy `starts_with("0.18")`.
+    let exact = stripped == CURRENT_WIT_VERSION;
+    let with_patch = stripped
+        .strip_prefix(CURRENT_WIT_VERSION)
+        .is_some_and(|tail| tail.starts_with('.'));
+    if !exact && !with_patch {
         return Err(format!(
             "requires {stripped} but build provides {CURRENT_WIT_VERSION}"
         ));
@@ -398,6 +405,49 @@ savvagent = "0.18"
         );
         let e = PluginManifest::load(f.path(), "acme.demo").unwrap_err();
         assert!(matches!(e, WasmPluginError::VersionMismatch(..)));
+    }
+
+    #[test]
+    fn hyphenless_version_continuation_rejected() {
+        // `"^0.189"` previously slipped through because `"0.189"` starts with
+        // `"0.18"`. Must reject because 0.189 is not the 0.18 line.
+        for bad in ["^0.180", "^0.189", "^0.1899", "^0.18a"] {
+            let toml = format!(
+                r#"
+[plugin]
+id = "acme.demo"
+name = "Demo"
+version = "0.1.0"
+world = "plugin-static"
+savvagent = "{bad}"
+"#
+            );
+            let f = write_manifest(&toml);
+            let e = PluginManifest::load(f.path(), "acme.demo").unwrap_err();
+            assert!(
+                matches!(e, WasmPluginError::VersionMismatch(..)),
+                "expected VersionMismatch for '{bad}', got {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_and_patch_version_accepted() {
+        for ok in ["^0.18", "^0.18.0", "^0.18.99"] {
+            let toml = format!(
+                r#"
+[plugin]
+id = "acme.demo"
+name = "Demo"
+version = "0.1.0"
+world = "plugin-static"
+savvagent = "{ok}"
+"#
+            );
+            let f = write_manifest(&toml);
+            PluginManifest::load(f.path(), "acme.demo")
+                .unwrap_or_else(|e| panic!("'{ok}' should be accepted: {e:?}"));
+        }
     }
 
     #[test]
