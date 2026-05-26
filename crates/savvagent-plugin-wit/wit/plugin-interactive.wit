@@ -1,9 +1,47 @@
 package savvagent:plugin@0.1.0;
 
-// `plugin-interactive` world — plugins owning screens with per-open state.
-// Skeleton only in Task 1; fully fleshed out in Task 2 (adds draw imports
-// and `create-screen`/`handle-key`/`render` exports).
+// `plugin-interactive` world — plugins that own one or more screens with
+// per-open state. Adds draw primitives (host-side ratatui scratch buffer)
+// and a component-model `screen-instance` resource for per-screen state.
 world plugin-interactive {
-    use types.{plugin-manifest, plugin-error};
+    use types.{plugin-manifest, plugin-error, effect, key-event-portable,
+               region, theme-color, text-mods, log-level};
+
+    // ---- Imports -----------------------------------------------------
+    import log: func(level: log-level, msg: string);
+    import current-theme: func() -> list<tuple<string, theme-color>>;
+
+    // Draw primitives. The host writes pixels into a per-render ratatui
+    // `Buffer` it stashes in store state before invoking `render` on a
+    // `screen-instance`; these imports are how the plugin populates it.
+    import draw-text: func(x: u16, y: u16, text: string,
+                           fg: theme-color, bg: theme-color, mods: text-mods);
+    import draw-block: func(area: region, border: border-style,
+                            title: option<string>);
+    import draw-line: func(x1: u16, y1: u16, x2: u16, y2: u16, style: line-style);
+    import clear-area: func(area: region, bg: theme-color);
+
+    variant border-style { none, plain, rounded, double-line, thick }
+    variant line-style { solid, dashed, dotted }
+
+    record screen-args {
+        // Serialized `savvagent_plugin::ScreenArgs` (matches the parent
+        // crate's `ScreenArgs` shape; JSON keeps us out of an arms race
+        // with future ScreenArgs additions).
+        invocation-json: string,
+        terminal-width: u16,
+        terminal-height: u16,
+    }
+
+    // ---- Per-screen state (component-model resource) -----------------
+    resource screen-instance {
+        on-key: func(key: key-event-portable) -> list<effect>;
+        render: func(area: region);
+        tips: func() -> string;
+    }
+
+    // ---- Exports -----------------------------------------------------
     export manifest: func() -> result<plugin-manifest, plugin-error>;
+    export create-screen: func(screen-id: string, args: screen-args)
+        -> result<screen-instance, plugin-error>;
 }

@@ -1,0 +1,31 @@
+[package]
+name = "savvagent-plugin-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Wasmtime-backed runtime for savvagent external plugins."
+
+# Task 2 owns just the SPP↔WIT conversion layer and the host-side bindgen
+# output for all three worlds. Discovery, manifests, adapters, and the
+# capability surface land in Tasks 3–6; those will pull in more deps
+# (e.g. `walkdir`, `keyring`, `reqwest`).
+#
+# `wasmtime`'s default features include `component-model` and `async`,
+# which are exactly what we need — no explicit feature list necessary.
+[dependencies]
+savvagent-plugin = { workspace = true }
+savvagent-plugin-wit = { workspace = true }
+savvagent-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+wasmtime = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -14,18 +14,33 @@ package savvagent:plugin@0.1.0;
 // callsites; the `From`/`Into` impls between `savvagent-protocol` and the
 // generated bindings land in Task 2's `spp_convert.rs` regardless of
 // package shape.
+//
+// Task 2 reconciliation: The original sketch in Task 1 diverged from the
+// real `savvagent_protocol` types in several places (e.g. an extra `system`
+// role variant, a `String` `tool-result` content, a `count-tokens` pair that
+// has no Rust counterpart, an inaccurate `provider-error` variant where the
+// real type is a struct with `kind`). This file now mirrors the actual
+// `savvagent_protocol` shapes verbatim. Where a WIT-only helper type is
+// required by the plugin-provider world (e.g. `provider-manifest` returned
+// by `init`), it stays here but has no Rust counterpart and therefore no
+// `From`/`Into` impl in `spp_convert.rs`.
 interface spp {
-    // SPP types mirrored from savvagent-protocol field-for-field.
-    // From/Into impls live in savvagent-plugin-wasm/src/spp_convert.rs.
-
+    // ---- CompleteRequest --------------------------------------------
     record complete-request {
         model: string,
-        system: option<string>,
         messages: list<message>,
+        system: option<string>,
         tools: list<tool-def>,
-        max-tokens: option<u32>,
-        streaming: option<streaming-config>,
+        temperature: option<f32>,
+        top-p: option<f32>,
+        max-tokens: u32,
+        stop-sequences: list<string>,
+        %stream: bool,
         thinking: option<thinking-config>,
+        // Free-form JSON metadata: `None` when absent, `Some(serialized)`
+        // when present. Carried as a string so we don't drag a JSON-Value
+        // type into WIT.
+        metadata-json: option<string>,
     }
 
     record message {
@@ -33,31 +48,67 @@ interface spp {
         content: list<content-block>,
     }
 
-    variant role { user, assistant, system }
+    // SPP `Role` only contains `user` and `assistant`. System instructions
+    // are carried in `complete-request.system`, not as a role variant.
+    variant role { user, assistant }
 
+    record thinking-config {
+        budget-tokens: u32,
+    }
+
+    // ---- ContentBlock -----------------------------------------------
     variant content-block {
-        text(string),
+        text(text-block),
         tool-use(tool-use-block),
         tool-result(tool-result-block),
         image(image-block),
         thinking(thinking-block),
     }
 
+    record text-block {
+        text: string,
+    }
+
     record tool-use-block {
         id: string,
         name: string,
+        // Serialized `serde_json::Value` (always a JSON object at the top
+        // level; may be `{}`).
         input-json: string,
     }
 
     record tool-result-block {
         tool-use-id: string,
-        content: string,
+        // SPP `tool_result.content` is a nested list of content blocks. WIT
+        // does not permit recursive type definitions (content-block →
+        // tool-result-block → content-block), so we carry the nested
+        // content as a serialized JSON array of `ContentBlock` here. The
+        // From/Into impls in `spp_convert.rs` round-trip it through
+        // `serde_json`.
+        content-json: string,
         is-error: bool,
     }
 
     record image-block {
-        media-type: string,
-        data-base64: string,
+        source: image-source,
+    }
+
+    variant image-source {
+        base64(image-base64),
+        url(string),
+    }
+
+    record image-base64 {
+        media-type: media-type,
+        // Base64-encoded bytes (no `data:` URI prefix).
+        data: string,
+    }
+
+    enum media-type {
+        jpeg,
+        png,
+        gif,
+        webp,
     }
 
     record thinking-block {
@@ -65,50 +116,56 @@ interface spp {
         signature: option<string>,
     }
 
+    // ---- ToolDef ----------------------------------------------------
     record tool-def {
         name: string,
         description: string,
+        // Serialized JSON Schema (Draft 2020-12).
         input-schema-json: string,
     }
 
-    record streaming-config { enabled: bool }
-    record thinking-config { budget-tokens: u32 }
-
+    // ---- CompleteResponse -------------------------------------------
     record complete-response {
         id: string,
         model: string,
         content: list<content-block>,
         stop-reason: stop-reason,
+        stop-sequence: option<string>,
         usage: usage,
     }
 
-    variant stop-reason {
+    enum stop-reason {
         end-turn,
+        tool-use,
         max-tokens,
         stop-sequence,
-        tool-use,
-        unknown(string),
+        refusal,
+        other,
     }
 
     record usage {
         input-tokens: u32,
         output-tokens: u32,
+        cache-creation-input-tokens: option<u32>,
+        cache-read-input-tokens: option<u32>,
     }
 
     // ---- Streaming events ------------------------------------------
     variant stream-event {
-        message-start(message-meta),
+        message-start(message-start-evt),
         content-block-start(content-block-start-evt),
         content-block-delta(content-block-delta-evt),
         content-block-stop(u32),
         message-delta(message-delta-evt),
-        message-stop(stop-info),
+        message-stop,
         ping,
+        warning(string),
     }
 
-    record message-meta {
+    record message-start-evt {
         id: string,
         model: string,
+        usage: usage,
     }
 
     record content-block-start-evt {
@@ -118,10 +175,10 @@ interface spp {
 
     record content-block-delta-evt {
         index: u32,
-        delta: content-block-delta,
+        delta: block-delta,
     }
 
-    variant content-block-delta {
+    variant block-delta {
         text-delta(string),
         input-json-delta(string),
         thinking-delta(string),
@@ -130,18 +187,61 @@ interface spp {
 
     record message-delta-evt {
         stop-reason: option<stop-reason>,
-        usage: option<usage>,
+        stop-sequence: option<string>,
+        usage-delta: usage-delta,
     }
 
-    record stop-info {
-        usage: usage,
+    record usage-delta {
+        output-tokens: option<u32>,
+        cache-read-input-tokens: option<u32>,
     }
 
-    // ---- Models & tokens -------------------------------------------
+    // ---- Models discovery -------------------------------------------
     record model-info {
         id: string,
-        display-name: string,
-        context-window: u32,
+        display-name: option<string>,
+        context-window: option<u64>,
+    }
+
+    record list-models-response {
+        models: list<model-info>,
+        default-model-id: option<string>,
+    }
+
+    // ---- Provider error --------------------------------------------
+    record provider-error {
+        kind: error-kind,
+        message: string,
+        retry-after-ms: option<u64>,
+        provider-code: option<string>,
+    }
+
+    enum error-kind {
+        invalid-request,
+        authentication,
+        permission-denied,
+        model-not-found,
+        context-length-exceeded,
+        rate-limited,
+        overloaded,
+        refusal,
+        network,
+        not-implemented,
+        internal,
+    }
+
+    // ---- Plugin-WIT-only types --------------------------------------
+    //
+    // The following types exist for the `plugin-provider` world contract
+    // but have NO counterpart in `savvagent-protocol`. They are not part
+    // of SPP-the-wire-protocol; they describe what an external provider
+    // plugin returns from its `init`/`count-tokens` exports so the host
+    // can register it. No `From`/`Into` impls in `spp_convert.rs`.
+
+    record provider-manifest {
+        provider-id: string,
+        models: list<model-info>,
+        default-model: option<string>,
     }
 
     record count-tokens-request {
@@ -151,31 +251,5 @@ interface spp {
 
     record count-tokens-response {
         input-tokens: u32,
-    }
-
-    record provider-manifest {
-        provider-id: string,
-        models: list<model-info>,
-        default-model: option<string>,
-    }
-
-    // ---- Provider error variants -----------------------------------
-    variant provider-error {
-        auth-failed(string),
-        rate-limited(rate-limit-info),
-        bad-request(string),
-        upstream(upstream-error),
-        transport(string),
-        cancelled,
-    }
-
-    record rate-limit-info {
-        retry-after-secs: option<u32>,
-        reason: string,
-    }
-
-    record upstream-error {
-        status: u16,
-        body: string,
     }
 }
