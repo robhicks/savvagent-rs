@@ -43,6 +43,21 @@ impl CanvasRegistry {
         self.renderers.insert(id, renderer);
     }
 
+    /// Drop every renderer + cached image protocol and reset the id
+    /// counter to 0. Called at the top of [`App::replay_transcript`] so a
+    /// `/resume` rebuilds the registry from scratch.
+    ///
+    /// Resetting `next_id` to 0 is load-bearing: replay re-allocates ids in
+    /// stream order, and those ids must match the ordinals Task 26 saved
+    /// each canvas's interactive-state blob under (the n-th top-level `Html`
+    /// block was saved as ordinal n). The image picker is preserved — it's a
+    /// terminal capability, not per-conversation state.
+    pub fn clear(&mut self) {
+        self.next_id = 0;
+        self.renderers.clear();
+        self.image_states.clear();
+    }
+
     /// Look up the renderer for `id`.
     #[allow(dead_code)]
     pub fn get_mut(&mut self, id: ContentBlockId) -> Option<&mut Box<dyn ContentRenderer>> {
@@ -1668,6 +1683,11 @@ impl App {
 
         self.entries.clear();
         self.live_text.clear();
+        // Reset the canvas registry so a re-resume doesn't leak old
+        // renderers and so replayed ids start at 0 — matching the ordinals
+        // Task 26 saved each canvas's `state` blob under.
+        self.canvas_registry.clear();
+        self.html_block_index_to_id.clear();
 
         for msg in &record.messages {
             match msg.role {
@@ -1709,6 +1729,51 @@ impl App {
                                 // dumping the raw chain-of-thought into the
                                 // visible log. Rendered dimmed via Note.
                                 self.entries.push(Entry::Note("[thinking]".into()));
+                            }
+                            ContentBlock::Html { source, state } => {
+                                // Recreate the canvas renderer (mirrors the
+                                // streaming path's plugin `create_renderer`,
+                                // which is exactly `HtmlCanvas::new(id, source)`).
+                                //
+                                // The id is allocated in stream order as we
+                                // iterate top-level `Html` blocks, so the n-th
+                                // canvas gets `ContentBlockId(n)` — matching the
+                                // ordinal Task 26 saved its `state` blob under.
+                                // Nested tool-emitted Html lives in
+                                // `ToolResult.content`, never as a top-level
+                                // assistant block, so it's naturally excluded.
+                                let id = self.canvas_registry.allocate_id();
+                                let mut renderer: Box<dyn ContentRenderer> =
+                                    Box::new(savvagent_canvas::HtmlCanvas::new(id, source));
+                                // Restore interactive state if present
+                                // (base64 STANDARD → bytes). Decode/restore
+                                // failures are soft: log and fall back to
+                                // rendering from defaults — never abort resume.
+                                if let Some(b64) = state {
+                                    use base64::Engine as _;
+                                    match base64::engine::general_purpose::STANDARD.decode(b64) {
+                                        Ok(bytes) => {
+                                            if let Err(e) = renderer.restore_state(&bytes) {
+                                                tracing::warn!(
+                                                    canvas_id = id.0,
+                                                    error = ?e,
+                                                    "resume: canvas state restore failed; rendering from defaults"
+                                                );
+                                            }
+                                        }
+                                        Err(e) => tracing::warn!(
+                                            canvas_id = id.0,
+                                            error = ?e,
+                                            "resume: canvas state base64 decode failed; rendering from defaults"
+                                        ),
+                                    }
+                                }
+                                self.canvas_registry.insert(id, renderer);
+                                self.entries.push(Entry::Canvas {
+                                    id,
+                                    source: source.clone(),
+                                    source_preview: None,
+                                });
                             }
                             _ => {}
                         }
@@ -3203,5 +3268,131 @@ mod tests {
 
         // Second call is idempotent — no panic, returns None.
         assert!(app.consume_model_override().is_none());
+    }
+
+    /// Build a `TranscriptFile` with a single assistant message whose
+    /// `content` is the given blocks.
+    fn transcript_with_assistant_blocks(
+        blocks: Vec<savvagent_protocol::ContentBlock>,
+    ) -> TranscriptFile {
+        use savvagent_protocol::{Message, Role};
+        TranscriptFile {
+            schema_version: 1,
+            model: "test-model".into(),
+            saved_at: 1_716_300_000,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: blocks,
+            }],
+        }
+    }
+
+    /// Phase 1 bug fix: `/resume` must recreate canvases from `Html`
+    /// blocks (previously they fell into `_ => {}` and were dropped).
+    /// Even a `state: None` canvas must reappear as an `Entry::Canvas`
+    /// with a working renderer in the registry.
+    #[test]
+    fn replay_recreates_canvas_from_html_block() {
+        use savvagent_protocol::ContentBlock;
+
+        let source = "<!doctype html><body><p>hello</p></body>".to_string();
+        let record = transcript_with_assistant_blocks(vec![ContentBlock::Html {
+            source: source.clone(),
+            state: None,
+        }]);
+
+        let mut app = fresh_app();
+        app.replay_transcript(&record);
+
+        // An Entry::Canvas with the source must exist.
+        let canvas = app
+            .entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Canvas { id, source: s, .. } => Some((*id, s.clone())),
+                _ => None,
+            })
+            .expect("replay must push an Entry::Canvas for an Html block");
+        assert_eq!(canvas.1, source, "canvas source must round-trip");
+
+        // The registry must hold a renderer keyed by the same id.
+        assert!(
+            app.canvas_registry.get_mut(canvas.0).is_some(),
+            "registry must have a renderer for the replayed canvas id"
+        );
+    }
+
+    /// Interactive state embedded in an `Html` block (base64 STANDARD of a
+    /// `CanvasState`) must be restored onto the recreated renderer.
+    #[test]
+    fn replay_restores_canvas_state_from_html_block() {
+        use base64::Engine as _;
+        use savvagent_protocol::ContentBlock;
+
+        // Deterministic state: a CanvasState with one open <details>.
+        let mut state = savvagent_canvas::CanvasState {
+            schema_version: 1,
+            ..Default::default()
+        };
+        state.open_details.insert("88".into());
+        let b64 = base64::engine::general_purpose::STANDARD.encode(state.to_bytes());
+
+        let source = "<!doctype html><body><details><summary>s</summary><p>y</p></details></body>"
+            .to_string();
+        let record = transcript_with_assistant_blocks(vec![ContentBlock::Html {
+            source,
+            state: Some(b64),
+        }]);
+
+        let mut app = fresh_app();
+        app.replay_transcript(&record);
+
+        // Snapshot the recreated renderer; restored open_details must survive.
+        let renderer = app
+            .canvas_registry
+            .get_mut(savvagent_plugin::ContentBlockId(0))
+            .expect("renderer for id 0");
+        let snap = renderer
+            .snapshot_state()
+            .expect("snapshot non-empty after restore");
+        let restored = savvagent_canvas::CanvasState::from_bytes(&snap).unwrap();
+        assert!(
+            !restored.open_details.is_empty(),
+            "open_details must be restored from the Html block's state"
+        );
+    }
+
+    /// Two top-level `Html` blocks must get `ContentBlockId(0)` and `(1)`,
+    /// proving the replayed ids align with the ordinals Task 26 saved
+    /// each canvas's state blob under.
+    #[test]
+    fn replay_two_canvases_get_ids_zero_and_one_matching_save_ordinals() {
+        use savvagent_protocol::ContentBlock;
+
+        let record = transcript_with_assistant_blocks(vec![
+            ContentBlock::Html {
+                source: "<!doctype html><body><p>a</p></body>".into(),
+                state: None,
+            },
+            ContentBlock::Html {
+                source: "<!doctype html><body><p>b</p></body>".into(),
+                state: None,
+            },
+        ]);
+
+        let mut app = fresh_app();
+        app.replay_transcript(&record);
+
+        let ids: Vec<u32> = app
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Canvas { id, .. } => Some(id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![0, 1], "ids must be allocated in stream order");
+        assert!(app.canvas_registry.get_mut(ContentBlockId(0)).is_some());
+        assert!(app.canvas_registry.get_mut(ContentBlockId(1)).is_some());
     }
 }
