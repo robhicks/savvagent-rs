@@ -470,6 +470,7 @@ impl Accumulator {
                     index: idx,
                     block: ContentBlock::Html {
                         source: String::new(),
+                        state: None,
                     },
                 });
                 self.current_local_block = Some(LocalBlock {
@@ -486,8 +487,11 @@ impl Accumulator {
             },
         });
         match self.final_blocks.last_mut() {
-            Some(ContentBlock::Html { source: buf }) => buf.push_str(&html),
-            _ => self.final_blocks.push(ContentBlock::Html { source: html }),
+            Some(ContentBlock::Html { source: buf, .. }) => buf.push_str(&html),
+            _ => self.final_blocks.push(ContentBlock::Html {
+                source: html,
+                state: None,
+            }),
         }
     }
 
@@ -966,7 +970,7 @@ mod tests {
             matches!(
                 content_events[3],
                 StreamEvent::ContentBlockStart {
-                    block: ContentBlock::Html { source },
+                    block: ContentBlock::Html { source, .. },
                     ..
                 } if source.is_empty()
             ),
@@ -997,7 +1001,7 @@ mod tests {
             other => panic!("expected Text first, got {other:?}"),
         }
         match &out.content[1] {
-            ContentBlock::Html { source } => assert_eq!(source, "<p>hi</p>\n"),
+            ContentBlock::Html { source, .. } => assert_eq!(source, "<p>hi</p>\n"),
             other => panic!("expected Html second, got {other:?}"),
         }
     }

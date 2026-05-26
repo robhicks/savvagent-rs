@@ -274,7 +274,10 @@ impl Accumulator {
                     content.push(ContentBlock::Text { text: buf });
                 }
                 BlockState::Html { source } => {
-                    content.push(ContentBlock::Html { source });
+                    content.push(ContentBlock::Html {
+                        source,
+                        state: None,
+                    });
                 }
                 BlockState::ToolUse { id, name, json_buf } => {
                     let input = parse_tool_arguments(&json_buf);
@@ -337,6 +340,7 @@ impl Accumulator {
                 },
                 StreamBlockKind::Html => ContentBlock::Html {
                     source: String::new(),
+                    state: None,
                 },
             };
             out.push(StreamEvent::ContentBlockStart {
@@ -677,7 +681,7 @@ mod tests {
             matches!(
                 content_events[3],
                 StreamEvent::ContentBlockStart {
-                    block: ContentBlock::Html { source },
+                    block: ContentBlock::Html { source, .. },
                     ..
                 } if source.is_empty()
             ),
@@ -708,7 +712,7 @@ mod tests {
             other => panic!("expected Text first, got {other:?}"),
         }
         match &out.content[1] {
-            ContentBlock::Html { source } => assert_eq!(source, "<p>hi</p>\n"),
+            ContentBlock::Html { source, .. } => assert_eq!(source, "<p>hi</p>\n"),
             other => panic!("expected Html second, got {other:?}"),
         }
     }

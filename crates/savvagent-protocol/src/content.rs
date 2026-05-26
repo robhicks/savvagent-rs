@@ -73,6 +73,13 @@ pub enum ContentBlock {
     Html {
         /// Complete HTML document source.
         source: String,
+        /// Opaque, base64-encoded interactive-state blob produced by a
+        /// `ContentRenderer::snapshot_state` (e.g. expanded `<details>`,
+        /// form values, focus). `None` when the canvas has no persisted
+        /// interactive state. Added in Phase 2; older transcripts (no
+        /// `state`) deserialize via the serde default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
 }
 
@@ -162,6 +169,7 @@ mod tests {
     fn html_round_trip() {
         let block = ContentBlock::Html {
             source: "<!doctype html><body>hi</body>".into(),
+            state: None,
         };
         let v = serde_json::to_value(&block).unwrap();
         assert_eq!(
@@ -173,5 +181,36 @@ mod tests {
         );
         let back: ContentBlock = serde_json::from_value(v).unwrap();
         assert_eq!(back, block);
+    }
+
+    #[test]
+    fn html_with_state_round_trips() {
+        let block = ContentBlock::Html {
+            source: "<p>x</p>".into(),
+            state: Some("eyJ4Ijoxf0=".into()),
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert_eq!(v["state"], "eyJ4Ijoxf0=");
+        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        assert_eq!(back, block);
+    }
+
+    #[test]
+    fn html_without_state_key_deserializes_to_none() {
+        // Old transcripts have no `state` key.
+        let v = serde_json::json!({ "type": "html", "source": "<p>x</p>" });
+        let back: ContentBlock = serde_json::from_value(v).unwrap();
+        assert!(matches!(back, ContentBlock::Html { state: None, .. }));
+    }
+
+    #[test]
+    fn html_none_state_omitted_from_json() {
+        // skip_serializing_if keeps the wire clean for stateless canvases.
+        let block = ContentBlock::Html {
+            source: "<p>x</p>".into(),
+            state: None,
+        };
+        let v = serde_json::to_value(&block).unwrap();
+        assert!(v.get("state").is_none(), "None state must be omitted: {v}");
     }
 }

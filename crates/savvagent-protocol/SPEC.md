@@ -1,4 +1,4 @@
-# Savvagent Provider Protocol (SPP) — v0.2.0
+# Savvagent Provider Protocol (SPP) — v0.3.0
 
 A small layering on top of the [Model Context Protocol] for exposing LLM
 providers as MCP servers. Savvagent (the host) talks to provider servers over
@@ -166,6 +166,14 @@ The protocol version is exposed at `savvagent_protocol::SPP_VERSION`. Breaking
 wire changes bump the major component. Provider servers SHOULD advertise the
 version they implement via MCP server `instructions` or a future
 `provider://info` resource.
+
+### v0.3.0 changes (additive)
+
+- `ContentBlock::Html` gained an optional `state` field (base64 opaque
+  interactive-state blob). Omitted when absent (`skip_serializing_if`).
+  Providers emitting v0.2.0 `html` blocks (no `state`) remain conformant;
+  the field is host-internal (set by the TUI when persisting transcripts,
+  not by providers).
 
 ### v0.2.0 changes (additive)
 

@@ -179,7 +179,7 @@ fn push_messages_for_spp(m: &spp::Message, out: &mut Vec<api::Message>, has_tool
                         // images rather than crashing.
                     }
                     // Html source is echoed back as plain text; see provider-{anthropic,openai,gemini} translators.
-                    spp::ContentBlock::Html { source } => text_buf.push(source.as_str()),
+                    spp::ContentBlock::Html { source, .. } => text_buf.push(source.as_str()),
                     _ => {}
                 }
             }
@@ -211,7 +211,7 @@ fn push_messages_for_spp(m: &spp::Message, out: &mut Vec<api::Message>, has_tool
                         });
                     }
                     // Html source is echoed back as plain text; see provider-{anthropic,openai,gemini} translators.
-                    spp::ContentBlock::Html { source } => {
+                    spp::ContentBlock::Html { source, .. } => {
                         if !text_buf.is_empty() {
                             text_buf.push('\n');
                         }
@@ -688,6 +688,7 @@ mod tests {
                 role: spp::Role::Assistant,
                 content: vec![spp::ContentBlock::Html {
                     source: "<p>x</p>".into(),
+                    state: None,
                 }],
             }],
             system: None,
@@ -719,6 +720,7 @@ mod tests {
                 role: spp::Role::User,
                 content: vec![spp::ContentBlock::Html {
                     source: "<p>hello</p>".into(),
+                    state: None,
                 }],
             }],
             system: None,

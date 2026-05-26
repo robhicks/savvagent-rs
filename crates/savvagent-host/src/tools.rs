@@ -900,6 +900,7 @@ pub(crate) fn tool_result_to_blocks(
                     }
                     out.push(ContentBlock::Html {
                         source: text.clone(),
+                        state: None,
                     });
                     continue;
                 }
@@ -1332,7 +1333,7 @@ mod tool_call_outcome_tests {
             other => panic!("expected Text first, got {other:?}"),
         }
         match &blocks[1] {
-            ContentBlock::Html { source } => assert!(source.contains("<p>hi</p>")),
+            ContentBlock::Html { source, .. } => assert!(source.contains("<p>hi</p>")),
             other => panic!("expected Html second, got {other:?}"),
         }
     }

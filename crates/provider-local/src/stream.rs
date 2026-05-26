@@ -207,6 +207,7 @@ impl Accumulator {
                 },
                 BlockKind::Html => ContentBlock::Html {
                     source: String::new(),
+                    state: None,
                 },
             };
             out.push(StreamEvent::ContentBlockStart { index, block });
@@ -239,7 +240,10 @@ impl Accumulator {
             out.push(StreamEvent::ContentBlockStop { index: cur.index });
             let block = match cur.kind {
                 BlockKind::Text => ContentBlock::Text { text: cur.buf },
-                BlockKind::Html => ContentBlock::Html { source: cur.buf },
+                BlockKind::Html => ContentBlock::Html {
+                    source: cur.buf,
+                    state: None,
+                },
             };
             self.final_blocks.push(block);
             self.next_index += 1;
@@ -535,7 +539,7 @@ mod tests {
             matches!(
                 content_events[3],
                 StreamEvent::ContentBlockStart {
-                    block: ContentBlock::Html { source },
+                    block: ContentBlock::Html { source, .. },
                     ..
                 } if source.is_empty()
             ),
@@ -567,7 +571,7 @@ mod tests {
             other => panic!("expected Text first, got {other:?}"),
         }
         match &out.content[1] {
-            ContentBlock::Html { source } => assert_eq!(source, "<p>hi</p>\n"),
+            ContentBlock::Html { source, .. } => assert_eq!(source, "<p>hi</p>\n"),
             other => panic!("expected Html second, got {other:?}"),
         }
     }
