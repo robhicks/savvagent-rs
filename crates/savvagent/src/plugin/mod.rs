@@ -119,11 +119,13 @@ pub(crate) fn register_builtins(
         Box::new(builtin::splash::SplashPlugin::new()),
         Box::new(builtin::themes::ThemesPlugin::new()),
         Box::new(builtin::tool_bash_summary::ToolBashSummaryPlugin::new()),
+        Box::new(builtin::user_agents::UserAgentsPlugin::new()),
         Box::new(builtin::user_slash_commands::UserSlashCommandsPlugin::new(
             trust_levels,
         )),
         Box::new(builtin::tool_fs_summary::ToolFsSummaryPlugin::new()),
         Box::new(builtin::tool_grep_summary::ToolGrepSummaryPlugin::new()),
+        Box::new(builtin::tool_task_summary::ToolTaskSummaryPlugin::new()),
         Box::new(builtin::view_file::ViewFilePlugin::new()),
         Box::new(builtin::html_canvas::HtmlCanvasPlugin::new()),
     ];
@@ -202,6 +204,8 @@ mod tests {
             "internal:tool-bash-summary",
             "internal:tool-fs-summary",
             "internal:tool-grep-summary",
+            "internal:tool-task-summary",
+            "internal:user-agents",
             "internal:user-slash-commands",
             "internal:view-file",
             "internal:html-canvas",
@@ -211,7 +215,7 @@ mod tests {
                 "missing non-provider plugin id: {expected}"
             );
         }
-        assert_eq!(set.plugins.len(), 27);
+        assert_eq!(set.plugins.len(), 29);
 
         // `internal:user-hooks` lives in `hook_entries`, not the `plugins`
         // Vec. The dual-Arc HookEntry pattern means it still appears in
@@ -258,15 +262,17 @@ mod tests {
         // v0.16.0 adds lsp-installer, bringing non-provider count to 25;
         // user-slash-commands adds 1 more, bringing non-provider count to 26;
         // html-canvas adds 1 more, bringing non-provider count to 27;
+        // sub-project C (user-agents) adds 1 more, bringing non-provider count to 28;
+        // tool-task-summary adds 1 more, bringing non-provider count to 29;
         // sub-project B (user-hooks) moves to `hook_entries` (not counted
         // in the plugins Vec) but still surfaces in the registry's plugins
         // map via the dual-Arc HookEntry, contributing 1 more registry
-        // entry; total registry size is 27 + 4 + 1 = 32.
+        // entry; total registry size is 29 + 4 + 1 = 34.
         let reg = PluginRegistry::new(set);
         assert_eq!(
             reg.len(),
-            32,
-            "registry should have 27 non-provider + 4 provider + 1 hook plugin"
+            34,
+            "registry should have 29 non-provider + 4 provider + 1 hook plugin"
         );
         assert_eq!(
             reg.provider_count(),

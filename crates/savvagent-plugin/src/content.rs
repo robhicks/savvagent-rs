@@ -143,7 +143,11 @@ pub enum MouseButton {
 }
 
 /// Phase 2: outcome of [`ContentRenderer::dispatch`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: `Effect` is only `PartialEq` (it transitively includes an
+/// `f64`-bearing in-process tool handler), so `InputOutcome` mirrors
+/// that bound.
+#[derive(Debug, Clone, PartialEq)]
 pub struct InputOutcome {
     /// Effects the host should apply (e.g. `Effect::OpenUrl` when a
     /// link is followed).
