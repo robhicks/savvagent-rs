@@ -6,11 +6,17 @@
 //!   slash commands, hooks, themes, render slots. One long-lived store per
 //!   adapter.
 //!
-//! Tasks 5 and 6 add `interactive::InteractiveAdapter` (per-screen-open
-//! store, draw primitives) and `provider::ProviderAdapter` (one store per
-//! turn, HTTP / keyring / streaming progress capabilities) respectively;
-//! they're omitted here so this module compiles standalone in v0.18.0.
+//! - [`interactive::InteractiveAdapter`] — `plugin-interactive`,
+//!   per-screen-open Store + a `screen-instance` resource that owns
+//!   instance-local state. The trait surface for `Screen::render`/`tips`
+//!   is sync-returns-Vec<StyledLine>; the adapter caches the most recent
+//!   wasm render output and re-issues the wasm call after every key/event.
+//!
+//! Task 6 adds `provider::ProviderAdapter` (one store per turn, HTTP /
+//! keyring / streaming progress capabilities).
 
+pub mod interactive;
 pub mod static_;
 
+pub use interactive::InteractiveAdapter;
 pub use static_::StaticAdapter;

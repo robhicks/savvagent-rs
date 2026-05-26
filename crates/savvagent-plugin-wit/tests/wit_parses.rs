@@ -121,22 +121,23 @@ fn plugin_static_world_shape() {
 
 #[test]
 fn plugin_interactive_world_shape() {
+    // The interactive world is content-only: the host paints chrome around
+    // the styled lines `render`/`tips` return on the `screen-instance`
+    // resource. There are no draw-* host imports — that design was rejected
+    // because it would have required `unsafe` pointer plumbing for no gain
+    // over the existing sync-returns-Vec<StyledLine> `Screen` trait. See
+    // `wit/plugin-interactive.wit`'s top-level comment for the rationale.
     assert_world_shape(
         "plugin-interactive",
-        &["manifest", "create-screen"],
-        &[
-            "log",
-            "current-theme",
-            "draw-text",
-            "draw-block",
-            "draw-line",
-            "clear-area",
-        ],
+        // `create-screen` and the per-instance methods are inside the
+        // `screens` interface (they all share the `screen-instance`
+        // resource and the bindgen requires the resource and the
+        // constructor to live in the same interface to avoid an
+        // import/export boundary crossing). `manifest` stays at world
+        // level as a plain function export.
+        &["manifest", "savvagent:plugin/screens@0.1.0"],
+        &["log", "current-theme"],
     );
-    // The `screen-instance` resource is a world-level type, not an
-    // import/export, so the export check above suffices for "is this world
-    // shaped correctly?" purposes. The resource itself is exercised by
-    // Task 5's adapter tests once the host-side bindgen output is in hand.
 }
 
 #[test]

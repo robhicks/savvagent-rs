@@ -1,28 +1,25 @@
 package savvagent:plugin@0.1.0;
 
-// `plugin-interactive` world — plugins that own one or more screens with
-// per-open state. Adds draw primitives (host-side ratatui scratch buffer)
-// and a component-model `screen-instance` resource for per-screen state.
-world plugin-interactive {
-    use types.{plugin-manifest, plugin-error, effect, key-event-portable,
-               region, theme-color, text-mods, log-level};
-
-    // ---- Imports -----------------------------------------------------
-    import log: func(level: log-level, msg: string);
-    import current-theme: func() -> list<tuple<string, theme-color>>;
-
-    // Draw primitives. The host writes pixels into a per-render ratatui
-    // `Buffer` it stashes in store state before invoking `render` on a
-    // `screen-instance`; these imports are how the plugin populates it.
-    import draw-text: func(x: u16, y: u16, text: string,
-                           fg: theme-color, bg: theme-color, mods: text-mods);
-    import draw-block: func(area: region, border: border-style,
-                            title: option<string>);
-    import draw-line: func(x1: u16, y1: u16, x2: u16, y2: u16, style: line-style);
-    import clear-area: func(area: region, bg: theme-color);
-
-    variant border-style { none, plain, rounded, double-line, thick }
-    variant line-style { solid, dashed, dotted }
+// Per-screen instance interface, exported by interactive-world plugins.
+//
+// `create-screen` and the per-instance methods live together in this
+// interface so they share the same `screen-instance` resource type
+// without crossing the import/export boundary (which would otherwise
+// force callers to call `take_handle()` + `from_handle()` to bridge
+// resource types from different bindgen-generated modules — see
+// https://github.com/bytecodealliance/wit-bindgen for the inline-resource
+// vs export-resource semantics).
+//
+// Render is **content-only**: the host paints chrome (borders, title,
+// centering) around the styled lines a screen returns. There are no
+// host-imported draw primitives — the runtime-side `Screen::render` is
+// already sync-returns-Vec<StyledLine>, so a draw-buffer model would add
+// unsafe pointer wiring for no functional gain (and conflict with the
+// crate's `#![forbid(unsafe_code)]` policy). See
+// `crates/savvagent-plugin/src/screen.rs` for the trait this world adapts
+// onto.
+interface screens {
+    use types.{plugin-error, effect, key-event-portable, region, styled-line};
 
     record screen-args {
         // Serialized `savvagent_plugin::ScreenArgs` (matches the parent
@@ -33,15 +30,27 @@ world plugin-interactive {
         terminal-height: u16,
     }
 
-    // ---- Per-screen state (component-model resource) -----------------
     resource screen-instance {
-        on-key: func(key: key-event-portable) -> list<effect>;
-        render: func(area: region);
-        tips: func() -> string;
+        on-key: func(key: key-event-portable) -> result<list<effect>, plugin-error>;
+        on-event: func(event-json: string) -> result<list<effect>, plugin-error>;
+        render: func(area: region) -> list<styled-line>;
+        tips: func() -> list<styled-line>;
     }
 
-    // ---- Exports -----------------------------------------------------
-    export manifest: func() -> result<plugin-manifest, plugin-error>;
-    export create-screen: func(screen-id: string, args: screen-args)
+    create-screen: func(screen-id: string, args: screen-args)
         -> result<screen-instance, plugin-error>;
+}
+
+// `plugin-interactive` world — plugins that own one or more screens with
+// per-open state. Render is **content-only** (see `screens` above).
+world plugin-interactive {
+    use types.{plugin-manifest, plugin-error, theme-color, log-level};
+
+    // ---- Imports -----------------------------------------------------
+    import log: func(level: log-level, msg: string);
+    import current-theme: func() -> list<tuple<string, theme-color>>;
+
+    // ---- Exports -----------------------------------------------------
+    export screens;
+    export manifest: func() -> result<plugin-manifest, plugin-error>;
 }

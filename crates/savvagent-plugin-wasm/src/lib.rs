@@ -66,12 +66,21 @@ pub mod static_world {
 }
 
 /// Host bindings for the `plugin-interactive` world.
+///
+/// The `with:` clause aliases the shared `savvagent:plugin/types`
+/// interface to the *same* Rust types the static world emits — so
+/// conversion helpers in [`crate::convert`] (which use the static-world
+/// type module) compose cleanly with the interactive adapter without
+/// per-world duplicates.
 #[allow(missing_docs, clippy::needless_lifetimes)]
 pub mod interactive_world {
     wasmtime::component::bindgen!({
         path: "../savvagent-plugin-wit/wit",
         world: "plugin-interactive",
         async: true,
+        with: {
+            "savvagent:plugin/types@0.1.0": crate::static_world::savvagent::plugin::types,
+        },
     });
 }
 
