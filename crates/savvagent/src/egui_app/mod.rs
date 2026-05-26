@@ -8,6 +8,7 @@
 //! Linux; submodules are added by later foundation tasks.
 
 pub mod convert;
+pub mod render_model;
 
 /// The eframe application. Fields are filled in by later tasks (host slot,
 /// worker channel, render-model cache, prompt buffer).
