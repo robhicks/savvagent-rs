@@ -13,6 +13,19 @@
 //!
 //! `world` is one of three known values, enforced by the `PluginWorld`
 //! enum's `Deserialize` impl.
+//!
+//! ## Deferred validation (post-v0.18.0)
+//!
+//! Cross-checking declared `[exports]` against the actual wasm component
+//! exports is **not** performed at load time. A manifest can claim
+//! `themes = true` while the underlying wasm exports no theme function,
+//! and the discrepancy will not surface until a host call routes to the
+//! missing export. The cross-check would need to walk the wasm's
+//! component-model export list (via `wasmparser` or
+//! `wasmtime::component::Component::component_type`) and reconcile each
+//! claim individually; the additional complexity is not justified for
+//! the v0.18.0 cut. Tracked for a follow-up release alongside the
+//! related host-side hardening work in Task 8.
 
 use std::path::Path;
 

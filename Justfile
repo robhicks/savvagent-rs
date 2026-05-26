@@ -10,7 +10,7 @@
 # repo so day-to-day `cargo test` doesn't need the wasm toolchain.
 
 # Build all wasm fixtures and copy them into the test fixtures dir.
-build-fixtures: build-fixture-static build-fixture-interactive build-fixture-provider
+build-fixtures: build-fixture-static build-fixture-interactive build-fixture-provider build-fixture-trap build-fixture-timeout build-fixture-denied-host build-fixture-denied-account
 
 # Build the `plugin-static` world fixture and copy to tests/fixtures/static.wasm.
 #
@@ -43,3 +43,55 @@ build-fixture-provider:
         cargo component build --target wasm32-unknown-unknown --release
     cp crates/savvagent-plugin-wasm/tests/fixtures-src/provider/target/wasm32-unknown-unknown/release/fixture_provider.wasm \
        crates/savvagent-plugin-wasm/tests/fixtures/provider.wasm
+
+# ---- Task 7 fault-injection fixtures --------------------------------
+#
+# Four wasm components that exercise the host adapters' failure paths:
+#
+#   trap.wasm           — emits a `unreachable` instruction from
+#                         `handle_slash("boom", ..)`; the static
+#                         adapter must surface it as PluginError::Internal.
+#   timeout.wasm        — busy-loops forever in `handle_slash("forever", ..)`;
+#                         the integration test wraps the call in
+#                         `tokio::time::timeout` to prove the host can
+#                         bound its own awaiting. Epoch-based wasm
+#                         interruption lands in Task 8.
+#   denied-host.wasm    — provider plugin that calls
+#                         http.fetch("https://evil.example/...") which
+#                         is outside the manifest's allow-list. Host
+#                         returns HttpError::DeniedHost.
+#   denied-account.wasm — provider plugin that calls
+#                         keyring.get("not-listed") which is outside the
+#                         manifest's keyring-accounts allow-list. Host
+#                         returns KeyringError::Denied without touching
+#                         the OS keyring backend.
+
+# Build the trap-fault fixture and copy to tests/fixtures/trap.wasm.
+build-fixture-trap:
+    cd crates/savvagent-plugin-wasm/tests/fixtures-src/trap && \
+        cargo component build --target wasm32-unknown-unknown --release
+    cp crates/savvagent-plugin-wasm/tests/fixtures-src/trap/target/wasm32-unknown-unknown/release/fixture_trap.wasm \
+       crates/savvagent-plugin-wasm/tests/fixtures/trap.wasm
+
+# Build the timeout-fault fixture and copy to tests/fixtures/timeout.wasm.
+build-fixture-timeout:
+    cd crates/savvagent-plugin-wasm/tests/fixtures-src/timeout && \
+        cargo component build --target wasm32-unknown-unknown --release
+    cp crates/savvagent-plugin-wasm/tests/fixtures-src/timeout/target/wasm32-unknown-unknown/release/fixture_timeout.wasm \
+       crates/savvagent-plugin-wasm/tests/fixtures/timeout.wasm
+
+# Build the denied-host fault fixture and copy to
+# tests/fixtures/denied-host.wasm.
+build-fixture-denied-host:
+    cd crates/savvagent-plugin-wasm/tests/fixtures-src/denied-host && \
+        cargo component build --target wasm32-unknown-unknown --release
+    cp crates/savvagent-plugin-wasm/tests/fixtures-src/denied-host/target/wasm32-unknown-unknown/release/fixture_denied_host.wasm \
+       crates/savvagent-plugin-wasm/tests/fixtures/denied-host.wasm
+
+# Build the denied-account fault fixture and copy to
+# tests/fixtures/denied-account.wasm.
+build-fixture-denied-account:
+    cd crates/savvagent-plugin-wasm/tests/fixtures-src/denied-account && \
+        cargo component build --target wasm32-unknown-unknown --release
+    cp crates/savvagent-plugin-wasm/tests/fixtures-src/denied-account/target/wasm32-unknown-unknown/release/fixture_denied_account.wasm \
+       crates/savvagent-plugin-wasm/tests/fixtures/denied-account.wasm
