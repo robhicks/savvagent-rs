@@ -206,6 +206,8 @@ no-plugins        = "  (no hay plugins registrados)"
 row-core          = "(core)"
 row-on            = "[ on ]"
 row-off           = "[ off]"
+row-builtin       = "(integrado)"
+row-external      = "(externo)"
 core-cannot-disable = "Los plugins Core no se pueden desactivar."
 tips              = "Arriba/Abajo navegar · Espacio/Enter alternar · Esc cerrar"
 

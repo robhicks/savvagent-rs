@@ -88,6 +88,23 @@ impl Plugin for PluginsManagerPlugin {
     }
 }
 
+/// Classify a plugin id as built-in vs. external.
+///
+/// All [`PluginId`] values are validated to contain at least one `:` separator
+/// (see `PluginId::new`), so on the runtime side both built-ins and
+/// wasm-discovered plugins share the same shape: `<vendor>:<rest>`.
+/// Built-ins reserve the `internal` vendor prefix; everything else is an
+/// external (wasm) plugin.
+///
+/// The wasm side stores ids on disk as `<vendor>.<rest>` (per
+/// `plugin.toml`) and `disk_id_to_plugin_id` rewrites that to
+/// `<vendor>:<rest>` at registration time. By the time a row reaches the
+/// plugins-manager screen the id is already in runtime form, so a single
+/// vendor-prefix check is sufficient.
+pub(crate) fn is_external_id(id: &PluginId) -> bool {
+    !id.as_str().starts_with("internal:")
+}
+
 /// Build a short human-readable summary of a plugin's contributions, used
 /// in the plugins-manager row label. Stable wording across releases so
 /// the manager screen feels consistent.
@@ -224,6 +241,32 @@ mod tests {
     fn summarize_contributions_handles_empty() {
         let s = summarize_contributions(&Contributions::default());
         assert_eq!(s, "");
+    }
+
+    /// `is_external_id` returns `false` only when the id's vendor prefix is
+    /// exactly `internal`; every other vendor (including ones that happen
+    /// to *contain* the substring "internal" elsewhere in the id) is
+    /// external. This pins both the happy paths and the obvious
+    /// almost-collisions so a future refactor of the prefix scheme can't
+    /// silently re-classify wasm plugins as built-ins.
+    #[test]
+    fn is_external_id_distinguishes_internal_from_vendor_prefix() {
+        // Built-ins.
+        let b1 = PluginId::new("internal:home-footer").expect("valid");
+        let b2 = PluginId::new("internal:plugins-manager").expect("valid");
+        assert!(!is_external_id(&b1));
+        assert!(!is_external_id(&b2));
+
+        // External wasm plugins (runtime form after disk_id_to_plugin_id).
+        let e1 = PluginId::new("acme:demo").expect("valid");
+        let e2 = PluginId::new("contoso:my-plugin").expect("valid");
+        assert!(is_external_id(&e1));
+        assert!(is_external_id(&e2));
+
+        // Obvious almost-collisions: a vendor that *contains* "internal"
+        // as a substring but isn't the exact prefix must remain external.
+        let almost = PluginId::new("internal-corp:thing").expect("valid");
+        assert!(is_external_id(&almost));
     }
 
     /// Confirm the plural-form branches: two slashes + two screens + one

@@ -210,6 +210,8 @@ no-plugins        = "  (no plugins registered)"
 row-core          = "(core)"
 row-on            = "[ on ]"
 row-off           = "[ off]"
+row-builtin       = "(built-in)"
+row-external      = "(external)"
 core-cannot-disable = "Core plugins cannot be disabled."
 tips              = "Up/Down navigate · Space/Enter toggle · Esc close"
 

@@ -10,7 +10,9 @@ use savvagent_plugin::{Effect, HostEvent, PluginId, PluginKind, ScreenArgs};
 use crate::app::{App, PendingModelChange, PendingRoutingAction};
 use crate::plugin::builtin::command_palette::screen::{PaletteCommand, PaletteScreen};
 use crate::plugin::builtin::plugins_manager::screen::{PluginRow, PluginsManagerScreen};
-use crate::plugin::builtin::plugins_manager::{persistence, summarize_contributions};
+use crate::plugin::builtin::plugins_manager::{
+    is_external_id, persistence, summarize_contributions,
+};
 use crate::plugin::hooks::HookDispatcher;
 use crate::plugin::manifests::Indexes;
 use crate::plugin::slash::SlashRouter;
@@ -924,6 +926,7 @@ async fn build_plugins_manager_rows(
         };
         let manifest = plugin.lock().await.manifest();
         let summary = summarize_contributions(&manifest.contributions);
+        let external = is_external_id(&pid);
         rows.push(PluginRow {
             id: pid.clone(),
             name: manifest.name,
@@ -931,6 +934,7 @@ async fn build_plugins_manager_rows(
             kind: manifest.kind,
             enabled: reg.is_enabled(&pid),
             contribution_summary: summary,
+            external,
         });
     }
     rows
