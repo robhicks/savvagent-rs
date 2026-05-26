@@ -29,5 +29,5 @@ mod subset;
 /// Cell ↔ pixel coordinate translation helpers.
 pub mod coords;
 pub use canvas::HtmlCanvas;
-pub use coords::{cell_to_pixel, contains_cell, CellPixelSize, CellRect};
+pub use coords::{CellPixelSize, CellRect, cell_to_pixel, contains_cell};
 pub use state::CanvasState;

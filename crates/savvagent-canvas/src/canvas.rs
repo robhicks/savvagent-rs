@@ -340,8 +340,7 @@ fn collect_state(base: &blitz_dom::BaseDocument) -> crate::state::CanvasState {
         };
         if let Some(e) = node.data.downcast_element() {
             let local = &e.name.local;
-            let is_field =
-                *local == *"input" || *local == *"select" || *local == *"textarea";
+            let is_field = *local == *"input" || *local == *"select" || *local == *"textarea";
             if *local == *"details" && e.attr(local_name!("open")).is_some() {
                 state.open_details.insert(format!("{id}"));
             } else if is_field
@@ -582,7 +581,10 @@ mod tests {
             ContentBlockId(1),
             "<!doctype html><body><a href='x'>link</a><button>b</button></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         let elements = c.focusable_elements();
         assert_eq!(elements.len(), 2, "got {elements:#?}");
         assert_ne!(elements[0].id, elements[1].id);
@@ -594,7 +596,10 @@ mod tests {
             ContentBlockId(2),
             "<!doctype html><body><a href='x'>l1</a><a href='y'>l2</a></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         assert_eq!(c.focused_index(), None);
         c.set_focus(Some(1));
         assert_eq!(c.focused_index(), Some(1));
@@ -608,9 +613,16 @@ mod tests {
             ContentBlockId(3),
             "<!doctype html><body><a href='x'>l1</a></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         c.set_focus(Some(99));
-        assert_eq!(c.focused_index(), None, "out-of-range set_focus should clear");
+        assert_eq!(
+            c.focused_index(),
+            None,
+            "out-of-range set_focus should clear"
+        );
     }
 
     #[test]
@@ -619,7 +631,10 @@ mod tests {
             ContentBlockId(3),
             "<!doctype html><body><a href='x'>l</a></body>",
         );
-        c.render(PixelSize { width: 100, height: 0 });
+        c.render(PixelSize {
+            width: 100,
+            height: 0,
+        });
         c.freeze();
         assert!(c.is_frozen());
         c.thaw();
@@ -628,12 +643,17 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_link_click_returns_open_url_effect() {
-        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        use savvagent_plugin::{
+            InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable,
+        };
         let mut c = HtmlCanvas::new(
             ContentBlockId(10),
             "<!doctype html><body><a href='https://example.com' style='display:block;width:100px;height:50px'>x</a></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         let ev = InputEvent::Mouse(MouseEventPortable {
             kind: MouseEventKind::Press,
             button: Some(MouseButton::Left),
@@ -654,12 +674,17 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_drops_events_when_frozen() {
-        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        use savvagent_plugin::{
+            InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable,
+        };
         let mut c = HtmlCanvas::new(
             ContentBlockId(11),
             "<!doctype html><body><a href='x'>x</a></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         c.freeze();
         let ev = InputEvent::Mouse(MouseEventPortable {
             kind: MouseEventKind::Press,
@@ -669,7 +694,10 @@ mod tests {
             modifiers: KeyMods::default(),
         });
         let outcome = c.dispatch(ev).await.expect("dispatch ok");
-        assert!(outcome.effects.is_empty(), "frozen canvas must drop effects");
+        assert!(
+            outcome.effects.is_empty(),
+            "frozen canvas must drop effects"
+        );
         assert!(!outcome.dirty);
     }
 
@@ -685,12 +713,17 @@ mod tests {
     /// first click and is empty again after the second.
     #[tokio::test]
     async fn details_toggle_persists_across_dispatch_via_state_log() {
-        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        use savvagent_plugin::{
+            InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable,
+        };
         let mut c = HtmlCanvas::new(
             ContentBlockId(12),
             "<!doctype html><body><details><summary style='display:block;width:80px;height:20px'>s</summary><p>body</p></details></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
 
         // Click the summary at its laid-out center.
         let summary = c
@@ -736,21 +769,34 @@ mod tests {
             ContentBlockId(20),
             "<!doctype html><body><p>plain</p></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         assert!(c.snapshot_state().is_none(), "no stateful elements → None");
     }
 
     #[tokio::test]
     async fn snapshot_captures_open_details_after_toggle() {
-        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        use savvagent_plugin::{
+            InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable,
+        };
         let mut c = HtmlCanvas::new(
             ContentBlockId(21),
             "<!doctype html><body><details><summary style='display:block;width:80px;height:20px'>s</summary><p>y</p></details></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
-        let summary = c.focusable_elements().into_iter().next().expect("summary focusable");
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
+        let summary = c
+            .focusable_elements()
+            .into_iter()
+            .next()
+            .expect("summary focusable");
         let ev = InputEvent::Mouse(MouseEventPortable {
-            kind: MouseEventKind::Press, button: Some(MouseButton::Left),
+            kind: MouseEventKind::Press,
+            button: Some(MouseButton::Left),
             x_pixel: summary.bounds.x + summary.bounds.width / 2,
             y_pixel: summary.bounds.y + summary.bounds.height / 2,
             modifiers: KeyMods::default(),
@@ -758,7 +804,10 @@ mod tests {
         c.dispatch(ev).await.expect("dispatch ok");
         let snap = c.snapshot_state().expect("non-empty after toggle");
         let state = crate::state::CanvasState::from_bytes(&snap).unwrap();
-        assert!(!state.open_details.is_empty(), "open details should be captured");
+        assert!(
+            !state.open_details.is_empty(),
+            "open details should be captured"
+        );
     }
 
     #[test]
@@ -767,7 +816,10 @@ mod tests {
             ContentBlockId(22),
             "<!doctype html><body><a href='x'>l1</a><a href='y'>l2</a></body>",
         );
-        c.render(PixelSize { width: 200, height: 0 });
+        c.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         c.set_focus(Some(1));
         let snap = c.snapshot_state().expect("focus makes state non-empty");
         let state = crate::state::CanvasState::from_bytes(&snap).unwrap();
@@ -779,16 +831,22 @@ mod tests {
 
     #[tokio::test]
     async fn restore_state_round_trips_open_details() {
-        use savvagent_plugin::{InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
+        use savvagent_plugin::{
+            InputEvent, KeyMods, MouseButton, MouseEventKind, MouseEventPortable,
+        };
         // Build canvas A, toggle a <details> open, snapshot it.
         let mut a = HtmlCanvas::new(
             ContentBlockId(30),
             "<!doctype html><body><details><summary style='display:block;width:80px;height:20px'>s</summary><p>y</p></details></body>",
         );
-        a.render(PixelSize { width: 200, height: 0 });
+        a.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         let summary = a.focusable_elements().into_iter().next().expect("summary");
         let ev = InputEvent::Mouse(MouseEventPortable {
-            kind: MouseEventKind::Press, button: Some(MouseButton::Left),
+            kind: MouseEventKind::Press,
+            button: Some(MouseButton::Left),
             x_pixel: summary.bounds.x + summary.bounds.width / 2,
             y_pixel: summary.bounds.y + summary.bounds.height / 2,
             modifiers: KeyMods::default(),
@@ -801,7 +859,10 @@ mod tests {
             ContentBlockId(31),
             "<!doctype html><body><details><summary style='display:block;width:80px;height:20px'>s</summary><p>y</p></details></body>",
         );
-        b.render(PixelSize { width: 200, height: 0 });
+        b.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         b.restore_state(&snap).expect("restore ok");
         // Snapshot B; its open_details should now match A's.
         let snap_b = b.snapshot_state().expect("non-empty after restore");
@@ -812,7 +873,10 @@ mod tests {
     #[test]
     fn restore_state_returns_error_on_garbage() {
         let mut c = HtmlCanvas::new(ContentBlockId(32), "<!doctype html><body></body>");
-        c.render(PixelSize { width: 100, height: 0 });
+        c.render(PixelSize {
+            width: 100,
+            height: 0,
+        });
         let err = c.restore_state(b"not json").unwrap_err();
         assert!(
             matches!(err, savvagent_plugin::PluginError::StateRestoreFailed(_)),
@@ -835,7 +899,10 @@ mod tests {
         // Confirm the documented behavior: a fresh render captures no form
         // values (collect_state only runs on dispatch).
         let mut a = HtmlCanvas::new(ContentBlockId(40), source);
-        a.render(PixelSize { width: 200, height: 0 });
+        a.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         assert!(
             a.snapshot_state().is_none(),
             "render alone must not capture form values (collect_state runs only on dispatch)"
@@ -853,7 +920,10 @@ mod tests {
         let bytes = seed.to_bytes();
 
         let mut b = HtmlCanvas::new(ContentBlockId(41), source);
-        b.render(PixelSize { width: 200, height: 0 });
+        b.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         b.restore_state(&bytes).expect("restore ok");
         let snap_b = b.snapshot_state().expect("non-empty after restore");
         let state_b = crate::state::CanvasState::from_bytes(&snap_b).unwrap();
@@ -870,7 +940,10 @@ mod tests {
         let source = "<!doctype html><body><a href='x'>l1</a><a href='y'>l2</a></body>";
         // Build a snapshot that focuses the 2nd link.
         let mut a = HtmlCanvas::new(ContentBlockId(42), source);
-        a.render(PixelSize { width: 200, height: 0 });
+        a.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         a.set_focus(Some(1));
         let snap = a.snapshot_state().expect("focused → non-empty");
 
@@ -878,8 +951,15 @@ mod tests {
         let mut b = HtmlCanvas::new(ContentBlockId(43), source);
         b.restore_state(&snap).expect("restore ok");
         // Cache is empty now, so self.focused may be None here.
-        b.render(PixelSize { width: 200, height: 0 });
+        b.render(PixelSize {
+            width: 200,
+            height: 0,
+        });
         // After render rebuilds the cache, focus must be re-synced to index 1.
-        assert_eq!(b.focused_index(), Some(1), "focus index must restore after render");
+        assert_eq!(
+            b.focused_index(),
+            Some(1),
+            "focus index must restore after render"
+        );
     }
 }

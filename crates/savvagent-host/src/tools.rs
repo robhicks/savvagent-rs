@@ -875,7 +875,8 @@ pub(crate) fn tool_result_to_blocks(
 
     // structured_content (if any) flattens to text, same as today.
     if let Some(v) = &result.structured_content {
-        text_buf.push_str(&serde_json::to_string(v).unwrap_or_else(|_| "<unrenderable JSON>".into()));
+        text_buf
+            .push_str(&serde_json::to_string(v).unwrap_or_else(|_| "<unrenderable JSON>".into()));
     }
 
     for c in &result.content {
@@ -1359,8 +1360,10 @@ mod tool_call_outcome_tests {
         )]);
         let blocks = tool_result_to_blocks(&result);
         // No Html block; the plain-text resource folds into a Text block.
-        assert!(blocks
-            .iter()
-            .all(|b| !matches!(b, savvagent_protocol::ContentBlock::Html { .. })));
+        assert!(
+            blocks
+                .iter()
+                .all(|b| !matches!(b, savvagent_protocol::ContentBlock::Html { .. }))
+        );
     }
 }

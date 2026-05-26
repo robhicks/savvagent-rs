@@ -456,17 +456,32 @@ mod tests {
 
     #[test]
     fn https_routes_to_system_browser() {
-        assert_eq!(classify_url("https://example.com"), Some(UrlTarget::SystemBrowser));
-        assert_eq!(classify_url("HTTP://Example.com/path"), Some(UrlTarget::SystemBrowser));
+        assert_eq!(
+            classify_url("https://example.com"),
+            Some(UrlTarget::SystemBrowser)
+        );
+        assert_eq!(
+            classify_url("HTTP://Example.com/path"),
+            Some(UrlTarget::SystemBrowser)
+        );
     }
     #[test]
     fn mailto_routes_to_system_browser() {
-        assert_eq!(classify_url("mailto:user@example.com"), Some(UrlTarget::SystemBrowser));
+        assert_eq!(
+            classify_url("mailto:user@example.com"),
+            Some(UrlTarget::SystemBrowser)
+        );
     }
     #[test]
     fn tel_and_sms_route_to_system_browser() {
-        assert_eq!(classify_url("tel:+15551234567"), Some(UrlTarget::SystemBrowser));
-        assert_eq!(classify_url("sms:+15551234567"), Some(UrlTarget::SystemBrowser));
+        assert_eq!(
+            classify_url("tel:+15551234567"),
+            Some(UrlTarget::SystemBrowser)
+        );
+        assert_eq!(
+            classify_url("sms:+15551234567"),
+            Some(UrlTarget::SystemBrowser)
+        );
     }
     #[test]
     fn data_url_emits_no_effect() {
@@ -487,8 +502,17 @@ mod tests {
     }
     #[test]
     fn bare_path_continues_conversation() {
-        assert_eq!(classify_url("./foo.md"), Some(UrlTarget::ContinueConversation));
-        assert_eq!(classify_url("docs/spec.md"), Some(UrlTarget::ContinueConversation));
-        assert_eq!(classify_url("foo.rs"), Some(UrlTarget::ContinueConversation));
+        assert_eq!(
+            classify_url("./foo.md"),
+            Some(UrlTarget::ContinueConversation)
+        );
+        assert_eq!(
+            classify_url("docs/spec.md"),
+            Some(UrlTarget::ContinueConversation)
+        );
+        assert_eq!(
+            classify_url("foo.rs"),
+            Some(UrlTarget::ContinueConversation)
+        );
     }
 }

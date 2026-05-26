@@ -159,10 +159,14 @@ mod trait_smoke {
         struct Stub;
         #[async_trait::async_trait]
         impl ContentRenderer for Stub {
-            fn id(&self) -> ContentBlockId { ContentBlockId(0) }
+            fn id(&self) -> ContentBlockId {
+                ContentBlockId(0)
+            }
             fn render(&mut self, _: PixelSize) -> Frame {
                 Frame {
-                    width: 1, height: 1, format: PixelFormat::Rgba8,
+                    width: 1,
+                    height: 1,
+                    format: PixelFormat::Rgba8,
                     bytes: vec![0, 0, 0, 0],
                 }
             }

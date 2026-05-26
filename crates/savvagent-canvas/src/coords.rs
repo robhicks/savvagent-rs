@@ -68,11 +68,19 @@ mod tests {
     use super::*;
 
     fn r(col: u16, row: u16, w: u16, h: u16) -> CellRect {
-        CellRect { col, row, width: w, height: h }
+        CellRect {
+            col,
+            row,
+            width: w,
+            height: h,
+        }
     }
 
     fn cs(w: u16, h: u16) -> CellPixelSize {
-        CellPixelSize { width: w, height: h }
+        CellPixelSize {
+            width: w,
+            height: h,
+        }
     }
 
     #[test]
@@ -87,10 +95,10 @@ mod tests {
     fn outside_returns_none() {
         let rect = r(10, 5, 40, 12);
         let cell = cs(8, 16);
-        assert!(cell_to_pixel(rect, cell, 9, 5).is_none());      // left of
-        assert!(cell_to_pixel(rect, cell, 50, 5).is_none());     // right of
-        assert!(cell_to_pixel(rect, cell, 10, 4).is_none());     // above
-        assert!(cell_to_pixel(rect, cell, 10, 17).is_none());    // below
+        assert!(cell_to_pixel(rect, cell, 9, 5).is_none()); // left of
+        assert!(cell_to_pixel(rect, cell, 50, 5).is_none()); // right of
+        assert!(cell_to_pixel(rect, cell, 10, 4).is_none()); // above
+        assert!(cell_to_pixel(rect, cell, 10, 17).is_none()); // below
     }
 
     #[test]
