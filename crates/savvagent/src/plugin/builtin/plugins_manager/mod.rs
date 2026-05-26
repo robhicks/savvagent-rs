@@ -139,20 +139,17 @@ impl Plugin for PluginsManagerPlugin {
                     source_url,
                     hash,
                     staging_dir,
+                    home_dir,
                 },
-            ) => {
-                let home = dirs::home_dir()
-                    .ok_or_else(|| PluginError::Internal("could not resolve $HOME".into()))?;
-                Ok(Box::new(PluginsTrustModal::new(
-                    pid,
-                    name,
-                    version,
-                    source_url,
-                    hash,
-                    staging_dir,
-                    home,
-                )))
-            }
+            ) => Ok(Box::new(PluginsTrustModal::new(
+                pid,
+                name,
+                version,
+                source_url,
+                hash,
+                staging_dir,
+                home_dir,
+            ))),
             (other, _) => Err(PluginError::ScreenNotFound(other.to_string())),
         }
     }

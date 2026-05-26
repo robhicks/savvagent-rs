@@ -333,6 +333,11 @@ pub enum ScreenArgs {
         /// real on-disk location after disabling auto-cleanup; the modal
         /// is responsible for moving or deleting it.
         staging_dir: std::path::PathBuf,
+        /// Home directory the install command was invoked with. Carried
+        /// through so the trust modal writes to the same root the caller
+        /// staged into — critical for tests/sandboxes where
+        /// `dirs::home_dir()` would resolve to a different path.
+        home_dir: std::path::PathBuf,
     },
 }
 
@@ -572,6 +577,7 @@ mod tests {
             source_url: "https://example.com/plugin.toml".into(),
             hash: "abc123".into(),
             staging_dir: std::path::PathBuf::from("/tmp/staging"),
+            home_dir: std::path::PathBuf::from("/home/test"),
         };
         assert_eq!(args.screen_id(), Some("plugins.trust-modal"));
         match args {
@@ -582,6 +588,7 @@ mod tests {
                 source_url,
                 hash,
                 staging_dir,
+                home_dir,
             } => {
                 assert_eq!(id, "acme.demo");
                 assert_eq!(name, "Demo");
@@ -589,6 +596,7 @@ mod tests {
                 assert_eq!(source_url, "https://example.com/plugin.toml");
                 assert_eq!(hash, "abc123");
                 assert_eq!(staging_dir, std::path::PathBuf::from("/tmp/staging"));
+                assert_eq!(home_dir, std::path::PathBuf::from("/home/test"));
             }
             _ => panic!("expected PluginsTrustModal"),
         }

@@ -39,7 +39,6 @@ const MAX_WASM_BYTES: usize = 32 * 1024 * 1024;
 /// with a user-facing string; the caller already wraps these into a
 /// `PushNote` so no panic-style messages leak to the UI.
 pub async fn install(home_dir: &Path, toml_url: &str) -> Result<Vec<Effect>, PluginError> {
-    let _ = home_dir; // not needed today — trust modal takes home_dir from caller on confirm
     let client = Client::builder()
         .use_rustls_tls()
         .build()
@@ -90,6 +89,7 @@ pub async fn install(home_dir: &Path, toml_url: &str) -> Result<Vec<Effect>, Plu
             source_url: toml_url.to_string(),
             hash,
             staging_dir,
+            home_dir: home_dir.to_path_buf(),
         },
     }])
 }
@@ -263,6 +263,7 @@ wasm = "{wasm_url}"
         });
 
         let tmp = tempfile::tempdir().unwrap();
+        let tmp_home_path = tmp.path().to_path_buf();
         let toml_url = format!("http://{}/plugin.toml", server.address());
         let effects = install(tmp.path(), &toml_url)
             .await
@@ -283,6 +284,7 @@ wasm = "{wasm_url}"
                         source_url,
                         hash,
                         staging_dir,
+                        home_dir,
                     } => {
                         assert_eq!(plugin_id, "fixture.static");
                         assert_eq!(name, "Fixture Static");
@@ -297,6 +299,10 @@ wasm = "{wasm_url}"
                         assert!(
                             staging_dir.join("plugin.wasm").is_file(),
                             "staging plugin.wasm must exist"
+                        );
+                        assert_eq!(
+                            home_dir, &tmp_home_path,
+                            "home_dir must propagate through to the modal"
                         );
                         // Clean up the leaked tempdir manually.
                         let _ = std::fs::remove_dir_all(staging_dir);
