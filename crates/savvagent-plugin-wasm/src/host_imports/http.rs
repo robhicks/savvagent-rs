@@ -82,6 +82,14 @@ impl HttpState {
             .use_rustls_tls()
             .build()
             .expect("reqwest::Client::build with rustls TLS");
+        // Normalize allow-list entries to lowercase. `Url::host_str()`
+        // returns a lowercase host per RFC 3986, so without this an
+        // operator who writes "API.Example.com" in plugin.toml would
+        // silently get DeniedHost for every request.
+        let allowed_hosts: Vec<String> = allowed_hosts
+            .into_iter()
+            .map(|h| h.to_lowercase())
+            .collect();
         Self {
             client,
             allowed_hosts: Arc::new(allowed_hosts),

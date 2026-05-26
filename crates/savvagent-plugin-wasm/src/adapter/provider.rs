@@ -400,4 +400,3 @@ fn wasm_error_to_provider_error(msg: &str) -> ProviderError {
         provider_code: None,
     }
 }
-

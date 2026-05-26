@@ -71,9 +71,11 @@ impl ProgressState {
             return;
         };
         let spp_event: StreamEvent = event.into();
-        // Errors here mean the host's receiver was dropped (turn
-        // cancelled / panicked). Plugin can't act on that, so swallow.
-        let _ = tx.send(spp_event).await;
+        // Fire-and-forget per WIT contract. `try_send` drops the event
+        // if the channel is full (slow consumer) or closed (turn
+        // cancelled / panicked) rather than blocking the wasm guest's
+        // execution context. Plugin can't act on the failure either way.
+        let _ = tx.try_send(spp_event);
     }
 }
 
