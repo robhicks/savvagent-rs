@@ -37,6 +37,7 @@ mod i18n_smoke {
 mod app;
 mod config_file;
 mod creds;
+mod egui_app;
 mod migration;
 mod models_pref;
 mod palette;
@@ -142,6 +143,15 @@ impl ToolBins {
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     init_tracing();
+
+    // `savvagent gui` launches the experimental native egui front-end
+    // (v0.19.0 migration, in progress) instead of the ratatui TUI. Every
+    // other invocation runs the TUI exactly as before. `eframe::run_native`
+    // owns the main thread for the lifetime of the window; we are inside
+    // `#[tokio::main]`, so spawned turn workers use `Handle::current()`.
+    if std::env::args().nth(1).as_deref() == Some("gui") {
+        return egui_app::run().map_err(|e| anyhow::anyhow!("egui front-end failed: {e}"));
+    }
 
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let tool_bins = ToolBins {
