@@ -9,7 +9,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, FrameExt, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Clear, FrameExt, List, ListItem, Padding, Paragraph, Wrap,
+    },
 };
 use savvagent_host::ToolCallStatus;
 use savvagent_plugin::ContentBlockId;
@@ -932,23 +934,53 @@ fn render_canvas_overlays(
         if overlay.area.width == 0 || overlay.area.height == 0 {
             continue;
         }
+        // Focus chrome: when this canvas is the focused element, paint a
+        // 1-cell accent border around the overlay and render the content
+        // into the block's inner area. Unfocused canvases render as before.
+        let focused = app.is_canvas_focused(overlay.id);
+        let content_area = canvas_content_area(overlay.area, focused);
+        if focused {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(palette.base_style().fg(palette.accent));
+            frame.render_widget(block, overlay.area);
+        }
+        // A 1-cell shrink on a thin overlay can collapse the inner area to
+        // zero — skip content rendering then (matches Phase 1's small-area
+        // behavior), leaving just the border.
+        if content_area.width == 0 || content_area.height == 0 {
+            continue;
+        }
         if overlay.streaming {
-            render_source_preview(frame, overlay.area, &overlay.source, palette);
+            render_source_preview(frame, content_area, &overlay.source, palette);
             continue;
         }
         if app.canvas_registry.image_protocol_available() {
             render_canvas_image(
                 frame,
-                overlay.area,
+                content_area,
                 app,
                 overlay.id,
                 palette,
                 &overlay.source,
             );
         } else {
-            render_canvas_source_fallback(frame, overlay.area, &overlay.source, palette);
+            render_canvas_source_fallback(frame, content_area, &overlay.source, palette);
         }
     }
+}
+
+/// Inner area available for canvas content given the overlay rect and focus
+/// state. A focused canvas reserves 1 cell on every side for its accent
+/// border (via `Block::inner`); an unfocused canvas uses the full rect. The
+/// shrink is saturating, so a tiny focused overlay collapses to a zero-size
+/// area rather than panicking — callers must guard against that.
+fn canvas_content_area(area: Rect, focused: bool) -> Rect {
+    if !focused {
+        return area;
+    }
+    Block::default().borders(Borders::ALL).inner(area)
 }
 
 /// Drive the canvas renderer at `area`'s pixel width and overlay the
@@ -1365,6 +1397,76 @@ mod tests {
 
     fn joined(line: &StyledLine) -> String {
         line.spans.iter().map(|s| s.text.clone()).collect()
+    }
+
+    #[test]
+    fn canvas_content_area_unfocused_is_unchanged() {
+        let area = Rect {
+            x: 3,
+            y: 4,
+            width: 20,
+            height: 8,
+        };
+        assert_eq!(canvas_content_area(area, false), area);
+    }
+
+    #[test]
+    fn canvas_content_area_focused_shrinks_by_one_cell_each_side() {
+        let area = Rect {
+            x: 3,
+            y: 4,
+            width: 20,
+            height: 8,
+        };
+        let inner = canvas_content_area(area, true);
+        assert_eq!(
+            inner,
+            Rect {
+                x: 4,
+                y: 5,
+                width: 18,
+                height: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn canvas_content_area_focused_tiny_area_collapses_without_panic() {
+        // 1x1 overlay: the 1-cell border consumes the whole rect, leaving a
+        // zero-size inner area (callers must guard against this).
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        let inner = canvas_content_area(area, true);
+        assert_eq!(inner.width, 0);
+        assert_eq!(inner.height, 0);
+    }
+
+    #[test]
+    fn focused_canvas_block_draws_a_border() {
+        use ratatui::buffer::Buffer;
+        use ratatui::widgets::Widget;
+
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 4,
+        };
+        let mut buf = Buffer::empty(area);
+        // Mirror the focus-chrome block the overlay path renders.
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .render(area, &mut buf);
+        let has_border = buf
+            .content()
+            .iter()
+            .any(|c| matches!(c.symbol(), "┌" | "┐" | "└" | "┘" | "│" | "─"));
+        assert!(has_border, "focused canvas should draw a border");
     }
 
     #[test]
