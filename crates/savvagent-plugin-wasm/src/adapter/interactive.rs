@@ -236,11 +236,18 @@ impl Plugin for InteractiveAdapter {
                 "InteractiveAdapter::create_screen requires a tokio runtime".to_string(),
             )
         })?;
-        // `block_in_place` panics on a current-thread runtime. We can't
-        // detect "current-thread" directly from the handle, but if we are
-        // on one the panic message is descriptive enough that callers can
-        // diagnose. Document the requirement loud-and-clear on this
-        // trait-impl's doc comment.
+        // `block_in_place` panics on a current-thread runtime. Detect that
+        // flavor up front and return a controlled error so callers don't
+        // see a process panic crossing the plugin boundary.
+        if matches!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread
+        ) {
+            return Err(PluginError::Internal(
+                "InteractiveAdapter::create_screen requires a multi-thread tokio runtime"
+                    .to_string(),
+            ));
+        }
         let id_owned = id.to_string();
         let instance_pre = Arc::clone(&self.instance_pre);
         let plugin_id = self.plugin_id.clone();
