@@ -35,6 +35,7 @@ pub mod engine;
 pub mod error;
 pub mod host_imports;
 pub mod manifest;
+pub mod register;
 pub mod spp_convert;
 pub mod strikes;
 pub mod trust;

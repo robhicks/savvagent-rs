@@ -235,8 +235,8 @@ async fn apply_one(app: &mut App, eff: Effect, depth: u8) -> Result<(), String> 
             // than panicking so plugin authors can't crash the TUI by
             // emitting `PromptApiKey` for a provider that's not in the
             // built-in catalog yet.
-            match crate::providers::PROVIDERS
-                .iter()
+            match crate::providers::effective_providers()
+                .into_iter()
                 .position(|p| p.id == provider_id.as_str())
             {
                 Some(idx) => app.enter_api_key_for(idx),

@@ -4204,6 +4204,7 @@ dependencies = [
  "savvagent-host",
  "savvagent-mcp",
  "savvagent-plugin",
+ "savvagent-plugin-wasm",
  "savvagent-protocol",
  "self_update",
  "semver",
