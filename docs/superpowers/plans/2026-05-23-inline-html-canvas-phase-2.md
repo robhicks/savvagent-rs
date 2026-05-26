@@ -2563,7 +2563,37 @@ git commit -m "feat(host): translate MCP html content items to ContentBlock::Htm
 
 ---
 
-## Task 18: `Entry::Canvas { state }` + `Entry::Unknown` serde fallback
+> **PLAN AMENDMENT #2 (2026-05-25, during execution):** Investigation
+> for Task 18 found the plan's persistence model is wrong. `Entry`
+> (`crates/savvagent/src/app.rs`) derives only `Debug, Clone` — it has
+> NO serde and is NEVER persisted. The authoritative transcript is
+> `TranscriptFile { schema_version, saved_at, messages: Vec<Message> }`
+> (`savvagent-host`), holding SPP `ContentBlock`s; `Host::load_transcript`
+> + `App::replay_transcript` rebuild `Entry::Canvas` from `messages` on
+> `/resume`. Therefore:
+>
+> - **Task 18 is REWORKED:** instead of adding `state` to `Entry::Canvas`
+>   and a `#[serde(other)] Unknown` on `Entry`, add an optional
+>   `state: Option<String>` field to **`ContentBlock::Html { source, state }`**
+>   in `savvagent-protocol` (with `#[serde(default, skip_serializing_if =
+>   "Option::is_none")]`). This persists naturally in `TranscriptFile.messages`.
+>   Bump the SPP spec/version note. The 4 providers already translate
+>   `Html`→text in history, so the new field is inert for them; old
+>   transcripts (no `state`) load via the serde default.
+> - **Task 26 (snapshot triggers)** writes the renderer's
+>   `snapshot_state()` (base64) into the matching `ContentBlock::Html.state`
+>   in the host's message list before the `TranscriptFile` is written,
+>   rather than into an `Entry` field.
+> - **Task 27 (restore on /resume)** reads `ContentBlock::Html.state` from
+>   the loaded messages and passes it to `HtmlCanvas::restore_state` when
+>   `replay_transcript` constructs each canvas.
+> - **Execution order:** per user direction, interaction Tasks 19-25 run
+>   FIRST (they don't touch persistence); reworked 18/26/27 follow.
+> - The `Entry::Unknown` forward-compat idea is dropped (Entry isn't
+>   serialized, so it's moot). If `ContentBlock` forward-compat is wanted,
+>   that's separate follow-up work, out of Phase 2 scope.
+
+## Task 18 (REWORKED — see amendment #2 above): `ContentBlock::Html { state }` persistence field
 
 **Files:**
 - Modify: `crates/savvagent/src/app.rs`
