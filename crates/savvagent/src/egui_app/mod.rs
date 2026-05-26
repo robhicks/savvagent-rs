@@ -7,6 +7,8 @@
 //! (glow + x11 + wayland + default_fonts) are kept so the window opens on
 //! Linux; submodules are added by later foundation tasks.
 
+pub mod convert;
+
 /// The eframe application. Fields are filled in by later tasks (host slot,
 /// worker channel, render-model cache, prompt buffer).
 pub struct SavvagentApp {
