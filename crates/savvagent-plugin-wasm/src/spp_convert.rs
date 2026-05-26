@@ -1082,6 +1082,26 @@ mod roundtrip_tests {
         ]
     }
 
+    fn arb_usage_delta() -> impl Strategy<Value = UsageDelta> {
+        (
+            proptest::option::of(any::<u32>()),
+            proptest::option::of(any::<u32>()),
+        )
+            .prop_map(|(output_tokens, cache_read_input_tokens)| UsageDelta {
+                output_tokens,
+                cache_read_input_tokens,
+            })
+    }
+
+    fn arb_stop_reason() -> impl Strategy<Value = StopReason> {
+        prop_oneof![
+            Just(StopReason::EndTurn),
+            Just(StopReason::MaxTokens),
+            Just(StopReason::StopSequence),
+            Just(StopReason::ToolUse),
+        ]
+    }
+
     fn arb_stream_event() -> impl Strategy<Value = StreamEvent> {
         prop_oneof![
             (any::<String>(), any::<String>(), arb_usage())
@@ -1091,6 +1111,18 @@ mod roundtrip_tests {
             (any::<u32>(), arb_block_delta())
                 .prop_map(|(index, delta)| { StreamEvent::ContentBlockDelta { index, delta } }),
             any::<u32>().prop_map(|index| StreamEvent::ContentBlockStop { index }),
+            (
+                proptest::option::of(arb_stop_reason()),
+                proptest::option::of(any::<String>()),
+                arb_usage_delta(),
+            )
+                .prop_map(|(stop_reason, stop_sequence, usage_delta)| {
+                    StreamEvent::MessageDelta {
+                        stop_reason,
+                        stop_sequence,
+                        usage_delta,
+                    }
+                }),
             Just(StreamEvent::MessageStop),
             Just(StreamEvent::Ping),
             any::<String>().prop_map(|message| StreamEvent::Warning { message }),
