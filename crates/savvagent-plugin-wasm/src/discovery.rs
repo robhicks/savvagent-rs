@@ -101,7 +101,14 @@ pub fn discover(project_root: Option<&Path>, home_dir: Option<&Path>) -> Discove
                 continue;
             }
         };
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warnings.push(format!("[plugins] skipped one entry in {dir:?}: {e}"));
+                    continue;
+                }
+            };
             let plugin_dir = entry.path();
             if !plugin_dir.is_dir() {
                 continue;

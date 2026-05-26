@@ -41,9 +41,11 @@
 //!    `From<wit::ProviderError> for spp::ProviderError` (defined in
 //!    `spp_convert.rs`). The plugin owns the error taxonomy here.
 //! 2. **Wasm trap / instantiation failure** → wrapped as a synthetic
-//!    `ProviderError { kind: Transport, message: "wasmtime: ..." }` so
-//!    the host sees a meaningful error class rather than a generic
-//!    Internal.
+//!    `ProviderError { kind: Internal, message: "wasmtime: ..." }`.
+//!    `Internal` (not `Transport`) so the host's retry/fallback layer —
+//!    which special-cases `Transport` for "try a different endpoint" —
+//!    doesn't try to retry a permanently-broken plugin. See
+//!    `wasm_error_to_provider_error` and `disabled_provider_error`.
 //! 3. **`fetch-stream` or unimplemented capability** → not reachable from
 //!    this adapter directly; the plugin would get the corresponding
 //!    `HttpError`/`KeyringError` and surface it as its own

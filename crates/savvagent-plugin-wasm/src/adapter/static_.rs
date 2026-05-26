@@ -28,9 +28,10 @@
 //! recorded in [`StrikeCounter`]; if three or more land inside the rolling
 //! 10-minute window the adapter flips `disabled` and short-circuits every
 //! subsequent call with `PluginError::Internal("plugin disabled by
-//! strikes")`. The disable signal stays local to the adapter in Task 8 —
-//! Task 9 will hook it into the registry so the `internal:plugins`
-//! plugin can persist `disabled_reason` to the trust ledger.
+//! strikes")`. The disable signal stays local to the adapter in v0.18.0;
+//! a v0.18.1 follow-up will hook it into the registry so the
+//! `internal:plugins-manager` plugin can persist `disabled_reason` to
+//! the trust ledger.
 //!
 //! ## Epoch interruption
 //!

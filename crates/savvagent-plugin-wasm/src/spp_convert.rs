@@ -132,11 +132,19 @@ impl From<wit::ContentBlock> for spp::ContentBlock {
             wit::ContentBlock::ToolUse(t) => Self::ToolUse {
                 id: t.id,
                 name: t.name,
-                input: serde_json::from_str(&t.input_json).unwrap_or(serde_json::Value::Null),
+                input: parse_wasm_json("tool_use.input", &t.input_json),
             },
             wit::ContentBlock::ToolResult(t) => Self::ToolResult {
                 tool_use_id: t.tool_use_id,
-                content: serde_json::from_str(&t.content_json).unwrap_or_default(),
+                content: serde_json::from_str(&t.content_json).unwrap_or_else(|err| {
+                    tracing::warn!(
+                        target: "savvagent_plugin_wasm::spp_convert",
+                        field = "tool_result.content",
+                        ?err,
+                        "wasm guest emitted malformed JSON; falling back to empty content"
+                    );
+                    Vec::new()
+                }),
                 is_error: t.is_error,
             },
             wit::ContentBlock::Image(i) => Self::Image {
@@ -146,6 +154,30 @@ impl From<wit::ContentBlock> for spp::ContentBlock {
                 text: t.text,
                 signature: t.signature,
             },
+        }
+    }
+}
+
+/// Parse a JSON payload that crossed the WIT boundary from a wasm plugin.
+///
+/// On parse failure we **log loudly and fall back to `Value::Null`**. The
+/// fallback preserves caller liveness (tool dispatch proceeds with empty
+/// input rather than panicking the host on a buggy guest), but it does
+/// dispatch the downstream tool with no input — which is almost always
+/// wrong. The host's error path is the place to react; v0.18.1 will
+/// restructure these conversions into `TryFrom` so the failure
+/// propagates as a `ProviderError` instead of being absorbed.
+fn parse_wasm_json(field: &'static str, raw: &str) -> serde_json::Value {
+    match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(
+                target: "savvagent_plugin_wasm::spp_convert",
+                field,
+                ?err,
+                "wasm guest emitted malformed JSON; falling back to Value::Null"
+            );
+            serde_json::Value::Null
         }
     }
 }
@@ -184,8 +216,7 @@ impl From<wit::ToolDef> for spp::ToolDef {
         Self {
             name: t.name,
             description: t.description,
-            input_schema: serde_json::from_str(&t.input_schema_json)
-                .unwrap_or(serde_json::Value::Null),
+            input_schema: parse_wasm_json("tool_def.input_schema", &t.input_schema_json),
         }
     }
 }
@@ -253,7 +284,7 @@ impl From<wit::CompleteRequest> for spp::CompleteRequest {
             metadata: r
                 .metadata_json
                 .as_deref()
-                .map(|s| serde_json::from_str(s).unwrap_or(serde_json::Value::Null)),
+                .map(|s| parse_wasm_json("complete_request.metadata", s)),
         }
     }
 }

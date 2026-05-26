@@ -41,6 +41,11 @@ const MAX_WASM_BYTES: usize = 32 * 1024 * 1024;
 pub async fn install(home_dir: &Path, toml_url: &str) -> Result<Vec<Effect>, PluginError> {
     let client = Client::builder()
         .use_rustls_tls()
+        // Top-level request timeout. The body-size caps below catch
+        // oversize responses post-receive; this timeout catches the
+        // slow-loris case where the server holds the TCP connection
+        // open without sending bytes.
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| PluginError::Internal(format!("reqwest: {e}")))?;
 

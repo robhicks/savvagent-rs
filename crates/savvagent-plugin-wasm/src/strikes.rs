@@ -15,8 +15,8 @@
 //! complicates the trust ledger without buying much (a restart clears the
 //! transient bad state more often than not). Persistent disablement
 //! happens in [`crate::trust`] via `disabled_reason`, written by the
-//! `internal:plugins` plugin once it observes the disable signal from
-//! Task 9's registry.
+//! `internal:plugins-manager` plugin once it observes the disable signal
+//! from the registry (auto-disable signal wiring is a v0.18.1 follow-up).
 //!
 //! ## Semantics
 //!

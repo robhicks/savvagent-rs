@@ -196,12 +196,26 @@ pub enum TrustCheck {
 /// a content edit, an addition, and a deletion each produce a different
 /// hash — exactly what a trust anchor needs.
 pub fn tree_hash(plugin_dir: &Path) -> Result<String, WasmPluginError> {
-    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(plugin_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .collect();
+    // Fail-closed on any walk error. A silently-skipped unreadable file
+    // would let an attacker temporarily chmod 000 a plugin file, induce
+    // a "trust this hash" prompt, then restore perms — the recorded
+    // hash would not include the unreadable file, opening a trust-bypass.
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in walkdir::WalkDir::new(plugin_dir) {
+        let entry = entry.map_err(|e| {
+            let path = e
+                .path()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| plugin_dir.to_path_buf());
+            let io = e.into_io_error().unwrap_or_else(|| {
+                std::io::Error::other("walkdir error with no underlying io::Error")
+            });
+            WasmPluginError::Io(path, io)
+        })?;
+        if entry.file_type().is_file() {
+            files.push(entry.into_path());
+        }
+    }
     files.sort();
 
     let mut hasher = Sha256::new();
