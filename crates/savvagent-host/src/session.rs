@@ -1364,9 +1364,7 @@ impl Host {
                         }
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id,
-                            content: vec![ContentBlock::Text {
-                                text: outcome.payload.clone(),
-                            }],
+                            content: outcome.blocks.clone(),
                             is_error: outcome.is_error,
                         });
                         tool_calls.push(ToolCall {
