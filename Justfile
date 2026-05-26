@@ -1,7 +1,7 @@
 # Build the wasm fixtures used by `cargo test -p savvagent-plugin-wasm`.
 #
 # Requirements:
-#   - rustup target add wasm32-wasip2
+#   - rustup target add wasm32-unknown-unknown
 #   - cargo install cargo-component --locked
 #
 # Each fixture is its own component-model Rust crate that targets one of
