@@ -211,6 +211,11 @@ row-external      = "(externo)"
 core-cannot-disable = "Plugins Core não podem ser desativados."
 tips              = "Cima/Baixo navegar · Espaço/Enter alternar · Esc fechar"
 
+[picker.plugins-trust-modal]
+modal-title       = "Instalar plugin externo?"
+warning           = "AVISO: plugins externos rodam WebAssembly em sandbox, mas podem acessar rede, keyring e arquivos do projeto."
+tips              = "Enter confiar e instalar · Esc cancelar"
+
 [picker.command-palette]
 modal-title       = "Paleta de comandos"
 no-commands       = "(nenhum comando disponível)"

@@ -93,9 +93,13 @@ zip.workspace = true
 sha2.workspace = true
 hex.workspace = true
 which.workspace = true
+# `/plugins install` stages downloaded plugin.toml + plugin.wasm in a temp
+# dir before the trust modal moves it into `~/.savvagent/plugins/<id>/`.
+tempfile = "3"
 
 [dev-dependencies]
 rmcp.workspace = true
 serial_test = "3"
 tempfile = "3"
 tokio = { version = "1.52", features = ["test-util"] }
+httpmock = "0.7"
