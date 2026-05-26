@@ -4286,6 +4286,7 @@ name = "savvagent-plugin-wasm"
 version = "0.17.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "proptest",
  "savvagent-plugin",
  "savvagent-plugin-wit",
@@ -4295,6 +4296,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "toml",
  "tracing",
  "walkdir",

@@ -6,23 +6,34 @@
 //! built-ins to the rest of the host.
 //!
 //! Tasks 1–2 landed the WIT contract and the host-side bindgen output.
-//! Task 3 (this revision) adds the runtime's discovery + trust layer:
+//! Task 3 added the runtime's discovery + trust layer. Task 4 (this
+//! revision) layers in the first wasmtime adapter — the static-world
+//! adapter — plus the shared infrastructure Tasks 5 and 6 will reuse:
 //!
-//! - [`error`] — the runtime's error enum, `WasmPluginError`.
-//! - [`manifest`] — parser/validator for `plugin.toml`.
-//! - [`discovery`] — walks the four well-known directories and dedupes
-//!   plugins first-wins by id, mirroring sub-projects A/B/C.
-//! - [`trust`] — `~/.savvagent/plugin-trust.toml` ledger + the SHA-256
-//!   `tree_hash` that anchors it.
+//! - [`engine`] — process-wide shared `wasmtime::Engine` (Task 4).
+//! - [`convert`] — free-function conversions between the WIT bindgen
+//!   output and `savvagent_plugin` types (Effect, Manifest, HookKind,
+//!   ThemeColor, …; Task 4).
+//! - [`host_imports`] — host-side implementations of the capability
+//!   surface every WIT world declares as `import`s (`log`,
+//!   `current-theme`; Task 4). Draw + HTTP/keyring/progress land in Tasks
+//!   5 and 6.
+//! - [`adapter`] — `StaticAdapter` wraps a `plugin-static` wasm component
+//!   as a `Box<dyn savvagent_plugin::Plugin>` (Task 4). Interactive and
+//!   provider adapters land in Tasks 5 and 6.
 //!
-//! Discovery + trust enforcement, capability host impls, and the actual
-//! adapter glue all land in Tasks 4–6.
+//! Trust enforcement, capability denial paths, and the interactive /
+//! provider adapters land in subsequent tasks.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod adapter;
+pub mod convert;
 pub mod discovery;
+pub mod engine;
 pub mod error;
+pub mod host_imports;
 pub mod manifest;
 pub mod spp_convert;
 pub mod trust;
