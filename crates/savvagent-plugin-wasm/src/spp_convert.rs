@@ -122,6 +122,20 @@ impl From<spp::ContentBlock> for wit::ContentBlock {
             spp::ContentBlock::Thinking { text, signature } => {
                 Self::Thinking(wit::ThinkingBlock { text, signature })
             }
+            // The `Html` content block was added in the inline-canvas
+            // initiative (Phase 1, v0.17.0). The v0.18.0 WIT contract
+            // pre-dates it; rather than break the contract this late,
+            // we degrade by replacing the HTML payload with a text
+            // block that fences the source for the plugin to inspect.
+            // A v0.19.0 WIT bump can introduce a typed Html variant.
+            spp::ContentBlock::Html { source, state: _ } => {
+                tracing::debug!(
+                    target: "savvagent_plugin_wasm::spp_convert",
+                    chars = source.len(),
+                    "ContentBlock::Html crossing wasm boundary; degraded to Text",
+                );
+                Self::Text(wit::TextBlock { text: source })
+            }
         }
     }
 }
@@ -389,6 +403,11 @@ impl From<spp::BlockDelta> for wit::BlockDelta {
             spp::BlockDelta::InputJsonDelta { partial_json } => Self::InputJsonDelta(partial_json),
             spp::BlockDelta::ThinkingDelta { text } => Self::ThinkingDelta(text),
             spp::BlockDelta::SignatureDelta { signature } => Self::SignatureDelta(signature),
+            // `HtmlSourceDelta` paired with the `ContentBlock::Html`
+            // degradation above — degrade to TextDelta so v0.18.0 WASM
+            // plugins see assembled-as-text output. Typed Html block
+            // support waits on a v0.19.0 WIT bump.
+            spp::BlockDelta::HtmlSourceDelta { source } => Self::TextDelta(source),
         }
     }
 }

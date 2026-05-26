@@ -49,6 +49,7 @@ impl Plugin for PluginsManagerPlugin {
             summary: rust_i18n::t!("slash.plugins-summary").to_string(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         contributions.screens = vec![
             ScreenSpec {
@@ -410,6 +411,7 @@ mod tests {
             summary: "".into(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: vec![],
         }];
         c.screens = vec![savvagent_plugin::ScreenSpec {
             id: "x".into(),
@@ -614,12 +616,14 @@ mod tests {
                 summary: "".into(),
                 args_hint: None,
                 requires_arg: false,
+                suppress_prompt_segments: vec![],
             },
             savvagent_plugin::SlashSpec {
                 name: "b".into(),
                 summary: "".into(),
                 args_hint: None,
                 requires_arg: false,
+                suppress_prompt_segments: vec![],
             },
         ];
         c.screens = vec![

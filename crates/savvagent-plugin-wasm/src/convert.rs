@@ -390,6 +390,7 @@ pub fn contributions_from_wit(c: wit::Contributions) -> spm::Contributions {
             summary: String::new(),
             args_hint: None,
             requires_arg: false,
+            suppress_prompt_segments: Vec::new(),
         })
         .collect();
     out.screens = c

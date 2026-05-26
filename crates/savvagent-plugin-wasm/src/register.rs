@@ -189,10 +189,10 @@ pub async fn register_external(
     // Persist the trust ledger if any HashMismatch revoked an entry.
     // Save failures become warnings (so a read-only HOME doesn't break
     // startup); next launch will re-discover the mismatch and try again.
-    if trust_dirty {
-        if let Err(e) = trust.save(home_dir) {
-            warnings.push(format!("[plugins] trust file save failed: {e}"));
-        }
+    if trust_dirty
+        && let Err(e) = trust.save(home_dir)
+    {
+        warnings.push(format!("[plugins] trust file save failed: {e}"));
     }
 
     Ok(RegisterResult {
