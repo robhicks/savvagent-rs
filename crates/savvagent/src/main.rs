@@ -2588,6 +2588,66 @@ async fn maybe_emit_context_changed(app: &mut App, last_emitted: &mut u32) {
     }
 }
 
+/// Apply the effects a canvas renderer emitted in response to an input
+/// event. Phase 2.0 wires the two `OpenUrl` targets:
+///
+/// * `SystemBrowser` shells out to the OS opener (`xdg-open` / `open` /
+///   `start`); failures are warn-only so a missing opener never crashes the
+///   TUI. (Task 24 will consolidate this into an `open_in_browser` helper.)
+/// * `ContinueConversation` stages the URL into the prompt editor and notes
+///   it, leaving the user to review and submit — programmatic prompt
+///   submission (`Effect::PromptSend`) is still a stub, so we don't fabricate
+///   a turn here.
+///
+/// `Effect::Stack` is flattened recursively. Every other effect is logged and
+/// ignored for Phase 2.0 (canvases only emit `OpenUrl` today).
+async fn apply_canvas_effects(
+    app: &mut App,
+    _host_slot: &HostSlot,
+    effects: Vec<savvagent_plugin::Effect>,
+) {
+    for effect in effects {
+        match effect {
+            savvagent_plugin::Effect::OpenUrl { url, target } => match target {
+                savvagent_plugin::UrlTarget::SystemBrowser => {
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else if cfg!(target_os = "windows") {
+                        "start"
+                    } else {
+                        "xdg-open"
+                    };
+                    match tokio::process::Command::new(opener).arg(&url).spawn() {
+                        Ok(_) => {
+                            app.push_note(format!("Opening {url} in browser"));
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, %url, "failed to open URL in browser");
+                            app.push_note(format!("Failed to open {url}: {err}"));
+                        }
+                    }
+                }
+                savvagent_plugin::UrlTarget::ContinueConversation => {
+                    // No programmatic submit path yet (`Effect::PromptSend`
+                    // is a stub), so stage the URL in the prompt editor for
+                    // the user to send. Documented Phase 2.0 behavior.
+                    app.input_textarea = make_input_textarea(std::iter::once(url.clone()));
+                    app.input_mode = InputMode::Editing;
+                    app.push_note(format!(
+                        "Staged \"{url}\" in the prompt — press Enter to send"
+                    ));
+                }
+            },
+            savvagent_plugin::Effect::Stack(inner) => {
+                Box::pin(apply_canvas_effects(app, _host_slot, inner)).await;
+            }
+            other => {
+                tracing::debug!(effect = ?other, "ignoring canvas effect (unhandled in Phase 2.0)");
+            }
+        }
+    }
+}
+
 async fn run_app(
     terminal: &mut tui::Tui,
     app: &mut App,
@@ -2870,19 +2930,22 @@ async fn run_app(
         }
         let evt = event::read()?;
         // Mouse wheel ticks scroll the conversation log when the home screen
-        // is active (no plugin screen on top, no modal/file-picker). Other
-        // mouse events (clicks, drags) are ignored — see
-        // `log_scroll_offset_after_wheel` for the offset math.
+        // is active (no plugin screen on top, no modal/file-picker). A left
+        // click on a rendered canvas focuses it and routes a synthetic press
+        // (and the matching release) into the renderer. Other mouse events
+        // are ignored — see `log_scroll_offset_after_wheel` for the offset
+        // math.
         if let Event::Mouse(me) = &evt {
-            use crossterm::event::MouseEventKind;
+            use crossterm::event::{MouseButton as CtMouseButton, MouseEventKind as MEK};
+            // Scroll-wheel: only on the home editing screen.
             let on_home = app.screen_stack.is_empty()
                 && matches!(app.input_mode, InputMode::Editing)
                 && !app.is_file_picker_active
                 && !app.show_splash;
             if on_home {
                 let dir = match me.kind {
-                    MouseEventKind::ScrollUp => Some(app::WheelDirection::Up),
-                    MouseEventKind::ScrollDown => Some(app::WheelDirection::Down),
+                    MEK::ScrollUp => Some(app::WheelDirection::Up),
+                    MEK::ScrollDown => Some(app::WheelDirection::Down),
                     _ => None,
                 };
                 if let Some(direction) = dir {
@@ -2891,6 +2954,81 @@ async fn run_app(
                         direction,
                         MOUSE_WHEEL_SCROLL_STEP,
                     );
+                }
+            }
+            // Canvas click routing. Allowed whenever no plugin screen /
+            // file-picker / splash is up — including while already focused on
+            // a canvas (`InputMode::Canvas`), so clicks can move between
+            // canvases. Click-only for Phase 2.0: we route Press/Release but
+            // NOT Move/Drag, because each dispatch re-parses the document and
+            // pointer-move spam would tank performance. `a:hover` is therefore
+            // not supported yet; revisit if hover becomes a requirement.
+            let canvas_routable = app.screen_stack.is_empty()
+                && !app.is_file_picker_active
+                && !app.show_splash
+                && app.canvas_registry.image_protocol_available();
+            let portable_kind = match me.kind {
+                MEK::Down(_) => Some(savvagent_plugin::MouseEventKind::Press),
+                MEK::Up(_) => Some(savvagent_plugin::MouseEventKind::Release),
+                _ => None,
+            };
+            if canvas_routable {
+                if let Some(kind) = portable_kind {
+                    if let Some((cw, ch)) = app.canvas_registry.image_cell_size() {
+                        let cell = savvagent_canvas::CellPixelSize {
+                            width: cw,
+                            height: ch,
+                        };
+                        if let Some((cid, px, py)) =
+                            app::canvas_hit(&app.canvas_click_targets, me.column, me.row, cell)
+                        {
+                            // A press moves focus into the clicked canvas
+                            // before the event is delivered, so the renderer
+                            // sees the click as the focused element.
+                            if matches!(kind, savvagent_plugin::MouseEventKind::Press)
+                                && !app.is_canvas_focused(cid)
+                            {
+                                app.focus_canvas(cid, None);
+                            }
+                            let button = match me.kind {
+                                MEK::Down(b) | MEK::Up(b) | MEK::Drag(b) => Some(match b {
+                                    CtMouseButton::Left => savvagent_plugin::MouseButton::Left,
+                                    CtMouseButton::Right => savvagent_plugin::MouseButton::Right,
+                                    CtMouseButton::Middle => savvagent_plugin::MouseButton::Middle,
+                                }),
+                                _ => None,
+                            };
+                            let portable = savvagent_plugin::MouseEventPortable {
+                                kind,
+                                button,
+                                x_pixel: px,
+                                y_pixel: py,
+                                modifiers: crate::plugin::convert::modifiers_to_portable(
+                                    me.modifiers,
+                                ),
+                            };
+                            // Borrow the renderer mutably only for the dispatch
+                            // await; `effects` is owned afterwards so no borrow
+                            // of `app` is held across `apply_canvas_effects`.
+                            let effects = if let Some(renderer) = app.canvas_registry.get_mut(cid) {
+                                match renderer
+                                    .dispatch(savvagent_plugin::InputEvent::Mouse(portable))
+                                    .await
+                                {
+                                    Ok(outcome) => Some(outcome.effects),
+                                    Err(err) => {
+                                        tracing::warn!(error = %err, "canvas dispatch failed");
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(effects) = effects {
+                                apply_canvas_effects(app, &host_slot, effects).await;
+                            }
+                        }
+                    }
                 }
             }
             continue;

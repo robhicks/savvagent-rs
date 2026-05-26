@@ -719,6 +719,13 @@ pub struct App {
     /// pass to produce ratatui-image frames.
     pub(crate) canvas_registry: CanvasRegistry,
 
+    /// On-screen cell rects of canvases from the most recent render, for
+    /// mouse hit-testing. Refreshed every frame by `ui::render`; keyed by
+    /// canvas id. The mouse handler in `main.rs::run_app` runs outside the
+    /// render pass, so it reads these persisted rects rather than the
+    /// transient overlays produced during `render_log`.
+    pub(crate) canvas_click_targets: Vec<(savvagent_plugin::ContentBlockId, ratatui::layout::Rect)>,
+
     /// Maps streaming block index → [`ContentBlockId`] for in-flight
     /// HTML blocks. Populated on `TurnEvent::HtmlBlockStart`, consumed
     /// on `TurnEvent::HtmlBlockStop`.
@@ -808,6 +815,33 @@ pub(crate) fn log_scroll_offset_after_wheel(
         WheelDirection::Up => Some(current.unwrap_or(0).saturating_add(step)),
         WheelDirection::Down => current.and_then(|n| n.checked_sub(step)).filter(|n| *n > 0),
     }
+}
+
+/// Hit-test a terminal-cell mouse coordinate against the canvases' on-screen
+/// rects (from [`App::canvas_click_targets`]) and translate it to a
+/// frame-relative pixel offset within the hit canvas.
+///
+/// Returns `(canvas id, x_pixel, y_pixel)` for the first matching rect, or
+/// `None` if the cell is outside every canvas. Pure so the routing logic in
+/// `main.rs::run_app` (which can't easily be unit-tested) is exercised here.
+pub(crate) fn canvas_hit(
+    targets: &[(savvagent_plugin::ContentBlockId, ratatui::layout::Rect)],
+    col: u16,
+    row: u16,
+    cell: savvagent_canvas::CellPixelSize,
+) -> Option<(savvagent_plugin::ContentBlockId, u32, u32)> {
+    for (id, rect) in targets {
+        let cell_rect = savvagent_canvas::CellRect {
+            col: rect.x,
+            row: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        if let Some((px, py)) = savvagent_canvas::cell_to_pixel(cell_rect, cell, col, row) {
+            return Some((*id, px, py));
+        }
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -929,6 +963,7 @@ impl App {
             prompt_history: PromptHistory::default(),
             log_scroll_offset_from_bottom: None,
             canvas_registry: CanvasRegistry::new(),
+            canvas_click_targets: Vec::new(),
             html_block_index_to_id: HashMap::new(),
             next_turn_model_override: None,
             pending_slash_after_trust: None,
@@ -2802,6 +2837,79 @@ mod tests {
         app.unfocus_canvas();
         assert!(matches!(app.input_mode, InputMode::Editing));
         assert!(!app.is_canvas_focused(id));
+    }
+
+    #[test]
+    fn canvas_hit_maps_cell_to_pixel_offset_in_matching_canvas() {
+        let id = savvagent_plugin::ContentBlockId(3);
+        let rect = ratatui::layout::Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 12,
+        };
+        let cell = savvagent_canvas::CellPixelSize {
+            width: 8,
+            height: 16,
+        };
+        let targets = vec![(id, rect)];
+        // Top-left cell → (0, 0).
+        assert_eq!(canvas_hit(&targets, 10, 5, cell), Some((id, 0, 0)));
+        // Two cells right, one cell down → (16, 16).
+        assert_eq!(canvas_hit(&targets, 12, 6, cell), Some((id, 16, 16)));
+    }
+
+    #[test]
+    fn canvas_hit_returns_none_outside_every_rect() {
+        let id = savvagent_plugin::ContentBlockId(3);
+        let rect = ratatui::layout::Rect {
+            x: 10,
+            y: 5,
+            width: 40,
+            height: 12,
+        };
+        let cell = savvagent_canvas::CellPixelSize {
+            width: 8,
+            height: 16,
+        };
+        let targets = vec![(id, rect)];
+        assert_eq!(canvas_hit(&targets, 9, 5, cell), None); // left of
+        assert_eq!(canvas_hit(&targets, 50, 5, cell), None); // right of (col 10+40)
+        assert_eq!(canvas_hit(&targets, 10, 4, cell), None); // above
+        assert_eq!(canvas_hit(&targets, 10, 17, cell), None); // below (row 5+12)
+        assert_eq!(canvas_hit(&[], 10, 5, cell), None); // no targets
+    }
+
+    #[test]
+    fn canvas_hit_picks_first_matching_canvas() {
+        let cell = savvagent_canvas::CellPixelSize {
+            width: 10,
+            height: 20,
+        };
+        let a = savvagent_plugin::ContentBlockId(1);
+        let b = savvagent_plugin::ContentBlockId(2);
+        let targets = vec![
+            (
+                a,
+                ratatui::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 5,
+                },
+            ),
+            (
+                b,
+                ratatui::layout::Rect {
+                    x: 20,
+                    y: 0,
+                    width: 10,
+                    height: 5,
+                },
+            ),
+        ];
+        assert_eq!(canvas_hit(&targets, 5, 2, cell), Some((a, 50, 40)));
+        assert_eq!(canvas_hit(&targets, 22, 1, cell), Some((b, 20, 20)));
     }
 
     #[test]

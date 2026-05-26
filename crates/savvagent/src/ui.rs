@@ -233,6 +233,11 @@ pub fn render(app: &mut App, frame: &mut Frame, frame_data: &HomeFrameData) {
     frame.render_widget(header, chunks[0]);
 
     let canvas_overlays = render_log(app, frame, chunks[1], palette, frame_data);
+    // Persist each canvas's on-screen cell rect for the mouse handler in
+    // `main.rs::run_app`, which hit-tests clicks outside the render pass.
+    // Refreshed every frame so stale rects (e.g. after scroll) never route
+    // a click into the wrong block.
+    app.canvas_click_targets = canvas_overlays.iter().map(|o| (o.id, o.area)).collect();
     // After the conversation log paints, overlay any Entry::Canvas blocks
     // (image protocol when supported, source-code fallback otherwise).
     // `canvas_overlays` carries each placeholder's on-screen rect (already
