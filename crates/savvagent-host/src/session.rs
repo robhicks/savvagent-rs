@@ -1412,6 +1412,47 @@ impl Host {
         self.state.lock().await.messages.clone()
     }
 
+    /// Inject persisted interactive-state blobs into the session's stored
+    /// `ContentBlock::Html` blocks before a transcript is written. Each
+    /// `(ordinal, base64_state)` pair sets the `state` field of the
+    /// `ordinal`-th **top-level** `Html` block (0-indexed across all
+    /// messages, in message + content order). Ordinals with no matching
+    /// `Html` block are ignored. Existing `state` on a block is overwritten
+    /// (latest snapshot wins).
+    ///
+    /// The TUI calls this just before [`Self::save_transcript`], passing
+    /// each live canvas renderer's `snapshot_state()` keyed by its
+    /// `ContentBlockId.0`. That id is allocated monotonically (0, 1, 2, …)
+    /// once per `TurnEvent::HtmlBlockStart`, which the host emits only for
+    /// **provider-stream** (top-level) `Html` blocks. Tool-emitted `Html`
+    /// (nested inside `ContentBlock::ToolResult.content`) never gets a
+    /// `ContentBlockId` and is *not* a live renderer, so it must be excluded
+    /// from the ordinal count here — otherwise the ordinal→block mapping
+    /// would skew whenever a tool-emitted canvas precedes a streamed one.
+    /// We therefore count only top-level `Html` blocks, matching the id
+    /// allocation exactly.
+    pub async fn set_canvas_states(&self, states: &[(u32, String)]) {
+        if states.is_empty() {
+            return;
+        }
+        let by_ordinal: HashMap<u32, &str> = states.iter().map(|(o, s)| (*o, s.as_str())).collect();
+        let mut state = self.state.lock().await;
+        let mut ordinal: u32 = 0;
+        for message in state.messages.iter_mut() {
+            for block in message.content.iter_mut() {
+                // Only top-level Html blocks correspond to a live canvas
+                // renderer (and thus a ContentBlockId). Deliberately do not
+                // recurse into ToolResult content.
+                if let ContentBlock::Html { state: blob, .. } = block {
+                    if let Some(new_state) = by_ordinal.get(&ordinal) {
+                        *blob = Some((*new_state).to_string());
+                    }
+                    ordinal += 1;
+                }
+            }
+        }
+    }
+
     /// Persist the current message history as pretty-printed JSON to `path`.
     ///
     /// Creates parent directories as needed. The file is written in the
@@ -3597,6 +3638,100 @@ mod transcript_tests {
         assert_eq!(saved, loaded, "message history must survive round-trip");
         assert_eq!(record.schema_version, TRANSCRIPT_SCHEMA_VERSION);
         assert_eq!(record.model, "test-model");
+    }
+
+    /// `set_canvas_states` writes each blob into the matching top-level
+    /// `Html` block, keyed by stream ordinal (0-indexed across messages,
+    /// content order). Tool-emitted `Html` (nested in `ToolResult`) is not
+    /// counted, so it neither shifts the ordinal nor receives a blob.
+    #[tokio::test]
+    async fn set_canvas_states_injects_into_nth_html_block() {
+        let dir = tempdir().unwrap();
+        let host = Host::with_components(
+            tmp_config(dir.path()),
+            Box::new(NoopProvider) as Box<dyn ProviderClient + Send + Sync>,
+        )
+        .await
+        .unwrap();
+
+        // Seed: [text, Html#0, text, ToolResult{Html(nested)}, Html#1].
+        // The nested Html must NOT be counted as an ordinal.
+        {
+            let mut state = host.state.lock().await;
+            state.messages = vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "intro".into(),
+                        },
+                        ContentBlock::Html {
+                            source: "<p>first</p>".into(),
+                            state: None,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "between".into(),
+                        },
+                        ContentBlock::ToolResult {
+                            tool_use_id: "t1".into(),
+                            content: vec![ContentBlock::Html {
+                                source: "<p>tool-emitted</p>".into(),
+                                state: None,
+                            }],
+                            is_error: false,
+                        },
+                    ],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Html {
+                        source: "<p>second</p>".into(),
+                        state: None,
+                    }],
+                },
+            ];
+        }
+
+        host.set_canvas_states(&[(0, "AAA".into()), (1, "BBB".into())])
+            .await;
+
+        let messages = host.messages().await;
+        // Top-level Html#0 in message 0.
+        match &messages[0].content[1] {
+            ContentBlock::Html { state, .. } => {
+                assert_eq!(state.as_deref(), Some("AAA"), "ordinal 0 → first Html")
+            }
+            other => panic!("expected Html, got {other:?}"),
+        }
+        // Tool-emitted Html stays None (not counted, not targeted).
+        match &messages[1].content[1] {
+            ContentBlock::ToolResult { content, .. } => match &content[0] {
+                ContentBlock::Html { state, .. } => {
+                    assert_eq!(state.as_deref(), None, "nested Html must be untouched")
+                }
+                other => panic!("expected nested Html, got {other:?}"),
+            },
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+        // Top-level Html#1 in message 2 gets ordinal 1, not 2.
+        match &messages[2].content[0] {
+            ContentBlock::Html { state, .. } => {
+                assert_eq!(state.as_deref(), Some("BBB"), "ordinal 1 → second Html")
+            }
+            other => panic!("expected Html, got {other:?}"),
+        }
+
+        // Out-of-range ordinals are ignored without panicking.
+        host.set_canvas_states(&[(99, "ZZZ".into())]).await;
+        match &host.messages().await[2].content[0] {
+            ContentBlock::Html { state, .. } => assert_eq!(state.as_deref(), Some("BBB")),
+            other => panic!("expected Html, got {other:?}"),
+        }
     }
 
     /// Schema version mismatch yields a typed error, not a panic.

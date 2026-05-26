@@ -661,6 +661,27 @@ async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
     if app.entries.is_empty() {
         return Ok(PathBuf::new());
     }
+    // Collect interactive-state snapshots from every live canvas renderer
+    // and push them into the host's stored `Html` blocks before the
+    // transcript is serialized. The renderer's `ContentBlockId.0` equals
+    // the canvas's stream ordinal among top-level `Html` blocks, which is
+    // exactly the index `set_canvas_states` walks.
+    let states: Vec<(u32, String)> = app
+        .canvas_registry
+        .iter_renderers()
+        .filter_map(|(id, r)| {
+            r.snapshot_state().map(|bytes| {
+                use base64::Engine as _;
+                (
+                    id.0,
+                    base64::engine::general_purpose::STANDARD.encode(bytes),
+                )
+            })
+        })
+        .collect();
+    if !states.is_empty() {
+        host.set_canvas_states(&states).await;
+    }
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

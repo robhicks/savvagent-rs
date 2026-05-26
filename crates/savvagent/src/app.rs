@@ -49,6 +49,14 @@ impl CanvasRegistry {
         self.renderers.get_mut(&id)
     }
 
+    /// Iterate over `(id, renderer)` pairs for every live canvas. Used by
+    /// the transcript-save bridge to collect `snapshot_state()` blobs
+    /// keyed by each canvas's [`ContentBlockId`] (whose `.0` equals the
+    /// canvas's stream ordinal among top-level `Html` blocks).
+    pub fn iter_renderers(&self) -> impl Iterator<Item = (ContentBlockId, &dyn ContentRenderer)> {
+        self.renderers.iter().map(|(id, r)| (*id, r.as_ref()))
+    }
+
     /// Freeze the renderer for `id` (no-op if no such renderer). Used by
     /// the focus state machine when focus leaves a canvas.
     pub fn freeze(&mut self, id: ContentBlockId) {

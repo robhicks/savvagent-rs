@@ -5042,6 +5042,7 @@ version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "bytes",
  "crossterm",
  "dirs",
