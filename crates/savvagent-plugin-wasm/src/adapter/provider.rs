@@ -51,6 +51,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc};
@@ -62,7 +63,7 @@ use savvagent_protocol::{
     CompleteRequest, CompleteResponse, ErrorKind, ListModelsResponse, ProviderError, StreamEvent,
 };
 
-use crate::engine::shared_engine;
+use crate::engine::{EPOCH_TICK, shared_engine};
 use crate::error::WasmPluginError;
 use crate::host_imports::{
     http::HttpState, keyring::KeyringState, log as log_host, progress::ProgressState,
@@ -75,6 +76,7 @@ use crate::provider_world::{
         progress_capability as progress_wit, spp as spp_wit, types as wit,
     },
 };
+use crate::strikes::{StrikeCounter, StrikeOutcome};
 
 /// Per-store state for the provider-world wasm Store.
 ///
@@ -209,6 +211,15 @@ pub struct WasmProviderClient {
     /// empty in v0.18.0; the field is held so a future revision can wire
     /// a `try_pop`-or-new path without an ABI break.
     _store_pool: Mutex<Vec<Store<ProviderHostState>>>,
+    /// Rolling-window trap counter (Task 8). Provider calls always
+    /// build a fresh store, so there's no "rebuild instance" step — but
+    /// we still want a runaway plugin to stop getting called.
+    strikes: Arc<StrikeCounter>,
+    /// `true` once the strike counter has flipped this client to
+    /// disabled. Every subsequent call short-circuits with a Transport
+    /// `ProviderError` so the host's retry/fallback layer can route
+    /// around it.
+    disabled: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for WasmProviderClient {
@@ -252,7 +263,76 @@ impl WasmProviderClient {
             instance_pre: Arc::new(plugin_pre),
             disk_manifest,
             _store_pool: Mutex::new(Vec::new()),
+            strikes: Arc::new(StrikeCounter::default()),
+            disabled: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Borrow the rolling-window strike counter. Exposed for tests + the
+    /// future Task 9 registry wiring.
+    pub fn strikes(&self) -> &Arc<StrikeCounter> {
+        &self.strikes
+    }
+
+    /// `true` once the rolling-window strike counter has flipped this
+    /// client to disabled.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::SeqCst)
+    }
+
+    /// Per-call epoch deadline in ticks of [`EPOCH_TICK`]. Mirrors the
+    /// computation in [`crate::adapter::StaticAdapter::call_deadline_ticks`].
+    fn call_deadline_ticks(&self) -> u64 {
+        let ms = u64::from(self.disk_manifest.runtime.call_timeout_ms);
+        let tick_ms = EPOCH_TICK.as_millis() as u64;
+        ms.div_ceil(tick_ms.max(1)).max(1)
+    }
+
+    /// Common pre-call short-circuit. Returns a Transport-class
+    /// `ProviderError` to match the existing error-mapping convention
+    /// for wasm/instantiation failures.
+    fn check_disabled(&self) -> Result<(), ProviderError> {
+        if self.is_disabled() {
+            Err(disabled_provider_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Record one wasm trap and (if we crossed the limit) flip
+    /// `disabled`. Returns the trap-wrapped `ProviderError` the caller
+    /// should surface.
+    fn record_trap(&self, msg: String, op: &'static str) -> ProviderError {
+        match self.strikes.record() {
+            StrikeOutcome::Continue { count, window } => {
+                tracing::warn!(
+                    plugin = %self.disk_manifest.plugin.id,
+                    op,
+                    count,
+                    window_secs = window.as_secs(),
+                    "wasm provider trap recorded ({count}/{} in last {}s)",
+                    crate::strikes::LIMIT,
+                    window.as_secs(),
+                );
+                wasm_error_to_provider_error(&msg)
+            }
+            StrikeOutcome::Disable => {
+                self.disabled.store(true, Ordering::SeqCst);
+                tracing::error!(
+                    plugin = %self.disk_manifest.plugin.id,
+                    op,
+                    "wasm provider disabled by strikes after repeated traps",
+                );
+                ProviderError {
+                    kind: ErrorKind::Internal,
+                    message: format!(
+                        "wasmtime: plugin disabled by strikes (repeated wasm traps); last trap in {op}: {msg}"
+                    ),
+                    retry_after_ms: None,
+                    provider_code: None,
+                }
+            }
+        }
     }
 
     /// Borrow the parsed `plugin.toml` this adapter was constructed from.
@@ -301,14 +381,20 @@ impl WasmProviderClient {
         &self,
         req: CountTokensRequest,
     ) -> Result<CountTokensResponse, ProviderError> {
+        self.check_disabled()?;
         let engine = shared_engine().map_err(|e| wasm_error_to_provider_error(&e.to_string()))?;
         let state = self.new_host_state(None);
         let mut store = Store::new(&engine, state);
+        store.set_epoch_deadline(self.call_deadline_ticks());
         let instance = self
             .instance_pre
             .instantiate_async(&mut store)
             .await
-            .map_err(|e| wasm_error_to_provider_error(&format!("instantiate: {e}")))?;
+            .map_err(|e| self.record_trap(format!("instantiate: {e}"), "count_tokens"))?;
+        // Reset the deadline before the wasm call — instantiation may
+        // have consumed some of the budget; each guest call gets its
+        // own fresh ticks-from-now budget.
+        store.set_epoch_deadline(self.call_deadline_ticks());
         let wit_req = spp_wit::CountTokensRequest {
             model: req.model,
             messages: req.messages.into_iter().map(Into::into).collect(),
@@ -316,7 +402,7 @@ impl WasmProviderClient {
         let result = instance
             .call_count_tokens(&mut store, &wit_req)
             .await
-            .map_err(|e| wasm_error_to_provider_error(&format!("count_tokens trap: {e}")))?;
+            .map_err(|e| self.record_trap(format!("count_tokens trap: {e}"), "count_tokens"))?;
         match result {
             Ok(resp) => Ok(CountTokensResponse {
                 input_tokens: resp.input_tokens,
@@ -333,35 +419,41 @@ impl ProviderClient for WasmProviderClient {
         req: CompleteRequest,
         events: Option<mpsc::Sender<StreamEvent>>,
     ) -> Result<CompleteResponse, ProviderError> {
+        self.check_disabled()?;
         let engine = shared_engine().map_err(|e| wasm_error_to_provider_error(&e.to_string()))?;
         let state = self.new_host_state(events);
         let mut store = Store::new(&engine, state);
+        store.set_epoch_deadline(self.call_deadline_ticks());
         let instance = self
             .instance_pre
             .instantiate_async(&mut store)
             .await
-            .map_err(|e| wasm_error_to_provider_error(&format!("instantiate: {e}")))?;
+            .map_err(|e| self.record_trap(format!("instantiate: {e}"), "complete"))?;
+        store.set_epoch_deadline(self.call_deadline_ticks());
         let wit_req: spp_wit::CompleteRequest = req.into();
         let result = instance
             .call_complete(&mut store, &wit_req)
             .await
-            .map_err(|e| wasm_error_to_provider_error(&format!("complete trap: {e}")))?;
+            .map_err(|e| self.record_trap(format!("complete trap: {e}"), "complete"))?;
         result.map(Into::into).map_err(Into::into)
     }
 
     async fn list_models(&self) -> Result<ListModelsResponse, ProviderError> {
+        self.check_disabled()?;
         let engine = shared_engine().map_err(|e| wasm_error_to_provider_error(&e.to_string()))?;
         let state = self.new_host_state(None);
         let mut store = Store::new(&engine, state);
+        store.set_epoch_deadline(self.call_deadline_ticks());
         let instance = self
             .instance_pre
             .instantiate_async(&mut store)
             .await
-            .map_err(|e| wasm_error_to_provider_error(&format!("instantiate: {e}")))?;
+            .map_err(|e| self.record_trap(format!("instantiate: {e}"), "list_models"))?;
+        store.set_epoch_deadline(self.call_deadline_ticks());
         let result = instance
             .call_list_models(&mut store)
             .await
-            .map_err(|e| wasm_error_to_provider_error(&format!("list_models trap: {e}")))?;
+            .map_err(|e| self.record_trap(format!("list_models trap: {e}"), "list_models"))?;
         result.map(Into::into).map_err(Into::into)
     }
 }
@@ -396,6 +488,19 @@ fn wasm_error_to_provider_error(msg: &str) -> ProviderError {
     ProviderError {
         kind: ErrorKind::Internal,
         message: format!("wasmtime: {msg}"),
+        retry_after_ms: None,
+        provider_code: None,
+    }
+}
+
+/// `ProviderError` shape returned when the client is already disabled by
+/// strikes. `ErrorKind::Internal` so the host's retry/fallback layer
+/// (which already special-cases `Transport`) doesn't try to retry a
+/// permanently-dead plugin.
+fn disabled_provider_error() -> ProviderError {
+    ProviderError {
+        kind: ErrorKind::Internal,
+        message: "wasmtime: plugin disabled by strikes (repeated wasm traps)".to_string(),
         retry_after_ms: None,
         provider_code: None,
     }

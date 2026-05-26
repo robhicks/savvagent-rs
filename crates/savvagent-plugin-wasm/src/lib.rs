@@ -36,6 +36,7 @@ pub mod error;
 pub mod host_imports;
 pub mod manifest;
 pub mod spp_convert;
+pub mod strikes;
 pub mod trust;
 
 /// Re-export of the WIT-resources crate so downstream callers don't have to

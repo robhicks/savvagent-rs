@@ -42,6 +42,7 @@
 //! mechanism is queued for a later release.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -59,7 +60,7 @@ use crate::convert::{
     effect_from_wit, manifest_from_wit, plugin_error_from_wit, region_to_wit, styled_line_from_wit,
     theme_color_to_wit,
 };
-use crate::engine::shared_engine;
+use crate::engine::{EPOCH_TICK, shared_engine};
 use crate::error::WasmPluginError;
 use crate::host_imports::{log as log_host, theme};
 use crate::interactive_world::{
@@ -67,6 +68,7 @@ use crate::interactive_world::{
     savvagent::plugin::types as wit,
 };
 use crate::manifest::PluginManifest as DiskManifest;
+use crate::strikes::{StrikeCounter, StrikeOutcome};
 
 /// Per-store state for an interactive-world wasm Store.
 ///
@@ -117,12 +119,40 @@ pub struct InteractiveAdapter {
     /// Held purely for trap-recovery in Task 8; the field is read indirectly
     /// in v0.18.0 only through [`InteractiveAdapter::disk_manifest`].
     disk_manifest: Arc<DiskManifest>,
+    /// Rolling-window trap counter (Task 8). Shared with every
+    /// `WasmScreen` this adapter mints so all per-screen traps count
+    /// against the same budget.
+    strikes: Arc<StrikeCounter>,
+    /// Set once the strike counter says "disable". Subsequent
+    /// `create_screen` calls short-circuit; previously-handed-out
+    /// `WasmScreen`s also short-circuit through their cloned handle.
+    disabled: Arc<AtomicBool>,
 }
 
 impl InteractiveAdapter {
     /// Borrow the parsed `plugin.toml` this adapter was constructed from.
     pub fn disk_manifest(&self) -> &Arc<DiskManifest> {
         &self.disk_manifest
+    }
+
+    /// Borrow the rolling-window strike counter. Exposed for tests + the
+    /// future Task 9 registry wiring.
+    pub fn strikes(&self) -> &Arc<StrikeCounter> {
+        &self.strikes
+    }
+
+    /// `true` once the rolling-window strike counter has flipped this
+    /// adapter to disabled.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::SeqCst)
+    }
+
+    /// Per-call epoch deadline in ticks of [`EPOCH_TICK`]. Mirrors the
+    /// computation in [`crate::adapter::StaticAdapter::call_deadline_ticks`].
+    fn call_deadline_ticks(&self) -> u64 {
+        let ms = u64::from(self.disk_manifest.runtime.call_timeout_ms);
+        let tick_ms = EPOCH_TICK.as_millis() as u64;
+        ms.div_ceil(tick_ms.max(1)).max(1)
     }
 }
 
@@ -169,6 +199,13 @@ impl InteractiveAdapter {
             theme: theme.clone(),
         };
         let mut manifest_store = Store::new(&engine, manifest_state);
+        // Construction-time deadline: effectively never. Engine has
+        // epoch_interruption enabled (Task 8) so the default `0` deadline
+        // would trap the very first instruction. We use `u64::MAX / 2`
+        // (not `u64::MAX`) because wasmtime computes the absolute
+        // deadline as `current_epoch + delta`, which overflows if the
+        // bumper has already advanced.
+        manifest_store.set_epoch_deadline(u64::MAX / 2);
         let manifest_instance = plugin_pre
             .instantiate_async(&mut manifest_store)
             .await
@@ -191,6 +228,8 @@ impl InteractiveAdapter {
             plugin_id: disk_manifest.plugin.id.clone(),
             theme,
             disk_manifest,
+            strikes: Arc::new(StrikeCounter::default()),
+            disabled: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -206,12 +245,20 @@ impl InteractiveAdapter {
         id: &str,
         args: ScreenArgs,
     ) -> Result<Box<dyn Screen>, PluginError> {
+        if self.is_disabled() {
+            return Err(PluginError::Internal(
+                "plugin disabled by strikes (repeated wasm traps)".to_string(),
+            ));
+        }
         WasmScreen::new(
             id,
             args,
             Arc::clone(&self.instance_pre),
             self.plugin_id.clone(),
             self.theme.clone(),
+            Arc::clone(&self.strikes),
+            Arc::clone(&self.disabled),
+            self.call_deadline_ticks(),
         )
         .await
         .map(|s| Box::new(s) as Box<dyn Screen>)
@@ -231,6 +278,11 @@ impl Plugin for InteractiveAdapter {
     /// or outside any tokio runtime context. Tests must therefore use
     /// `#[tokio::test(flavor = "multi_thread")]`.
     fn create_screen(&self, id: &str, args: ScreenArgs) -> Result<Box<dyn Screen>, PluginError> {
+        if self.is_disabled() {
+            return Err(PluginError::Internal(
+                "plugin disabled by strikes (repeated wasm traps)".to_string(),
+            ));
+        }
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
             PluginError::Internal(
                 "InteractiveAdapter::create_screen requires a tokio runtime".to_string(),
@@ -252,11 +304,23 @@ impl Plugin for InteractiveAdapter {
         let instance_pre = Arc::clone(&self.instance_pre);
         let plugin_id = self.plugin_id.clone();
         let theme = self.theme.clone();
+        let strikes = Arc::clone(&self.strikes);
+        let disabled = Arc::clone(&self.disabled);
+        let deadline_ticks = self.call_deadline_ticks();
         tokio::task::block_in_place(|| {
             handle.block_on(async move {
-                WasmScreen::new(&id_owned, args, instance_pre, plugin_id, theme)
-                    .await
-                    .map(|s| Box::new(s) as Box<dyn Screen>)
+                WasmScreen::new(
+                    &id_owned,
+                    args,
+                    instance_pre,
+                    plugin_id,
+                    theme,
+                    strikes,
+                    disabled,
+                    deadline_ticks,
+                )
+                .await
+                .map(|s| Box::new(s) as Box<dyn Screen>)
             })
         })
     }
@@ -296,6 +360,13 @@ struct CachedRender {
 /// `ResourceAny` handle the guest's `create-screen` minted. The
 /// `CachedRender` snapshot is held behind a `std::sync::Mutex` so the sync
 /// trait methods can read it without acquiring the async store mutex.
+///
+/// Carries shared `StrikeCounter` / `disabled` handles cloned from the
+/// parent [`InteractiveAdapter`] so per-screen traps count against the
+/// same rolling-window budget. A trap inside `on_key` or `on_event` does
+/// *not* attempt to rebuild this screen's instance — the screen's
+/// accumulated state lives in wasm linear memory and would be lost anyway;
+/// the error surfaces to the host, which normally closes the screen.
 pub struct WasmScreen {
     /// Stable id this screen was created for. Matches the manifest's
     /// `ScreenSpec::id`.
@@ -304,6 +375,18 @@ pub struct WasmScreen {
     inner: Arc<TokioMutex<WasmScreenInner>>,
     /// Sync-readable snapshot of the last render/tips wasm output.
     cached: Arc<StdMutex<CachedRender>>,
+    /// Strike counter cloned from the parent adapter; traps on this
+    /// screen feed into the same rolling-window budget as adapter-level
+    /// failures.
+    strikes: Arc<StrikeCounter>,
+    /// Disable flag cloned from the parent adapter; flipping it here
+    /// short-circuits both this screen's future calls and the parent
+    /// adapter's `create_screen` path.
+    disabled: Arc<AtomicBool>,
+    /// Per-call epoch deadline in [`EPOCH_TICK`] units. Pre-computed at
+    /// screen-open time from the manifest's `call_timeout_ms` so each
+    /// `on_key`/`on_event` call avoids re-reading the manifest.
+    deadline_ticks: u64,
 }
 
 struct WasmScreenInner {
@@ -318,16 +401,26 @@ struct WasmScreenInner {
 }
 
 impl WasmScreen {
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         id: &str,
         args: ScreenArgs,
         instance_pre: Arc<PluginInteractivePre<InteractiveHostState>>,
         plugin_id: String,
         theme: theme::ThemeProvider,
+        strikes: Arc<StrikeCounter>,
+        disabled: Arc<AtomicBool>,
+        deadline_ticks: u64,
     ) -> Result<Self, PluginError> {
         let engine = shared_engine().map_err(|e| PluginError::Internal(e.to_string()))?;
         let state = InteractiveHostState { plugin_id, theme };
         let mut store = Store::new(&engine, state);
+        // The construction-time `create-screen` call runs against the
+        // per-call deadline too — guest authors are free to do
+        // non-trivial work there, but it's the same budget any single
+        // wasm call gets. The render/tips cache refresh below shares
+        // this deadline.
+        store.set_epoch_deadline(deadline_ticks);
         let instance = instance_pre
             .instantiate_async(&mut store)
             .await
@@ -367,6 +460,11 @@ impl WasmScreen {
             last_region: initial_region,
         };
 
+        // Reset the deadline before the first refresh_cache call — each
+        // wasm export call gets its own fresh budget. set_epoch_deadline
+        // is "ticks beyond current", so re-issuing here resets the
+        // remaining budget for the next call (which is what we want).
+        inner.store.set_epoch_deadline(deadline_ticks);
         // Eagerly populate the render + tips cache so the first `render`
         // call from the host doesn't paint a blank screen.
         let cached = refresh_cache(&mut inner).await?;
@@ -375,7 +473,44 @@ impl WasmScreen {
             id: id.to_string(),
             inner: Arc::new(TokioMutex::new(inner)),
             cached: Arc::new(StdMutex::new(cached)),
+            strikes,
+            disabled,
+            deadline_ticks,
         })
+    }
+}
+
+impl WasmScreen {
+    /// Record one wasm trap against the shared strike counter, flip
+    /// `disabled` if we crossed the limit, and return the error wrapped
+    /// in `PluginError::Internal`.
+    ///
+    /// Unlike the static adapter, we do **not** attempt to rebuild this
+    /// screen's instance — the per-screen state lives in wasm linear
+    /// memory and would be unrecoverable. The host normally responds to
+    /// an `on_key`/`on_event` failure by closing the screen, which drops
+    /// the `WasmScreen` and frees the dead Store on the next GC pass.
+    fn record_screen_trap(&self, err: anyhow::Error, op: &'static str) -> PluginError {
+        match self.strikes.record() {
+            StrikeOutcome::Continue { count, window } => {
+                tracing::warn!(
+                    op,
+                    count,
+                    window_secs = window.as_secs(),
+                    "wasm screen trap recorded ({count}/{} in last {}s)",
+                    crate::strikes::LIMIT,
+                    window.as_secs(),
+                );
+                PluginError::Internal(format!("wasm trap in {op}: {err}"))
+            }
+            StrikeOutcome::Disable => {
+                self.disabled.store(true, Ordering::SeqCst);
+                tracing::error!(op, "plugin disabled by strikes after wasm screen trap");
+                PluginError::Internal(format!(
+                    "plugin disabled by strikes (repeated wasm traps); last trap in {op}: {err}"
+                ))
+            }
+        }
     }
 }
 
@@ -401,6 +536,11 @@ impl Screen for WasmScreen {
     }
 
     async fn on_key(&mut self, key: KeyEventPortable) -> Result<Vec<Effect>, PluginError> {
+        if self.disabled.load(Ordering::SeqCst) {
+            return Err(PluginError::Internal(
+                "plugin disabled by strikes (repeated wasm traps)".to_string(),
+            ));
+        }
         let wit_key = key_event_to_wit(key);
         let effects = {
             let mut inner = self.inner.lock().await;
@@ -415,12 +555,16 @@ impl Screen for WasmScreen {
                 handle,
                 ..
             } = &mut *inner;
-            let result = instance
+            store.set_epoch_deadline(self.deadline_ticks);
+            let call_result = instance
                 .savvagent_plugin_screens()
                 .screen_instance()
                 .call_on_key(&mut *store, *handle, &wit_key)
-                .await
-                .map_err(|e| PluginError::Internal(format!("wasm trap in on_key: {e}")))?;
+                .await;
+            let result = match call_result {
+                Ok(r) => r,
+                Err(e) => return Err(self.record_screen_trap(e, "on_key")),
+            };
             let wit_effects = result.map_err(plugin_error_from_wit)?;
             let mut effects = Vec::with_capacity(wit_effects.len());
             for e in wit_effects {
@@ -429,8 +573,23 @@ impl Screen for WasmScreen {
                 );
             }
             // Refresh the cached lines + tips so the next `render` call
-            // reflects any state mutation the on_key produced.
-            let updated = refresh_cache(&mut inner).await?;
+            // reflects any state mutation the on_key produced. The
+            // refresh shares the per-call budget; reset before the
+            // render+tips pair so they don't consume the on_key budget.
+            inner.store.set_epoch_deadline(self.deadline_ticks);
+            let updated = match refresh_cache(&mut inner).await {
+                Ok(c) => c,
+                Err(e) => {
+                    // Treat a refresh failure as a trap on the same op
+                    // so the strike counter sees it. The error string
+                    // already says "wasm trap in render/tips: ..." from
+                    // refresh_cache, so wrap rather than re-format.
+                    return Err(self.record_screen_trap(
+                        anyhow::anyhow!("refresh after on_key: {e}"),
+                        "on_key",
+                    ));
+                }
+            };
             *self.cached.lock().expect("CachedRender poisoned") = updated;
             effects
         };
@@ -438,6 +597,11 @@ impl Screen for WasmScreen {
     }
 
     async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
+        if self.disabled.load(Ordering::SeqCst) {
+            return Err(PluginError::Internal(
+                "plugin disabled by strikes (repeated wasm traps)".to_string(),
+            ));
+        }
         let event_json = host_event_to_json(&event);
         let effects = {
             let mut inner = self.inner.lock().await;
@@ -447,12 +611,16 @@ impl Screen for WasmScreen {
                 handle,
                 ..
             } = &mut *inner;
-            let result = instance
+            store.set_epoch_deadline(self.deadline_ticks);
+            let call_result = instance
                 .savvagent_plugin_screens()
                 .screen_instance()
                 .call_on_event(&mut *store, *handle, &event_json)
-                .await
-                .map_err(|e| PluginError::Internal(format!("wasm trap in on_event: {e}")))?;
+                .await;
+            let result = match call_result {
+                Ok(r) => r,
+                Err(e) => return Err(self.record_screen_trap(e, "on_event")),
+            };
             let wit_effects = result.map_err(plugin_error_from_wit)?;
             let mut effects = Vec::with_capacity(wit_effects.len());
             for e in wit_effects {
@@ -460,7 +628,16 @@ impl Screen for WasmScreen {
                     effect_from_wit(e).map_err(|err| PluginError::Internal(err.to_string()))?,
                 );
             }
-            let updated = refresh_cache(&mut inner).await?;
+            inner.store.set_epoch_deadline(self.deadline_ticks);
+            let updated = match refresh_cache(&mut inner).await {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(self.record_screen_trap(
+                        anyhow::anyhow!("refresh after on_event: {e}"),
+                        "on_event",
+                    ));
+                }
+            };
             *self.cached.lock().expect("CachedRender poisoned") = updated;
             effects
         };

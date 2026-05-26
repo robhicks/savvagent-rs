@@ -21,15 +21,29 @@
 //! wasm exports are `&mut store` + async. Resolve at construction time and
 //! cache the conversion result; subsequent reads are zero-cost.
 //!
-//! ## Recovery
+//! ## Trap recovery + three-strikes (Task 8)
 //!
-//! When a wasm call traps, the `Store` and the `PluginStatic` are
-//! discarded; Task 8 will re-instantiate via the cached `InstancePre`. In
-//! v0.18.0 (this task) we surface the trap as `PluginError::Internal` and
-//! let the runtime decide; the recovery mechanism lands later.
+//! When a wasm call traps, the `StoreAndInstance` is destroyed and a fresh
+//! one is built from the cached `Component` + `Linker`. The trap is also
+//! recorded in [`StrikeCounter`]; if three or more land inside the rolling
+//! 10-minute window the adapter flips `disabled` and short-circuits every
+//! subsequent call with `PluginError::Internal("plugin disabled by
+//! strikes")`. The disable signal stays local to the adapter in Task 8 —
+//! Task 9 will hook it into the registry so the `internal:plugins`
+//! plugin can persist `disabled_reason` to the trust ledger.
+//!
+//! ## Epoch interruption
+//!
+//! Each per-call code path calls [`Store::set_epoch_deadline`] from the
+//! manifest's `call_timeout_ms`. The shared engine's background bumper
+//! advances the epoch every [`crate::engine::EPOCH_TICK`]; runaway wasm
+//! traps with a `Trap::Interrupt`, which surfaces through the adapter as
+//! a `PluginError::Internal("wasm trap in handle_slash: ...interrupt...")`
+//! that the strike counter then attributes.
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -43,13 +57,14 @@ use crate::convert::{
     effect_from_wit, manifest_from_wit, plugin_error_from_wit, theme_color_to_wit,
     theme_entry_from_wit,
 };
-use crate::engine::shared_engine;
+use crate::engine::{EPOCH_TICK, shared_engine};
 use crate::error::WasmPluginError;
 use crate::host_imports::{log as log_host, theme};
 use crate::manifest::PluginManifest as DiskManifest;
 use crate::static_world::{
     self, PluginStatic, PluginStaticImports, savvagent::plugin::types as wit,
 };
+use crate::strikes::{StrikeCounter, StrikeOutcome};
 
 /// Per-store state that lives inside the wasmtime [`Store`]. The host
 /// imports project from `&mut StaticHostState` via [`HasSelf`].
@@ -98,6 +113,20 @@ pub struct StaticAdapter {
     /// Held purely for trap-recovery in Task 8; the field is read indirectly
     /// in v0.18.0 only through [`StaticAdapter::disk_manifest`].
     disk_manifest: Arc<DiskManifest>,
+    /// Cached `Component` so trap-recovery can re-instantiate without
+    /// re-reading the wasm bytes from disk.
+    component: Component,
+    /// Cached `Linker` so trap-recovery can re-instantiate without
+    /// re-wiring host imports.
+    linker: Linker<StaticHostState>,
+    /// Rolling-window trap counter (Task 8). Three traps inside the
+    /// window flip [`Self::disabled`].
+    strikes: Arc<StrikeCounter>,
+    /// Set to `true` once [`StrikeCounter::record`] returns
+    /// [`StrikeOutcome::Disable`]. Every subsequent call short-circuits
+    /// with `PluginError::Internal("plugin disabled by strikes")` — the
+    /// adapter never re-issues a wasm call after this flips.
+    disabled: Arc<AtomicBool>,
 }
 
 impl StaticAdapter {
@@ -107,6 +136,19 @@ impl StaticAdapter {
     pub fn disk_manifest(&self) -> &Arc<DiskManifest> {
         &self.disk_manifest
     }
+
+    /// Borrow the rolling-window strike counter. Exposed for tests + the
+    /// future Task 9 registry wiring (which needs to observe disable
+    /// transitions to update the trust ledger).
+    pub fn strikes(&self) -> &Arc<StrikeCounter> {
+        &self.strikes
+    }
+
+    /// `true` once the rolling-window strike counter has flipped this
+    /// adapter to disabled. Read once per call as a fast-path check.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::SeqCst)
+    }
 }
 
 impl std::fmt::Debug for StaticAdapter {
@@ -115,6 +157,7 @@ impl std::fmt::Debug for StaticAdapter {
             .field("id", &self.cached_manifest.id.as_str())
             .field("name", &self.cached_manifest.name)
             .field("version", &self.cached_manifest.version)
+            .field("disabled", &self.is_disabled())
             .finish()
     }
 }
@@ -141,15 +184,21 @@ impl StaticAdapter {
         PluginStatic::add_to_linker::<_, HasSelf<StaticHostState>>(&mut linker, |s| s)
             .map_err(WasmPluginError::Wasmtime)?;
 
-        let state = StaticHostState {
-            plugin_id: disk_manifest.plugin.id.clone(),
-            theme,
-        };
-        let mut store = Store::new(&engine, state);
+        let plugin_id = disk_manifest.plugin.id.clone();
 
-        let instance = PluginStatic::instantiate_async(&mut store, &component, &linker)
-            .await
-            .map_err(WasmPluginError::Wasmtime)?;
+        // Construct the initial store + instance with a sentinel deadline
+        // so the construction-time `manifest`/`themes` calls — which we
+        // don't yet have a `call_timeout_ms` budget for — never trap.
+        let (mut store, instance) =
+            build_store_and_instance(&engine, &component, &linker, &plugin_id, &theme).await?;
+        // Construction-time deadline: effectively never. Per-call paths
+        // re-set the deadline before issuing the wasm call.
+        // Use `u64::MAX / 2` (not `u64::MAX`) as the construction-time
+        // sentinel — wasmtime computes the absolute deadline as
+        // `current_epoch + delta`, which would overflow if the bumper
+        // has already advanced the epoch a few times. Half of u64 still
+        // gives the equivalent of ~thousands of years before tripping.
+        store.set_epoch_deadline(u64::MAX / 2);
 
         // Cache manifest at construction.
         let wit_manifest = instance
@@ -177,8 +226,135 @@ impl StaticAdapter {
             cached_themes,
             inner: Arc::new(Mutex::new(StoreAndInstance { store, instance })),
             disk_manifest,
+            component,
+            linker,
+            strikes: Arc::new(StrikeCounter::default()),
+            disabled: Arc::new(AtomicBool::new(false)),
         })
     }
+
+    /// Per-call epoch deadline in ticks of [`EPOCH_TICK`].
+    ///
+    /// Reads `runtime.call_timeout_ms` from the manifest and converts to
+    /// ticks. A timeout shorter than one tick is rounded up to one so the
+    /// wasm always gets at least one quantum to execute.
+    fn call_deadline_ticks(&self) -> u64 {
+        let ms = u64::from(self.disk_manifest.runtime.call_timeout_ms);
+        let tick_ms = EPOCH_TICK.as_millis() as u64;
+        ms.div_ceil(tick_ms.max(1)).max(1)
+    }
+
+    /// Replace the live `StoreAndInstance` after a wasm trap. Used by the
+    /// trap-recovery path: when a wasm call fails, we discard the
+    /// post-trap store (it may be in an inconsistent state) and build a
+    /// fresh one off the cached `Component` + `Linker`.
+    ///
+    /// On failure the adapter's `inner` is left holding the (now-dead)
+    /// pre-trap instance. The next call will trap again and re-record a
+    /// strike; after three the disable short-circuit takes over.
+    async fn rebuild_instance(&self) -> Result<(), WasmPluginError> {
+        let engine = shared_engine()?;
+        let plugin_id = self.disk_manifest.plugin.id.clone();
+        // Pull a fresh ThemeProvider clone out of the existing host state
+        // by minting a new provider that resolves to the same snapshot.
+        // The theme provider is just an Arc-backed handle; the simplest
+        // correct path is to keep a clone on `self` — but adding a field
+        // would change the public surface. Instead we re-read the cached
+        // theme from the running `StaticHostState` under the inner lock.
+        let theme = {
+            let guard = self.inner.lock().await;
+            guard.store.data().theme.clone()
+        };
+        let (mut store, instance) =
+            build_store_and_instance(&engine, &self.component, &self.linker, &plugin_id, &theme)
+                .await?;
+        // Use `u64::MAX / 2` (not `u64::MAX`) as the construction-time
+        // sentinel — wasmtime computes the absolute deadline as
+        // `current_epoch + delta`, which would overflow if the bumper
+        // has already advanced the epoch a few times. Half of u64 still
+        // gives the equivalent of ~thousands of years before tripping.
+        store.set_epoch_deadline(u64::MAX / 2);
+        let mut guard = self.inner.lock().await;
+        *guard = StoreAndInstance { store, instance };
+        Ok(())
+    }
+
+    /// Common pre-call short-circuit: returns `Err` if the adapter is
+    /// already disabled by strikes. Centralizes the disabled-message
+    /// wording so tests can assert on one substring.
+    fn check_disabled(&self) -> Result<(), PluginError> {
+        if self.is_disabled() {
+            Err(PluginError::Internal(
+                "plugin disabled by strikes (repeated wasm traps)".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Handle a wasm-call result: on Err, record a strike and (if not
+    /// disabled) rebuild the instance. Always returns the (possibly
+    /// strike-annotated) original Err.
+    async fn handle_call_error(&self, err: anyhow::Error, op: &'static str) -> PluginError {
+        match self.strikes.record() {
+            StrikeOutcome::Continue { count, window } => {
+                // Rebuild before returning so the next call gets a fresh
+                // store. A rebuild failure means the host can't restore
+                // the instance — log it but still surface the original
+                // trap to the caller, which is what they were waiting
+                // on.
+                if let Err(rebuild_err) = self.rebuild_instance().await {
+                    tracing::warn!(
+                        plugin = %self.disk_manifest.plugin.id,
+                        ?rebuild_err,
+                        "wasm post-trap rebuild failed",
+                    );
+                }
+                tracing::warn!(
+                    plugin = %self.disk_manifest.plugin.id,
+                    op,
+                    count,
+                    window_secs = window.as_secs(),
+                    "wasm trap recorded ({count}/{} in last {}s)",
+                    crate::strikes::LIMIT,
+                    window.as_secs(),
+                );
+                PluginError::Internal(format!("wasm trap in {op}: {err}"))
+            }
+            StrikeOutcome::Disable => {
+                self.disabled.store(true, Ordering::SeqCst);
+                tracing::error!(
+                    plugin = %self.disk_manifest.plugin.id,
+                    op,
+                    "plugin disabled by strikes after wasm trap",
+                );
+                PluginError::Internal(format!(
+                    "plugin disabled by strikes (repeated wasm traps); last trap in {op}: {err}"
+                ))
+            }
+        }
+    }
+}
+
+/// Build a fresh `Store<StaticHostState>` + `PluginStatic` pair off a
+/// cached `Component` + `Linker`. Used at construction time and from the
+/// trap-recovery path.
+async fn build_store_and_instance(
+    engine: &wasmtime::Engine,
+    component: &Component,
+    linker: &Linker<StaticHostState>,
+    plugin_id: &str,
+    theme: &theme::ThemeProvider,
+) -> Result<(Store<StaticHostState>, PluginStatic), WasmPluginError> {
+    let state = StaticHostState {
+        plugin_id: plugin_id.to_string(),
+        theme: theme.clone(),
+    };
+    let mut store = Store::new(engine, state);
+    let instance = PluginStatic::instantiate_async(&mut store, component, linker)
+        .await
+        .map_err(WasmPluginError::Wasmtime)?;
+    Ok((store, instance))
 }
 
 #[async_trait]
@@ -192,35 +368,53 @@ impl Plugin for StaticAdapter {
         name: &str,
         args: Vec<String>,
     ) -> Result<Vec<Effect>, PluginError> {
-        let mut guard = self.inner.lock().await;
-        let StoreAndInstance { store, instance } = &mut *guard;
-        let result = instance
-            .call_handle_slash(&mut *store, name, &args)
-            .await
-            .map_err(|e| PluginError::Internal(format!("wasm trap in handle_slash: {e}")))?;
-        let wit_effects = result.map_err(plugin_error_from_wit)?;
-        let mut effects = Vec::with_capacity(wit_effects.len());
-        for e in wit_effects {
-            effects.push(effect_from_wit(e).map_err(|err| PluginError::Internal(err.to_string()))?);
+        self.check_disabled()?;
+        let deadline = self.call_deadline_ticks();
+        let result = {
+            let mut guard = self.inner.lock().await;
+            let StoreAndInstance { store, instance } = &mut *guard;
+            store.set_epoch_deadline(deadline);
+            instance.call_handle_slash(&mut *store, name, &args).await
+        };
+        match result {
+            Ok(Ok(wit_effects)) => {
+                let mut effects = Vec::with_capacity(wit_effects.len());
+                for e in wit_effects {
+                    effects.push(
+                        effect_from_wit(e).map_err(|err| PluginError::Internal(err.to_string()))?,
+                    );
+                }
+                Ok(effects)
+            }
+            Ok(Err(plugin_err)) => Err(plugin_error_from_wit(plugin_err)),
+            Err(e) => Err(self.handle_call_error(e, "handle_slash").await),
         }
-        Ok(effects)
     }
 
     async fn on_event(&mut self, event: HostEvent) -> Result<Vec<Effect>, PluginError> {
+        self.check_disabled()?;
         let event_json = serde_json::to_string(&event_to_json(&event))
             .map_err(|e| PluginError::Internal(format!("serialize HostEvent: {e}")))?;
-        let mut guard = self.inner.lock().await;
-        let StoreAndInstance { store, instance } = &mut *guard;
-        let result = instance
-            .call_on_event(&mut *store, &event_json)
-            .await
-            .map_err(|e| PluginError::Internal(format!("wasm trap in on_event: {e}")))?;
-        let wit_effects = result.map_err(plugin_error_from_wit)?;
-        let mut effects = Vec::with_capacity(wit_effects.len());
-        for e in wit_effects {
-            effects.push(effect_from_wit(e).map_err(|err| PluginError::Internal(err.to_string()))?);
+        let deadline = self.call_deadline_ticks();
+        let result = {
+            let mut guard = self.inner.lock().await;
+            let StoreAndInstance { store, instance } = &mut *guard;
+            store.set_epoch_deadline(deadline);
+            instance.call_on_event(&mut *store, &event_json).await
+        };
+        match result {
+            Ok(Ok(wit_effects)) => {
+                let mut effects = Vec::with_capacity(wit_effects.len());
+                for e in wit_effects {
+                    effects.push(
+                        effect_from_wit(e).map_err(|err| PluginError::Internal(err.to_string()))?,
+                    );
+                }
+                Ok(effects)
+            }
+            Ok(Err(plugin_err)) => Err(plugin_error_from_wit(plugin_err)),
+            Err(e) => Err(self.handle_call_error(e, "on_event").await),
         }
-        Ok(effects)
     }
 
     fn render_slot(&self, _slot_id: &str, _region: Region) -> Vec<StyledLine> {

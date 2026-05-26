@@ -190,48 +190,48 @@ async fn trap_surfaces_as_plugin_error() {
     );
 }
 
-/// `timeout.wasm` is shipped and the test is wired, but **ignored** in
-/// v0.18.0.
+/// `timeout.wasm` is shipped and active in v0.18.0 — Task 8 enabled the
+/// engine's epoch interruption and wired per-call deadlines, so the
+/// fixture's `handle_slash("forever", ..)` busy-loop now traps with
+/// `Trap::Interrupt` after `runtime.call_timeout_ms / EPOCH_TICK` ticks.
 ///
-/// The fixture's `handle_slash("forever", ..)` busy-loops indefinitely.
-/// Without `epoch_interruption` enabled on the wasmtime engine (currently
-/// disabled in `engine.rs`, see Task 8), a wasm call from an async
-/// adapter runs synchronously on the worker thread and never yields —
-/// `tokio::time::timeout` cannot cancel it because the host future is
-/// never re-polled. Cargo's test harness then waits forever for the test
-/// task to finish.
-///
-/// Task 8 will:
-/// 1. Enable `epoch_interruption(true)` in `engine.rs`.
-/// 2. Start an epoch-bump driver task at engine init.
-/// 3. Per-call, set a deadline via `Store::set_epoch_deadline` so the
-///    next epoch tick traps the runaway wasm with `Trap::Interrupt`.
-///
-/// After (1)-(3) land, the adapter side of this test becomes a real
-/// assertion: the call returns `PluginError::Internal("wasm trap in
-/// handle_slash: interrupt")` (or similar wording) within the
-/// host-side `tokio::time::timeout` window. At that point flip the
-/// `#[ignore]` off and the test runs as part of the normal suite.
+/// We don't set a custom `[runtime] call-timeout-ms` in the test
+/// manifest, so the default 5s kicks in: the call should trap within
+/// 5-6 seconds (default + one bumper-tick worst-case). We wrap the call
+/// in a generous 15-second `tokio::time::timeout` purely as a CI safety
+/// net so a regression in the epoch-bumper doesn't hang the whole
+/// test binary.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "enable in Task 8 after epoch bumping lands; v0.18.0 wasm calls cannot be cancelled mid-flight"]
 async fn timeout_can_be_cancelled_by_host() {
     let (mut adapter, _td) = load_static("timeout").await;
 
     let start = Instant::now();
     let outcome = tokio::time::timeout(
-        Duration::from_secs(2),
+        Duration::from_secs(15),
         adapter.handle_slash("forever", Vec::new()),
     )
     .await;
     let elapsed = start.elapsed();
 
+    // The host-side timeout must not fire: the epoch-bumper trap is
+    // expected to surface as a `PluginError::Internal` before 15s
+    // elapses.
+    let inner = outcome.expect("host-side safety-net timeout must not fire");
+    let err = inner.expect_err("forever-loop must trap, not return Ok");
+
+    let msg = err.to_string().to_lowercase();
     assert!(
-        outcome.is_err(),
-        "tokio::time::timeout must fire (the wasm loop has no exit)",
+        msg.contains("trap") || msg.contains("interrupt") || msg.contains("epoch"),
+        "expected trap/interrupt/epoch substring in error string, got: {msg}",
     );
+
+    // Default `call-timeout-ms` is 5000; the bumper runs every 100ms.
+    // Worst case the trap lands at `5000 + 100 = 5100ms`. A generous
+    // 12s upper bound catches regressions without being flaky on slow
+    // runners.
     assert!(
-        elapsed.as_secs() < 10,
-        "host wait should be ~2s, got {elapsed:?}",
+        elapsed < Duration::from_secs(12),
+        "wasm trap should fire near call_timeout_ms (5s) + 1 tick; got {elapsed:?}",
     );
 }
 
