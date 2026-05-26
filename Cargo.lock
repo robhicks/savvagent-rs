@@ -4285,14 +4285,19 @@ dependencies = [
 name = "savvagent-plugin-wasm"
 version = "0.17.0"
 dependencies = [
+ "anyhow",
  "proptest",
  "savvagent-plugin",
  "savvagent-plugin-wit",
  "savvagent-protocol",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
+ "toml",
  "tracing",
+ "walkdir",
  "wasmtime",
 ]
 

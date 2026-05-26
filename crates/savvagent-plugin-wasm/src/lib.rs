@@ -5,23 +5,27 @@
 //! `Box<dyn savvagent_plugin::Plugin>` — making them indistinguishable from
 //! built-ins to the rest of the host.
 //!
-//! Task 2 lands the load-bearing foundations:
+//! Tasks 1–2 landed the WIT contract and the host-side bindgen output.
+//! Task 3 (this revision) adds the runtime's discovery + trust layer:
 //!
-//! - Host-side bindings for all three WIT worlds, generated at compile
-//!   time by `wasmtime::component::bindgen!` against the canonical `.wit`
-//!   tree owned by `savvagent-plugin-wit`.
-//! - Mechanical `From`/`Into` conversions in [`spp_convert`] between the
-//!   bindgen output (`{world}::savvagent::plugin::spp::*`) and the real
-//!   `savvagent_protocol` types, so Tasks 4–6's adapters can move payloads
-//!   across the WASM boundary without bespoke marshalling.
+//! - [`error`] — the runtime's error enum, `WasmPluginError`.
+//! - [`manifest`] — parser/validator for `plugin.toml`.
+//! - [`discovery`] — walks the four well-known directories and dedupes
+//!   plugins first-wins by id, mirroring sub-projects A/B/C.
+//! - [`trust`] — `~/.savvagent/plugin-trust.toml` ledger + the SHA-256
+//!   `tree_hash` that anchors it.
 //!
-//! Discovery, manifest parsing, trust enforcement, capability host impls,
-//! and the actual adapter glue all land in subsequent tasks.
+//! Discovery + trust enforcement, capability host impls, and the actual
+//! adapter glue all land in Tasks 4–6.
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
+pub mod discovery;
+pub mod error;
+pub mod manifest;
 pub mod spp_convert;
+pub mod trust;
 
 /// Re-export of the WIT-resources crate so downstream callers don't have to
 /// pull it in separately when they want the canonical `WIT_DIR` path.

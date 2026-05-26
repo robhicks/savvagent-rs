@@ -7,10 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Wasmtime-backed runtime for savvagent external plugins."
 
-# Task 2 owns just the SPP↔WIT conversion layer and the host-side bindgen
-# output for all three worlds. Discovery, manifests, adapters, and the
-# capability surface land in Tasks 3–6; those will pull in more deps
-# (e.g. `walkdir`, `keyring`, `reqwest`).
+# Task 2 ships the SPP↔WIT conversion layer and the host-side bindgen output
+# for all three worlds. Task 3 layers manifest parsing, four-path discovery,
+# and the `plugin-trust.toml` ledger on top — which is where `walkdir`,
+# `sha2`, `toml`, and `anyhow` come in. Adapters + capability surface land
+# in Tasks 4–6 (they'll add `keyring`/`reqwest`).
 #
 # `wasmtime`'s default features include `component-model` and `async`,
 # which are exactly what we need — no explicit feature list necessary.
@@ -18,14 +19,19 @@ description = "Wasmtime-backed runtime for savvagent external plugins."
 savvagent-plugin = { workspace = true }
 savvagent-plugin-wit = { workspace = true }
 savvagent-protocol = { workspace = true }
+anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+toml = { workspace = true }
+walkdir = { workspace = true }
 wasmtime = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
+tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"
