@@ -12,6 +12,7 @@
 //! (open-in-browser); Phase 1 doesn't ship interactive bindings.
 
 pub mod auto_export;
+pub mod open_in_browser;
 mod plugin;
 mod prompt_text;
 pub mod slash;

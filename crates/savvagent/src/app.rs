@@ -887,6 +887,19 @@ impl App {
         self.input_mode = InputMode::Editing;
     }
 
+    /// Update the focused element index without a freeze/thaw cycle. No-op
+    /// unless a canvas currently holds focus. Used by Tab/Shift-Tab
+    /// traversal, which moves within the already-focused canvas.
+    #[allow(dead_code)]
+    pub(crate) fn set_canvas_element(&mut self, idx: Option<u32>) {
+        if let InputMode::Canvas { id, .. } = self.input_mode {
+            self.input_mode = InputMode::Canvas {
+                id,
+                element_idx: idx,
+            };
+        }
+    }
+
     /// Build TUI state. The host runs out-of-band; the app only carries the
     /// model name (for the header), the directory transcripts get written
     /// into, and the conversation log it builds from streaming events.
