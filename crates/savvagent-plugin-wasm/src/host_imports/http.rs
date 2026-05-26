@@ -7,10 +7,12 @@
 //! ## Capability model
 //!
 //! The `allowed-hosts` list comes from the plugin's `plugin.toml`
-//! `[security]` table at manifest-load time. It is a **literal-match
-//! allow-list**: each entry must equal the URL host string exactly. No
-//! wildcards (`*.example.com`), no port-stripping, no IDN normalization
-//! beyond what `url::Url::host_str` already does. This is intentional for
+//! `[security]` table at manifest-load time. It is a **host-only
+//! allow-list**: each entry must equal the URL's `host_str` exactly
+//! (after lowercase normalization). The port is excluded from the
+//! comparison — an entry `api.example.com` matches every port on that
+//! host. No wildcards (`*.example.com`), no IDN normalization beyond
+//! what `url::Url::host_str` already does. This is intentional for
 //! v0.18.0; we'd rather miss a few edge cases than ship a misconfigured
 //! wildcard.
 //!
@@ -211,6 +213,45 @@ mod tests {
                 .unwrap_err()
         });
         assert!(matches!(err, wit::HttpError::DeniedHost(h) if h == "example.com"));
+    }
+
+    #[test]
+    fn allow_list_is_host_only_port_excluded() {
+        // The allow-list is intentionally host-only — an entry
+        // `api.example.com` matches every port on that host. This
+        // mirrors the documented behavior at the top of the module.
+        // Verifying with a non-standard port (9090) that would otherwise
+        // be served by a different daemon than the standard 443.
+        let state = HttpState::new(vec!["api.example.com".into()]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt.block_on(async {
+            state
+                .fetch(wit::HttpRequest {
+                    method: "GET".into(),
+                    // Point at a non-routable port so the test never
+                    // actually opens a network connection; we want the
+                    // allow-list check to PASS so the request proceeds
+                    // to the network stage, where reqwest will fail
+                    // with Transport (connection refused / timeout).
+                    url: "http://api.example.com:9090/secret".into(),
+                    headers: vec![],
+                    body: None,
+                    timeout_ms: Some(50),
+                })
+                .await
+                .unwrap_err()
+        });
+        // The denial would be DeniedHost; any non-DeniedHost error
+        // means the allow-list passed and we got further. Treat
+        // Transport (connection refused) and Timeout as proof the
+        // port-stripping check works.
+        assert!(
+            !matches!(err, wit::HttpError::DeniedHost(_)),
+            "expected allow-list to pass on host-only match, got {err:?}"
+        );
     }
 
     #[test]
