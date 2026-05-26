@@ -37,12 +37,16 @@
 // and reject. Browse the files directly under
 // `crates/savvagent-plugin-wit/wit/`.
 
-/// Absolute-at-build-time path to this crate's `wit/` directory. Downstream
-/// crates (notably `savvagent-plugin-wasm` once it lands in Task 2) use
-/// this to point `wasmtime::component::bindgen!` at the canonical WIT
-/// source without having to hard-code a workspace-relative path.
+/// Absolute path to this crate's `wit/` directory, resolved at the time
+/// **this crate** is compiled (`CARGO_MANIFEST_DIR` is set by Cargo).
 ///
-/// Exposed as a `&'static str` so it can be used in `concat!` and macro
-/// `path:` arguments. Resolved via `CARGO_MANIFEST_DIR`, which Cargo sets
-/// during `build.rs` and proc-macro invocations.
+/// Intended for `build.rs` scripts in downstream crates that need to read
+/// the canonical WIT source — e.g. to copy it into `OUT_DIR` or feed it
+/// to `wit-parser` at consuming-crate build time.
+///
+/// **Not** usable inside proc-macro `path: "…"` arguments such as
+/// `wasmtime::component::bindgen!`: those require string literals at the
+/// macro callsite and cannot read a `const &str` from a dependency at
+/// expansion time. Downstream macro callers must pass a string literal
+/// such as `path: "../savvagent-plugin-wit/wit"`.
 pub const WIT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit");
