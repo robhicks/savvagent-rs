@@ -21,9 +21,9 @@ pub struct ModalGeometry {
 /// Compute the overlay geometry for a `ScreenLayout` given the available rect
 /// (the central area) and the monospace glyph advance/row size in points.
 /// Mirrors the ratatui `paint_screen` sizing: percentage-of-area for
-/// CenteredModal (clamped to >= 20 cols), Margin{h:2,v:1} + 1-cell border for
-/// the inner region; Fullscreen = whole area; BottomSheet = bottom `height`
-/// rows.
+/// CenteredModal (clamped to >= 20 cols / >= 5 rows), with the inner region =
+/// `outer.inner(Margin{h:2,v:1})` (the border overlaps the margin, not a second
+/// subtraction); Fullscreen = whole area; BottomSheet = bottom `height` rows.
 pub fn modal_geometry(
     avail: Rect,
     layout: &ScreenLayout,
@@ -50,12 +50,16 @@ pub fn modal_geometry(
             ..
         } => {
             let min_w = 20.0 * glyph_w;
+            let min_h = 5.0 * glyph_h;
             let w = ((avail.width() * width_pct as f32 / 100.0).max(min_w)).min(avail.width());
-            let h = (avail.height() * height_pct as f32 / 100.0).min(avail.height());
+            let h = ((avail.height() * height_pct as f32 / 100.0).max(min_h)).min(avail.height());
             let outer = Rect::from_center_size(avail.center(), egui::vec2(w, h));
-            // chrome: 1-col/row border + Margin{h:2,v:1} on each side.
-            let inner_cols = cols(w).saturating_sub(2 * (1 + 2));
-            let inner_rows = rows(h).saturating_sub(2 * (1 + 1));
+            // chrome: the ratatui content area is `outer.inner(Margin{h:2,v:1})`
+            // (ui.rs `paint_screen`) — subtract the 2-col / 1-row margin on each
+            // side. The `Borders::ALL` border is drawn *within* `outer` and
+            // overlaps the margin, so it is NOT a second subtraction.
+            let inner_cols = cols(w).saturating_sub(2 * 2); // 2-col margin each side
+            let inner_rows = rows(h).saturating_sub(2); // 1-row margin each side
             ModalGeometry {
                 outer,
                 region: Region {
@@ -158,11 +162,12 @@ mod tests {
             title: None,
         };
         let g = modal_geometry(avail, &layout, GW, GH);
-        // Inner = outer minus border(1) + Margin{h:2,v:1} on each side in *cols/rows*.
-        // outer 600x400 pts -> 75x25 cols/rows; minus 2*(1 border + 2 h margin)=6 cols,
-        // 2*(1 border + 1 v margin)=4 rows -> 69 cols, 21 rows.
-        assert_eq!(g.region.width, 69);
-        assert_eq!(g.region.height, 21);
+        // Inner = `outer.inner(Margin{h:2,v:1})`, matching ratatui (the border
+        // overlaps the margin and is not subtracted again).
+        // outer 600x400 pts -> 75x25 cols/rows; minus the 2-col/1-row margin on
+        // each side (4 cols, 2 rows) -> 71 cols, 23 rows.
+        assert_eq!(g.region.width, 71);
+        assert_eq!(g.region.height, 23);
     }
 
     #[test]
