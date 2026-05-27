@@ -737,7 +737,7 @@ pub(crate) async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<P
 /// All other slash commands are routed through the plugin SlashRouter; on
 /// `SlashError::Unknown` we fall back to the legacy `App::handle_command`
 /// for backwards compatibility with commands not yet ported to plugins.
-async fn dispatch_slash_command(
+pub(crate) async fn dispatch_slash_command(
     app: &mut App,
     cmd: &str,
     host_slot: &HostSlot,

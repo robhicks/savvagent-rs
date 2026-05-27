@@ -274,12 +274,30 @@ impl SavvagentApp {
     /// `Host::run_turn_streaming` and forwards `TurnEvent`s back over the
     /// channel.
     ///
-    /// Slash-command dispatch and the `PromptSubmitted` hook / pending-prompt
-    /// machinery are intentionally out of scope for the foundation (they're
-    /// owned by later GUI tasks); this is the plain "send a prompt to the
-    /// active host" path.
+    /// `/`-prefixed input is routed to the shared `dispatch_slash_command`
+    /// instead (opening pickers / running commands); the `PromptSubmitted` hook
+    /// and pending-prompt-prefix machinery remain out of scope for now.
     fn submit_prompt(&mut self, text: String) {
         if text.is_empty() || self.app.is_loading {
+            return;
+        }
+        // Slash command -> dispatch (opens pickers, runs commands) instead of a
+        // turn. Mirrors the ratatui submit path: record the input in history,
+        // run the shared `dispatch_slash_command` (which itself calls
+        // `apply_effects` and may push a screen / queue pending actions), then
+        // drain the pending queues to apply anything it staged.
+        if text.starts_with('/') {
+            self.app.prompt_history.append(text.clone());
+            let tx = self.worker_tx.clone();
+            futures::executor::block_on(crate::dispatch_slash_command(
+                &mut self.app,
+                &text,
+                &self.host_slot,
+                &self.project_root,
+                &self.tool_bins,
+                &tx,
+            ));
+            futures::executor::block_on(self.drain_pending());
             return;
         }
         let Some(host) = futures::executor::block_on(current_host(&self.host_slot)) else {
