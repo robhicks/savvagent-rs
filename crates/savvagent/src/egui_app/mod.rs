@@ -356,11 +356,12 @@ impl SavvagentApp {
 
 impl eframe::App for SavvagentApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. Global input routing. Only Ctrl-C (quit) is handled globally in
-        //    the foundation; the prompt `TextEdit` consumes its own keys. We
-        //    convert through the same portable-key sink the plugin boundary
-        //    uses so a later task can route arbitrary global accelerators
-        //    through plugins without re-deriving modifiers.
+        // 1. Global input routing. Ctrl-C / Ctrl-D quit; every other key flows
+        //    to the prompt `TextEdit` (which consumes its own keys) or, when a
+        //    screen is open, to block 1b below. The GUI deliberately does NOT
+        //    route home keybindings through the plugin `KeybindingRouter` —
+        //    pickers are opened via slash commands (see `submit_prompt`); only
+        //    the ratatui TUI drives plugin-bound home accelerators.
         let events = ctx.input(|i| i.events.clone());
         for ev in &events {
             if let Some(k) = convert::egui_event_to_portable(ev) {
@@ -376,6 +377,15 @@ impl eframe::App for SavvagentApp {
         //     entirely — mirrors `run_app`'s precedence (quit → top screen
         //     `on_key` → home). Effects (push/pop/close) and the pending-action
         //     queues are applied per key, in the same order the TUI uses.
+        //
+        //     KNOWN LIMITATION: this early-returns without draining the worker
+        //     channel (block 2), so if a screen is open while a turn streams,
+        //     `WorkerMsg`s accumulate until the 128-slot channel back-pressures
+        //     and the turn stalls. Unreachable with the default plugins: the
+        //     only ways to open a screen are the `submit_prompt` slash branch
+        //     (guarded on `is_loading`) and a plugin `OpenScreen` effect from a
+        //     mid-turn `HostEvent` (no built-in does this). Revisit if a plugin
+        //     can open a screen during `is_loading`.
         if !self.app.screen_stack.is_empty() {
             let keys = screen::portable_keys_from_events(&events);
             futures::executor::block_on(async {
@@ -424,44 +434,15 @@ impl eframe::App for SavvagentApp {
             *self.render_cache.lock().unwrap() = model;
         });
 
-        // 2b. Home keybindings (stack empty). Route modifier-bearing
-        //     accelerators (e.g. Ctrl-P → open command palette) through the
-        //     same `KeybindingRouter` (`OnHome` → `Global`) the ratatui path
-        //     uses, then drain the pending-action queues so any picker the
-        //     action staged takes effect. Plain printable typing is deliberately
-        //     NOT routed here so it flows untouched to the prompt `TextEdit`
-        //     painted in `view::paint` (which consumes the matching `Text`
-        //     event in this same frame) — routing a plain char would double-fire
-        //     (one char into the prompt AND a binding lookup).
-        let keys = screen::portable_keys_from_events(&events);
-        futures::executor::block_on(async {
-            for key in keys {
-                let bind = matches!(&key.code, savvagent_plugin::KeyCodePortable::Char(_))
-                    && (key.modifiers.ctrl || key.modifiers.alt);
-                // Also allow non-char accelerators (e.g. function keys) if bound.
-                let non_char = !matches!(&key.code, savvagent_plugin::KeyCodePortable::Char(_));
-                if !(bind || non_char) {
-                    continue;
-                }
-                if let Some(action) = crate::resolve_home_binding(&self.app, &key).await {
-                    crate::dispatch_bound_action(&mut self.app, action).await;
-                    self.drain_pending().await;
-                }
-            }
-            // A binding may have opened a screen or queued a picker — refresh
-            // the render model so the footer/tips reflect any change this frame.
-            let model = build_model(&self.app, RENDER_COLS).await;
-            *self.render_cache.lock().unwrap() = model;
-        });
-
         // 3. Paint.
         view::paint(self, ctx);
 
         // 4. Keep repainting while a turn streams so newly-arrived deltas show
         //    up without requiring a user input event to wake the event loop.
-        //    Also repaint if a home binding just opened a screen, so the
-        //    screen-routing block (1b) takes over next frame and the overlay
-        //    stays interactive without needing another input event.
+        //    Also repaint if a slash command just opened a screen (via
+        //    `submit_prompt` during paint), so the screen-routing block (1b)
+        //    takes over next frame and the overlay stays interactive without
+        //    needing another input event.
         if self.app.is_loading || !self.app.screen_stack.is_empty() {
             ctx.request_repaint();
         }

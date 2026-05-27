@@ -3976,30 +3976,11 @@ async fn handle_canvas_key(
     }
 }
 
-/// Resolve a home-view key through the [`KeybindingRouter`][crate::plugin::keybindings::KeybindingRouter]
-/// (scopes `OnHome` → `Global`) into a [`BoundAction`][savvagent_plugin::BoundAction],
-/// or `None` if no binding matches (or the plugin runtime isn't installed).
-///
-/// This mirrors the inline router lookup `run_app` performs on the home prompt
-/// (~`main.rs:3530`). It is factored out so the egui front-end can reuse the
-/// exact same `route(&key, None)` resolution without duplicating the index
-/// guard / `KeybindingRouter::new` dance; the ratatui path keeps its own inline
-/// call site untouched.
-pub(crate) async fn resolve_home_binding(
-    app: &App,
-    key: &savvagent_plugin::KeyEventPortable,
-) -> Option<savvagent_plugin::BoundAction> {
-    let idx = app.plugin_indexes.as_ref()?;
-    let idx_guard = idx.read().await;
-    let router = crate::plugin::keybindings::KeybindingRouter::new(&idx_guard);
-    router.route(key, None)
-}
-
 /// Dispatch a [`BoundAction`][savvagent_plugin::BoundAction] produced by the
 /// keybinding router. Logs and surfaces errors to the user via
 /// `push_styled_note` so a malformed binding or runtime error doesn't
 /// silently no-op a keystroke.
-pub(crate) async fn dispatch_bound_action(app: &mut App, action: savvagent_plugin::BoundAction) {
+async fn dispatch_bound_action(app: &mut App, action: savvagent_plugin::BoundAction) {
     match action {
         savvagent_plugin::BoundAction::EmitEffect(effect) => {
             if let Err(e) = crate::plugin::effects::apply_effects(app, vec![effect]).await {
