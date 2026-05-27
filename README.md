@@ -99,8 +99,19 @@ cargo run -p savvagent -- gui
 > runtime, and turn machinery as the TUI — it paints the conversation log,
 > the plugin header/tips/footer slots, and a prompt that submits streaming
 > turns. It is being built alongside the ratatui TUI, which remains the
-> default and is unchanged. Screens/modals, the code editor, markdown, the
-> file picker, and inline canvases are not wired up in the GUI yet.
+> default and is unchanged. Screens and modals now work: the
+> theme/model/language/connect/plugins/changelog pickers and the command
+> palette open and operate, both via slash commands (`/theme`, `/model`,
+> `/language`, `/connect`, `/plugins`, `/changelog`, …) and via the home
+> keybinding router (e.g. <kbd>Ctrl-P</kbd> for the command palette). The
+> active screen is painted as an egui overlay — centered modal, full-screen,
+> or bottom sheet — with chrome, tips, and a dimmed backdrop, and keyboard
+> input routes to it. The following are still **not** wired up in the GUI
+> (deferred to a later plan): the code editor (`/view`, `/edit`), high-
+> fidelity markdown rendering (the changelog renders as line-based text),
+> the file picker, the LSP-installer's multi-select screens, and inline
+> canvases. Those screens open, close, and route keys, but render as
+> line-based/placeholder content for now.
 
 If the bundled tool servers (`savvagent-tool-fs`, `savvagent-tool-bash`,
 `savvagent-tool-grep`) aren't on `$PATH` and aren't sitting next to the
