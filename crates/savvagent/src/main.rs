@@ -80,7 +80,7 @@ const LOG_SCROLL_STEP: u16 = 10;
 const MOUSE_WHEEL_SCROLL_STEP: u16 = 3;
 
 /// Worker → main-loop messages.
-enum WorkerMsg {
+pub(crate) enum WorkerMsg {
     Event(TurnEvent),
     /// Sent if `run_turn_streaming` returned an error.
     Error(String),
@@ -105,13 +105,13 @@ enum WorkerMsg {
     ModelRestored(String),
 }
 
-type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
+pub(crate) type HostSlot = Arc<RwLock<Option<Arc<Host>>>>;
 
 /// Resolved paths for every bundled tool-server binary the TUI knows how to
 /// register. Each field is `None` when the binary couldn't be found; the
 /// host just doesn't advertise that tool's surface in `tools/list`.
 #[derive(Clone, Default)]
-struct ToolBins {
+pub(crate) struct ToolBins {
     fs: Option<PathBuf>,
     bash: Option<PathBuf>,
     grep: Option<PathBuf>,
@@ -153,6 +153,57 @@ async fn main() -> Result<()> {
         return egui_app::run().map_err(|e| anyhow::anyhow!("egui front-end failed: {e}"));
     }
 
+    let (mut app, host_slot, project_root, tool_bins) = bootstrap_app_and_host().await?;
+
+    let mut terminal = tui::init()?;
+
+    // Restore terminal on panic.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = tui::restore();
+        original_hook(info);
+    }));
+
+    let res = run_app(
+        &mut terminal,
+        &mut app,
+        host_slot.clone(),
+        project_root,
+        tool_bins,
+    )
+    .await;
+
+    let _ = tui::restore();
+
+    if let Some(host) = current_host(&host_slot).await {
+        if let Err(e) = save_transcript_now(&app, &host).await {
+            eprintln!("warning: could not save transcript on exit: {e}");
+        }
+    }
+    if let Some(host) = host_slot.write().await.take() {
+        host.shutdown().await;
+    }
+
+    if let Err(err) = res {
+        eprintln!("{err:?}");
+    }
+
+    // If `/update` succeeded during this session, the on-disk binary is
+    // a newer version than the one we're still running. Surface a hint
+    // on stderr now that the alt-screen has torn down.
+    if let Some((from, to)) = plugin::builtin::self_update::pending_restart_hint() {
+        eprintln!("savvagent: installed v{to} (was v{from}). Restart to use the new version.");
+    }
+
+    Ok(())
+}
+
+/// Build the shared application state: resolve tool binaries, bootstrap the
+/// provider-pool host, build `App`, install the plugin runtime, and align
+/// startup state/notes. Shared by the ratatui TUI (`run_app`) and the egui
+/// front-end (`egui_app::run`); contains no terminal/window-specific setup.
+pub(crate) async fn bootstrap_app_and_host() -> Result<(App, HostSlot, std::path::PathBuf, ToolBins)>
+{
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let tool_bins = ToolBins {
         fs: locate_bundled_bin("savvagent-tool-fs", "SAVVAGENT_TOOL_FS_BIN"),
@@ -172,15 +223,6 @@ async fn main() -> Result<()> {
     let host_slot: HostSlot = Arc::new(RwLock::new(initial.map(|(h, _, _, _)| h)));
 
     let transcript_dir = transcript_dir();
-
-    let mut terminal = tui::init()?;
-
-    // Restore terminal on panic.
-    let original_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = tui::restore();
-        original_hook(info);
-    }));
 
     let initial_locale = crate::plugin::builtin::language::catalog::detect_initial();
     rust_i18n::set_locale(&initial_locale);
@@ -317,38 +359,8 @@ async fn main() -> Result<()> {
     if tool_bins.lsp.is_none() {
         app.push_note(rust_i18n::t!("errors.tool-lsp-not-found").to_string());
     }
-    let res = run_app(
-        &mut terminal,
-        &mut app,
-        host_slot.clone(),
-        project_root,
-        tool_bins,
-    )
-    .await;
 
-    let _ = tui::restore();
-
-    if let Some(host) = current_host(&host_slot).await {
-        if let Err(e) = save_transcript_now(&app, &host).await {
-            eprintln!("warning: could not save transcript on exit: {e}");
-        }
-    }
-    if let Some(host) = host_slot.write().await.take() {
-        host.shutdown().await;
-    }
-
-    if let Err(err) = res {
-        eprintln!("{err:?}");
-    }
-
-    // If `/update` succeeded during this session, the on-disk binary is
-    // a newer version than the one we're still running. Surface a hint
-    // on stderr now that the alt-screen has torn down.
-    if let Some((from, to)) = plugin::builtin::self_update::pending_restart_hint() {
-        eprintln!("savvagent: installed v{to} (was v{from}). Restart to use the new version.");
-    }
-
-    Ok(())
+    Ok((app, host_slot, project_root, tool_bins))
 }
 
 /// Build the host using the provider pool path, reading startup policy from
