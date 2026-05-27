@@ -6,10 +6,6 @@
 //! so the egui and ratatui paths produce identical slot output. The egui paint
 //! pass reads the latest snapshot from a shared cache.
 
-// Consumed by `SavvagentApp` (host/worker wiring task) and `egui_app::view`;
-// reads as dead code until then. Lifted in Task 12's sweep.
-#![allow(dead_code)]
-
 use std::sync::{Arc, Mutex};
 
 use savvagent_plugin::StyledLine;

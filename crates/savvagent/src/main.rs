@@ -654,7 +654,7 @@ fn locate_bundled_bin(name: &str, env_override: &str) -> Option<PathBuf> {
     None
 }
 
-async fn current_host(slot: &HostSlot) -> Option<Arc<Host>> {
+pub(crate) async fn current_host(slot: &HostSlot) -> Option<Arc<Host>> {
     slot.read().await.clone()
 }
 
@@ -698,7 +698,7 @@ fn transcript_dir() -> PathBuf {
     home.join(".savvagent").join("transcripts")
 }
 
-async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
+pub(crate) async fn save_transcript_now(app: &App, host: &Arc<Host>) -> Result<PathBuf> {
     if app.entries.is_empty() {
         return Ok(PathBuf::new());
     }
@@ -2465,7 +2465,7 @@ async fn perform_connect(
 /// monotonic and matched across Start/End pairs. The strict-sequential
 /// nature of `Host::run_turn_inner` (tool calls don't interleave per
 /// turn) makes a single `last_tool_call_id` slot sufficient.
-fn translate_turn_event_to_host_event(
+pub(crate) fn translate_turn_event_to_host_event(
     event: &TurnEvent,
     next_turn_id: &mut u32,
     current_turn_id: &mut Option<u32>,
@@ -2561,7 +2561,10 @@ fn translate_turn_event_to_host_event(
 /// stays visible in the conversation log with its `source` field
 /// populated even when no renderer is available (e.g. when the plugin
 /// is disabled or the index hasn't been built yet).
-async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::ContentBlockId) {
+pub(crate) async fn create_canvas_renderer(
+    app: &mut App,
+    canvas_id: savvagent_plugin::ContentBlockId,
+) {
     // Extract the finalized source from the entry.
     let source = match app
         .entries
@@ -2644,7 +2647,11 @@ async fn create_canvas_renderer(app: &mut App, canvas_id: savvagent_plugin::Cont
 /// the canvas entry in the conversation log is unaffected. Disable
 /// auto-export by toggling the `internal:html-canvas` plugin off via
 /// `~/.savvagent/plugins.toml`.
-fn auto_export_canvas(app: &App, canvas_id: savvagent_plugin::ContentBlockId, turn_id: u32) {
+pub(crate) fn auto_export_canvas(
+    app: &App,
+    canvas_id: savvagent_plugin::ContentBlockId,
+    turn_id: u32,
+) {
     use crate::app::Entry;
     use crate::plugin::builtin::html_canvas::auto_export::{
         auto_export_path, canvases_dir, write_canvas,

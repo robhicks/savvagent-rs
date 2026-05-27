@@ -3,11 +3,6 @@
 //! color path bridges through the existing ratatui resolver so the two sinks
 //! never disagree on semantic-slot resolution.
 
-// These conversions are consumed by `egui_app::view` starting in the
-// conversation-log paint task; until then only tests reference them, which
-// reads as dead code in this (binary) crate. Lifted in Task 12's sweep.
-#![allow(dead_code)]
-
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontFamily, FontId};
 use ratatui::style::Color;
