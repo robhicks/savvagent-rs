@@ -11,8 +11,6 @@ use savvagent_plugin::types::Region;
 use crate::egui_app::convert::egui_event_to_portable;
 
 /// Where to paint a screen and the logical `Region` to hand its `render`.
-// Consumed by the overlay painter in Task 2; allow until then.
-#[allow(dead_code)]
 pub struct ModalGeometry {
     /// The egui rect the overlay (border + content) occupies.
     pub outer: Rect,
@@ -26,8 +24,6 @@ pub struct ModalGeometry {
 /// CenteredModal (clamped to >= 20 cols), Margin{h:2,v:1} + 1-cell border for
 /// the inner region; Fullscreen = whole area; BottomSheet = bottom `height`
 /// rows.
-// Consumed by the overlay painter in Task 2; allow until then.
-#[allow(dead_code)]
 pub fn modal_geometry(avail: Rect, layout: &ScreenLayout, glyph_w: f32, glyph_h: f32) -> ModalGeometry {
     let cols = |w: f32| (w / glyph_w).floor() as u16;
     let rows = |h: f32| (h / glyph_h).floor() as u16;
