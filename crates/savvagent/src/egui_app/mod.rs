@@ -26,6 +26,7 @@
 //! workers spawned by `submit_prompt` use the stored `Handle`.
 
 pub mod convert;
+pub mod fonts;
 pub mod render_model;
 pub mod view;
 
@@ -98,7 +99,8 @@ impl SavvagentApp {
     /// inside the Tokio runtime, so `futures::executor::block_on` drives the
     /// async bootstrap without `Handle::block_on`'s reentrancy panic), open the
     /// worker channel, and initialize an empty render cache.
-    fn new(_cc: &eframe::CreationContext<'_>, rt: Handle) -> anyhow::Result<Self> {
+    fn new(cc: &eframe::CreationContext<'_>, rt: Handle) -> anyhow::Result<Self> {
+        fonts::install(&cc.egui_ctx);
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMsg>(128);
         let (app, host_slot, project_root, tool_bins) =
             futures::executor::block_on(bootstrap_app_and_host())?;
