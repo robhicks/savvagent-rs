@@ -24,7 +24,12 @@ pub struct ModalGeometry {
 /// CenteredModal (clamped to >= 20 cols), Margin{h:2,v:1} + 1-cell border for
 /// the inner region; Fullscreen = whole area; BottomSheet = bottom `height`
 /// rows.
-pub fn modal_geometry(avail: Rect, layout: &ScreenLayout, glyph_w: f32, glyph_h: f32) -> ModalGeometry {
+pub fn modal_geometry(
+    avail: Rect,
+    layout: &ScreenLayout,
+    glyph_w: f32,
+    glyph_h: f32,
+) -> ModalGeometry {
     let cols = |w: f32| (w / glyph_w).floor() as u16;
     let rows = |h: f32| (h / glyph_h).floor() as u16;
     match *layout {
@@ -32,9 +37,18 @@ pub fn modal_geometry(avail: Rect, layout: &ScreenLayout, glyph_w: f32, glyph_h:
         // variant (`ScreenLayout` is `#[non_exhaustive]`): fill the area.
         ScreenLayout::Fullscreen { .. } => ModalGeometry {
             outer: avail,
-            region: Region { x: 0, y: 0, width: cols(avail.width()), height: rows(avail.height()) },
+            region: Region {
+                x: 0,
+                y: 0,
+                width: cols(avail.width()),
+                height: rows(avail.height()),
+            },
         },
-        ScreenLayout::CenteredModal { width_pct, height_pct, .. } => {
+        ScreenLayout::CenteredModal {
+            width_pct,
+            height_pct,
+            ..
+        } => {
             let min_w = 20.0 * glyph_w;
             let w = ((avail.width() * width_pct as f32 / 100.0).max(min_w)).min(avail.width());
             let h = (avail.height() * height_pct as f32 / 100.0).min(avail.height());
@@ -42,7 +56,15 @@ pub fn modal_geometry(avail: Rect, layout: &ScreenLayout, glyph_w: f32, glyph_h:
             // chrome: 1-col/row border + Margin{h:2,v:1} on each side.
             let inner_cols = cols(w).saturating_sub(2 * (1 + 2));
             let inner_rows = rows(h).saturating_sub(2 * (1 + 1));
-            ModalGeometry { outer, region: Region { x: 0, y: 0, width: inner_cols, height: inner_rows } }
+            ModalGeometry {
+                outer,
+                region: Region {
+                    x: 0,
+                    y: 0,
+                    width: inner_cols,
+                    height: inner_rows,
+                },
+            }
         }
         ScreenLayout::BottomSheet { height } => {
             let h = (height as f32 * glyph_h).min(avail.height());
@@ -52,12 +74,22 @@ pub fn modal_geometry(avail: Rect, layout: &ScreenLayout, glyph_w: f32, glyph_h:
             );
             ModalGeometry {
                 outer,
-                region: Region { x: 0, y: 0, width: cols(avail.width()), height: rows(h) },
+                region: Region {
+                    x: 0,
+                    y: 0,
+                    width: cols(avail.width()),
+                    height: rows(h),
+                },
             }
         }
         _ => ModalGeometry {
             outer: avail,
-            region: Region { x: 0, y: 0, width: cols(avail.width()), height: rows(avail.height()) },
+            region: Region {
+                x: 0,
+                y: 0,
+                width: cols(avail.width()),
+                height: rows(avail.height()),
+            },
         },
     }
 }
@@ -67,15 +99,19 @@ pub fn modal_geometry(avail: Rect, layout: &ScreenLayout, glyph_w: f32, glyph_h:
 /// `Event::Text` becomes one `Char`; an `Event::Key` is forwarded only when it
 /// is NOT a plain unmodified printable char (i.e. navigation/control keys, or
 /// any key carrying ctrl/alt/meta — accelerators egui does not echo as Text).
-// Consumed by screen-stack input routing in Task 3; allow until then.
-#[allow(dead_code)]
-pub fn portable_keys_from_events(events: &[egui::Event]) -> Vec<savvagent_plugin::KeyEventPortable> {
+pub fn portable_keys_from_events(
+    events: &[egui::Event],
+) -> Vec<savvagent_plugin::KeyEventPortable> {
     let mut out = Vec::new();
     for ev in events {
-        let Some(k) = egui_event_to_portable(ev) else { continue };
+        let Some(k) = egui_event_to_portable(ev) else {
+            continue;
+        };
         let is_text = matches!(ev, egui::Event::Text(_));
         let is_plain_char = matches!(k.code, KeyCodePortable::Char(_))
-            && !k.modifiers.ctrl && !k.modifiers.alt && !k.modifiers.meta;
+            && !k.modifiers.ctrl
+            && !k.modifiers.alt
+            && !k.modifiers.meta;
         // From a Key event, drop plain printable chars (the paired Text event
         // carries them); keep everything from Text, and keep modified/non-char
         // keys from Key events.
@@ -100,7 +136,11 @@ mod tests {
     #[test]
     fn centered_modal_is_centered_and_percentage_sized() {
         let avail = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0));
-        let layout = ScreenLayout::CenteredModal { width_pct: 60, height_pct: 50, title: None };
+        let layout = ScreenLayout::CenteredModal {
+            width_pct: 60,
+            height_pct: 50,
+            title: None,
+        };
         let g = modal_geometry(avail, &layout, GW, GH);
         // 60% of 1000 = 600 wide, 50% of 800 = 400 tall, centered.
         assert!((g.outer.width() - 600.0).abs() < 1.0);
@@ -112,7 +152,11 @@ mod tests {
     #[test]
     fn centered_modal_inner_region_subtracts_chrome_margin() {
         let avail = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0));
-        let layout = ScreenLayout::CenteredModal { width_pct: 60, height_pct: 50, title: None };
+        let layout = ScreenLayout::CenteredModal {
+            width_pct: 60,
+            height_pct: 50,
+            title: None,
+        };
         let g = modal_geometry(avail, &layout, GW, GH);
         // Inner = outer minus border(1) + Margin{h:2,v:1} on each side in *cols/rows*.
         // outer 600x400 pts -> 75x25 cols/rows; minus 2*(1 border + 2 h margin)=6 cols,
@@ -136,8 +180,11 @@ mod tests {
         // egui emits Key{A} + Text("a") for one press; we want a single Char('a').
         let events = vec![
             egui::Event::Key {
-                key: egui::Key::A, physical_key: None, pressed: true,
-                repeat: false, modifiers: egui::Modifiers::NONE,
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
             },
             egui::Event::Text("a".into()),
         ];
@@ -149,8 +196,11 @@ mod tests {
     #[test]
     fn non_text_key_is_forwarded() {
         let events = vec![egui::Event::Key {
-            key: egui::Key::Enter, physical_key: None, pressed: true,
-            repeat: false, modifiers: egui::Modifiers::NONE,
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
         }];
         let keys = portable_keys_from_events(&events);
         assert_eq!(keys.len(), 1);
@@ -161,8 +211,11 @@ mod tests {
     fn ctrl_accelerator_key_is_forwarded_even_though_char() {
         // Ctrl+S produces no Text event, so the Key path must forward it.
         let events = vec![egui::Event::Key {
-            key: egui::Key::S, physical_key: None, pressed: true,
-            repeat: false, modifiers: egui::Modifiers::CTRL,
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
         }];
         let keys = portable_keys_from_events(&events);
         assert_eq!(keys.len(), 1);

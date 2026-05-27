@@ -85,13 +85,9 @@ pub struct SavvagentApp {
     pub prompt: String,
 
     /// Project root + tool binaries — captured from `bootstrap_app_and_host`
-    /// and held for later GUI tasks (slash-command dispatch, `/connect`, tool
-    /// registration), which need them exactly as `run_app` does. Unread in the
-    /// foundation; the allow is scoped to these two reserved fields rather than
-    /// the whole struct so any *other* dead field still surfaces as a warning.
-    #[allow(dead_code)]
+    /// and threaded into the pending-action drain (`apply_pending_model_change`)
+    /// and slash-command dispatch, exactly as `run_app` does.
     project_root: PathBuf,
-    #[allow(dead_code)]
     tool_bins: ToolBins,
 }
 
@@ -253,6 +249,25 @@ impl SavvagentApp {
         }
     }
 
+    /// Drain the same pending-action queues `run_app` drains after a screen
+    /// key, in the same order, so picker selections (model/provider/routing/
+    /// etc.) take effect. Each `apply_pending_*` is a `pub(crate)` helper in
+    /// `main.rs`.
+    async fn drain_pending(&mut self) {
+        crate::apply_pending_model_change(
+            &mut self.app,
+            &self.host_slot,
+            &self.project_root,
+            &self.tool_bins,
+        )
+        .await;
+        crate::apply_pending_pool_add(&mut self.app, &self.host_slot).await;
+        crate::apply_pending_gate(&mut self.app, &self.host_slot).await;
+        crate::apply_pending_in_process_tools(&mut self.app, &self.host_slot).await;
+        crate::apply_pending_routing_reload(&mut self.app, &self.host_slot).await;
+        crate::apply_pending_routing_show(&mut self.app, &self.host_slot).await;
+    }
+
     /// Spawn a streaming turn for `text`. A faithful port of `run_app`'s
     /// Enter-key turn-spawn path: push the user entry, set `is_loading`,
     /// consume any one-turn model override, then `spawn` the worker that runs
@@ -331,11 +346,46 @@ impl eframe::App for SavvagentApp {
         let events = ctx.input(|i| i.events.clone());
         for ev in &events {
             if let Some(k) = convert::egui_event_to_portable(ev) {
-                use savvagent_plugin::KeyCodePortable;
-                if k.modifiers.ctrl && matches!(k.code, KeyCodePortable::Char('c')) {
+                use savvagent_plugin::KeyCodePortable as KC;
+                let quit = k.modifiers.ctrl && matches!(k.code, KC::Char('c') | KC::Char('d'));
+                if quit {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
+        }
+
+        // 1b. If a screen is open, route input to it and skip home handling
+        //     entirely — mirrors `run_app`'s precedence (quit → top screen
+        //     `on_key` → home). Effects (push/pop/close) and the pending-action
+        //     queues are applied per key, in the same order the TUI uses.
+        if !self.app.screen_stack.is_empty() {
+            let keys = screen::portable_keys_from_events(&events);
+            futures::executor::block_on(async {
+                for key in keys {
+                    let effs = match self.app.screen_stack.top_mut() {
+                        Some((top, _layout)) => match top.on_key(key).await {
+                            Ok(e) => e,
+                            Err(err) => {
+                                tracing::warn!(error = %err, "screen on_key failed");
+                                continue;
+                            }
+                        },
+                        None => break, // a prior key's effect closed the last screen
+                    };
+                    if let Err(err) =
+                        crate::plugin::effects::apply_effects(&mut self.app, effs).await
+                    {
+                        tracing::warn!(error = %err, "apply_effects (screen) failed");
+                    }
+                    self.drain_pending().await;
+                }
+                // Refresh the render model so footer/tips reflect any change.
+                let model = build_model(&self.app, RENDER_COLS).await;
+                *self.render_cache.lock().unwrap() = model;
+            });
+            view::paint(self, ctx);
+            ctx.request_repaint(); // screens are interactive; keep ticking
+            return;
         }
 
         // 2. Drain the worker channel and rebuild the render-model snapshot in
