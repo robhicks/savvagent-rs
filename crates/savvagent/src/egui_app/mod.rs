@@ -28,6 +28,7 @@
 pub mod convert;
 pub mod fonts;
 pub mod render_model;
+pub mod screen;
 pub mod view;
 
 use std::path::PathBuf;
