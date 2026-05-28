@@ -30,6 +30,7 @@ pub mod fonts;
 pub mod render_model;
 pub mod screen;
 pub mod view;
+pub mod widgets;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
