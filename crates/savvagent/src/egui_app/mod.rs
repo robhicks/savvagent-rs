@@ -90,6 +90,14 @@ pub struct SavvagentApp {
     /// and slash-command dispatch, exactly as `run_app` does.
     project_root: PathBuf,
     tool_bins: ToolBins,
+
+    /// Per-open file state for the GUI editor (view-file/edit-file).
+    /// `None` when no marker screen is open. Loaded lazy by
+    /// `widgets::editor::ensure_buffer_for_active_screen` on the first
+    /// frame after the screen pushes; cleared by the same helper when
+    /// the stack no longer contains a marker screen.
+    #[allow(dead_code)] // Task 4 wires this into the paint pass; remove then.
+    pub editor_buffer: Option<widgets::editor::EditorBuffer>,
 }
 
 impl SavvagentApp {
@@ -117,6 +125,7 @@ impl SavvagentApp {
             prompt: String::new(),
             project_root,
             tool_bins,
+            editor_buffer: None,
         })
     }
 
