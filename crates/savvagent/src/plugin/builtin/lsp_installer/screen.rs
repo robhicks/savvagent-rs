@@ -88,8 +88,7 @@ impl Screen for LspPickerScreen {
     }
 
     async fn on_key(&mut self, key: KeyEventPortable) -> Result<Vec<Effect>, PluginError> {
-        let ct_event = portable_to_crossterm(&key);
-        let outcome = self.inner.inner.on_key(ct_event);
+        let outcome = self.inner.inner.on_key(key);
         match outcome {
             MultiSelectOutcome::Stay
             | MultiSelectOutcome::Preview(_)
@@ -118,6 +117,7 @@ impl Screen for LspPickerScreen {
     }
 }
 
+#[allow(dead_code)]
 fn portable_to_crossterm(key: &KeyEventPortable) -> crossterm::event::KeyEvent {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let code = match key.code {
