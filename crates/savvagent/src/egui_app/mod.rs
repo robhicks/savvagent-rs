@@ -277,6 +277,26 @@ impl SavvagentApp {
         crate::apply_pending_routing_show(&mut self.app, &self.host_slot).await;
     }
 
+    /// Save the GUI editor buffer to disk, push a status note, and clear
+    /// the dirty flag. Called from `update()` when `Ctrl-S` is observed
+    /// while the `edit-file` marker screen is on top. Bypasses
+    /// `Effect::SaveActiveFile` (which writes the ratatui editor, not
+    /// the GUI buffer).
+    fn save_editor_buffer(&mut self) {
+        let Some(buf) = self.editor_buffer.as_mut() else {
+            return;
+        };
+        let path_display = buf.path.display().to_string();
+        match buf.save_to_disk() {
+            Ok(()) => self.app.push_note(
+                rust_i18n::t!("notes.file-saved", path = path_display).to_string(),
+            ),
+            Err(e) => self.app.push_note(
+                rust_i18n::t!("notes.file-write-error", err = format!("{e:#}")).to_string(),
+            ),
+        }
+    }
+
     /// Spawn a streaming turn for `text`. A faithful port of `run_app`'s
     /// Enter-key turn-spawn path: push the user entry, set `is_loading`,
     /// consume any one-turn model override, then `spawn` the worker that runs
@@ -417,7 +437,33 @@ impl eframe::App for SavvagentApp {
         //    is only rebuilt again when we actually routed keys; block 2's
         //    rebuild is otherwise still current.
         if !self.app.screen_stack.is_empty() {
-            let keys = screen::portable_keys_from_events(&events);
+            // Plan 3: when the edit-file marker screen is on top, Ctrl-S
+            // saves the GUI editor buffer directly and consumes the
+            // key — the screen's on_key would otherwise emit
+            // Effect::SaveActiveFile which writes the stale
+            // ratatui-side App::editor.
+            let edit_file_open = self
+                .app
+                .screen_stack
+                .top()
+                .map(|(s, _)| s.id() == "edit-file")
+                .unwrap_or(false);
+            let mut all_keys = screen::portable_keys_from_events(&events);
+            if edit_file_open {
+                let mut ctrl_s_count = 0usize;
+                all_keys.retain(|k| {
+                    let is_ctrl_s = k.modifiers.ctrl
+                        && matches!(k.code, savvagent_plugin::KeyCodePortable::Char('s'));
+                    if is_ctrl_s {
+                        ctrl_s_count += 1;
+                    }
+                    !is_ctrl_s
+                });
+                for _ in 0..ctrl_s_count {
+                    self.save_editor_buffer();
+                }
+            }
+            let keys = all_keys;
             let had_keys = !keys.is_empty();
             futures::executor::block_on(async {
                 for key in keys {

@@ -39,7 +39,6 @@ impl EditorBuffer {
     }
 
     /// Write the buffer text to disk and clear `dirty` on success.
-    #[allow(dead_code)] // Task 5 wires this into the Ctrl-S save flow; remove then.
     pub fn save_to_disk(&mut self) -> std::io::Result<()> {
         std::fs::write(&self.path, &self.text)?;
         self.dirty = false;
