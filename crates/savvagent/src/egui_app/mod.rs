@@ -288,9 +288,9 @@ impl SavvagentApp {
         };
         let path_display = buf.path.display().to_string();
         match buf.save_to_disk() {
-            Ok(()) => self.app.push_note(
-                rust_i18n::t!("notes.file-saved", path = path_display).to_string(),
-            ),
+            Ok(()) => self
+                .app
+                .push_note(rust_i18n::t!("notes.file-saved", path = path_display).to_string()),
             Err(e) => self.app.push_note(
                 rust_i18n::t!("notes.file-write-error", err = format!("{e:#}")).to_string(),
             ),
@@ -451,16 +451,38 @@ impl eframe::App for SavvagentApp {
             let mut all_keys = screen::portable_keys_from_events(&events);
             if edit_file_open {
                 let mut ctrl_s_count = 0usize;
+                let mut esc_pending = false;
                 all_keys.retain(|k| {
                     let is_ctrl_s = k.modifiers.ctrl
                         && matches!(k.code, savvagent_plugin::KeyCodePortable::Char('s'));
                     if is_ctrl_s {
                         ctrl_s_count += 1;
                     }
+                    // Esc: observe but DO NOT consume — the screen still
+                    // needs to emit Effect::CloseScreen to pop itself.
+                    // We just pre-save here so that the apply_effects
+                    // CloseScreen arm's `app.save_file()` call
+                    // (effects.rs:61-62) becomes a no-op (path is None)
+                    // and the user's GUI edits land on disk instead of
+                    // being silently overwritten by the stale
+                    // App::editor (ratatui) buffer.
+                    let is_esc = matches!(k.code, savvagent_plugin::KeyCodePortable::Esc);
+                    if is_esc {
+                        esc_pending = true;
+                    }
                     !is_ctrl_s
                 });
                 for _ in 0..ctrl_s_count {
                     self.save_editor_buffer();
+                }
+                if esc_pending {
+                    // Save the GUI buffer (idempotent if not dirty; the
+                    // legacy TUI semantic is "save always on Esc-close
+                    // of edit-file"). Then tear down the ratatui-side
+                    // editor + path so the upcoming Effect::CloseScreen's
+                    // `app.save_file()` short-circuits.
+                    self.save_editor_buffer();
+                    self.app.clear_active_editor();
                 }
             }
             let keys = all_keys;
