@@ -1,4 +1,4 @@
-//! Native egui front-end (v0.19.0 migration, Plan 1). Built alongside the
+//! Native egui front-end (v0.19.0 migration, Plans 1–2). Built alongside the
 //! ratatui TUI and launched via the `savvagent gui` subcommand — see
 //! `docs/superpowers/specs/2026-05-26-v0.19.0-egui-frontend-design.md`.
 //!
@@ -356,9 +356,10 @@ impl SavvagentApp {
 
 impl eframe::App for SavvagentApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 1. Global input routing. Ctrl-C / Ctrl-D quit; every other key flows
-        //    to the prompt `TextEdit` (which consumes its own keys) or, when a
-        //    screen is open, to block 1b below. The GUI deliberately does NOT
+        // 1. Global quit chord. Observes Ctrl-C / Ctrl-D and requests a viewport
+        //    close — the events themselves still propagate to block 3 (when a
+        //    screen is open) or to the prompt `TextEdit`, but the close request
+        //    races them and shuts the window. The GUI deliberately does NOT
         //    route home keybindings through the plugin `KeybindingRouter` —
         //    pickers are opened via slash commands (see `submit_prompt`); only
         //    the ratatui TUI drives plugin-bound home accelerators.
@@ -373,21 +374,36 @@ impl eframe::App for SavvagentApp {
             }
         }
 
-        // 1b. If a screen is open, route input to it and skip home handling
-        //     entirely — mirrors `run_app`'s precedence (quit → top screen
-        //     `on_key` → home). Effects (push/pop/close) and the pending-action
-        //     queues are applied per key, in the same order the TUI uses.
+        // 2. Drain the worker channel and rebuild the render-model snapshot in
+        //    one async pass. Runs every frame, screen open or not, so an
+        //    in-flight streaming turn can never wedge on the 128-slot channel
+        //    back-pressuring while a modal owns input.
         //
-        //     KNOWN LIMITATION: this early-returns without draining the worker
-        //     channel (block 2), so if a screen is open while a turn streams,
-        //     `WorkerMsg`s accumulate until the 128-slot channel back-pressures
-        //     and the turn stalls. Unreachable with the default plugins: the
-        //     only ways to open a screen are the `submit_prompt` slash branch
-        //     (guarded on `is_loading`) and a plugin `OpenScreen` effect from a
-        //     mid-turn `HostEvent` (no built-in does this). Revisit if a plugin
-        //     can open a screen during `is_loading`.
+        //    `handle_worker_msg` borrows `&mut self`, while draining borrows
+        //    `self.worker_rx`; we resolve the aliasing by first collecting
+        //    messages into an owned `Vec` (borrows only `self.worker_rx`), then
+        //    handling them (borrows the rest of `self`).
+        futures::executor::block_on(async {
+            let mut drained = Vec::new();
+            while let Ok(msg) = self.worker_rx.try_recv() {
+                drained.push(msg);
+            }
+            for msg in drained {
+                self.handle_worker_msg(msg).await;
+            }
+            let model = build_model(&self.app, RENDER_COLS).await;
+            *self.render_cache.lock().unwrap() = model;
+        });
+
+        // 3. If a screen is open, route input to it and skip home handling —
+        //    mirrors `run_app`'s precedence (quit → top screen `on_key` →
+        //    home). Effects (push/pop/close) and the pending-action queues are
+        //    applied per key, in the same order the TUI uses. The render model
+        //    is only rebuilt again when we actually routed keys; block 2's
+        //    rebuild is otherwise still current.
         if !self.app.screen_stack.is_empty() {
             let keys = screen::portable_keys_from_events(&events);
+            let had_keys = !keys.is_empty();
             futures::executor::block_on(async {
                 for key in keys {
                     let effs = match self.app.screen_stack.top_mut() {
@@ -407,40 +423,23 @@ impl eframe::App for SavvagentApp {
                     }
                     self.drain_pending().await;
                 }
-                // Refresh the render model so footer/tips reflect any change.
-                let model = build_model(&self.app, RENDER_COLS).await;
-                *self.render_cache.lock().unwrap() = model;
+                if had_keys {
+                    let model = build_model(&self.app, RENDER_COLS).await;
+                    *self.render_cache.lock().unwrap() = model;
+                }
             });
             view::paint(self, ctx);
             ctx.request_repaint(); // screens are interactive; keep ticking
             return;
         }
 
-        // 2. Drain the worker channel and rebuild the render-model snapshot in
-        //    one async pass on the UI thread. `handle_worker_msg` borrows
-        //    `&mut self`, while draining borrows `self.worker_rx`; we resolve
-        //    the aliasing by first collecting messages into an owned `Vec`
-        //    (borrows only `self.worker_rx`), then handling them (borrows the
-        //    rest of `self`).
-        futures::executor::block_on(async {
-            let mut drained = Vec::new();
-            while let Ok(msg) = self.worker_rx.try_recv() {
-                drained.push(msg);
-            }
-            for msg in drained {
-                self.handle_worker_msg(msg).await;
-            }
-            let model = build_model(&self.app, RENDER_COLS).await;
-            *self.render_cache.lock().unwrap() = model;
-        });
-
-        // 3. Paint.
+        // 4. Paint.
         view::paint(self, ctx);
 
-        // 4. Keep repainting while a turn streams so newly-arrived deltas show
+        // 5. Keep repainting while a turn streams so newly-arrived deltas show
         //    up without requiring a user input event to wake the event loop.
         //    Also repaint if a slash command just opened a screen (via
-        //    `submit_prompt` during paint), so the screen-routing block (1b)
+        //    `submit_prompt` during paint), so the screen-routing block (3)
         //    takes over next frame and the overlay stays interactive without
         //    needing another input event.
         if self.app.is_loading || !self.app.screen_stack.is_empty() {

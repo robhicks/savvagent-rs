@@ -11,10 +11,16 @@ use savvagent_plugin::types::Region;
 use crate::egui_app::convert::egui_event_to_portable;
 
 /// Where to paint a screen and the logical `Region` to hand its `render`.
+/// `outer` is in egui points; `region` is in logical monospace cols/rows. The
+/// two fields describe the same rectangle in different units: `region` always
+/// equals `outer` minus the layout's chrome (margin) for CenteredModal, and
+/// the full `outer` extent for Fullscreen/BottomSheet.
+#[derive(Debug, Clone, Copy)]
 pub struct ModalGeometry {
-    /// The egui rect the overlay (border + content) occupies.
+    /// The egui rect the overlay (border + content) occupies — in points.
     pub outer: Rect,
-    /// The inner area, in logical monospace columns/rows, after chrome.
+    /// The inner area in logical monospace columns/rows, after chrome.
+    /// Origin is always `(0, 0)`; screens render relative to their own region.
     pub region: Region,
 }
 
@@ -168,6 +174,43 @@ mod tests {
         // each side (4 cols, 2 rows) -> 71 cols, 23 rows.
         assert_eq!(g.region.width, 71);
         assert_eq!(g.region.height, 23);
+    }
+
+    #[test]
+    fn centered_modal_clamps_width_to_minimum() {
+        // 1% width on a 1000pt-wide area = 10pt, which is below the 20-col
+        // (160pt) minimum from ratatui's `.max(20)` floor. The clamp must
+        // engage and keep the modal usable.
+        let avail = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0));
+        let layout = ScreenLayout::CenteredModal {
+            width_pct: 1,
+            height_pct: 50,
+            title: None,
+        };
+        let g = modal_geometry(avail, &layout, GW, GH);
+        assert!(
+            (g.outer.width() - 160.0).abs() < 0.5,
+            "expected width floored to min_w=160pt, got {}",
+            g.outer.width()
+        );
+    }
+
+    #[test]
+    fn centered_modal_clamps_height_to_minimum() {
+        // 1% height on an 800pt-tall area = 8pt, below the 5-row (80pt)
+        // minimum from ratatui's `.max(5)` floor. The clamp must engage.
+        let avail = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 800.0));
+        let layout = ScreenLayout::CenteredModal {
+            width_pct: 50,
+            height_pct: 1,
+            title: None,
+        };
+        let g = modal_geometry(avail, &layout, GW, GH);
+        assert!(
+            (g.outer.height() - 80.0).abs() < 0.5,
+            "expected height floored to min_h=80pt, got {}",
+            g.outer.height()
+        );
     }
 
     #[test]

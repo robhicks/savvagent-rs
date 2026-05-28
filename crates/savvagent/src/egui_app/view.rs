@@ -40,11 +40,12 @@ pub fn paint(state: &mut SavvagentApp, ctx: &egui::Context) {
 }
 
 /// Paint the top screen of the stack (if any) as an overlay above the home
-/// panels. Returns true if a screen is open (so the caller can suppress the
-/// home prompt). The screen's `render(region)` is SYNC, so no async here.
-fn paint_screen_overlay(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) -> bool {
+/// panels. The screen's `render(region)` is SYNC, so no async here. The caller
+/// (`paint`) checks `screen_stack` itself to suppress the home prompt; this
+/// function silently does nothing when the stack is empty.
+fn paint_screen_overlay(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
     let Some((screen, layout)) = state.app.screen_stack.top() else {
-        return false;
+        return;
     };
     // Glyph metrics for points <-> cols/rows.
     let font = egui::FontId::monospace(FONT_SIZE);
@@ -100,7 +101,6 @@ fn paint_screen_overlay(state: &SavvagentApp, ctx: &egui::Context, palette: &Pal
             }
         });
     });
-    true
 }
 
 // Small helpers to pull two palette slots as Color32 for chrome.
