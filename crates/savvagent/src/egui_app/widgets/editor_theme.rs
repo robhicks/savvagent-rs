@@ -41,11 +41,6 @@ use savvagent_plugin::ThemeColor;
 /// constants/numbers → `Warning`; types/functions/methods → `Secondary`;
 /// comments → `Muted`; errors → `Error`; identifiers/punctuation → `Fg`.
 /// Background is the palette's `Bg` slot.
-//
-// `dead_code` allow is temporary: Task 4 of Plan 3 (paint view-file in egui)
-// wires this adapter into the read-only editor; until then nothing in the
-// non-test binary calls it. Remove when the editor screen lands.
-#[allow(dead_code)]
 pub fn palette_to_color_theme(palette: &Palette) -> ColorTheme {
     let bg = theme_color_to_color32(ThemeColor::Bg, palette);
     let fg = theme_color_to_color32(ThemeColor::Fg, palette);
@@ -81,11 +76,6 @@ pub fn palette_to_color_theme(palette: &Palette) -> ColorTheme {
 /// color slot (see header comment), so dynamic per-palette hex strings are
 /// interned via `Box::leak`. The leak is bounded — one short string per slot
 /// per theme switch — well under the lifetime-cost line.
-//
-// `dead_code` allow is temporary: tests call this, but non-test code goes
-// dark until `palette_to_color_theme` is wired in Task 4 of Plan 3. The
-// allow keeps `-D warnings` happy in the interim.
-#[allow(dead_code)]
 fn color32_to_hex(c: egui::Color32) -> &'static str {
     Box::leak(format!("#{:02X}{:02X}{:02X}", c.r(), c.g(), c.b()).into_boxed_str())
 }
