@@ -97,6 +97,10 @@ pub struct SavvagentApp {
     /// frame after the screen pushes; cleared by the same helper when
     /// the stack no longer contains a marker screen.
     pub editor_buffer: Option<widgets::editor::EditorBuffer>,
+
+    /// `Ctrl+O` file picker. The dialog is always allocated; `open()`
+    /// puts it in pick-file mode and `update()` paints it each frame.
+    pub file_picker: widgets::file_picker::FilePicker,
 }
 
 impl SavvagentApp {
@@ -125,6 +129,7 @@ impl SavvagentApp {
             project_root,
             tool_bins,
             editor_buffer: None,
+            file_picker: widgets::file_picker::FilePicker::default(),
         })
     }
 
@@ -399,6 +404,10 @@ impl eframe::App for SavvagentApp {
                 let quit = k.modifiers.ctrl && matches!(k.code, KC::Char('c') | KC::Char('d'));
                 if quit {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                let open_picker = k.modifiers.ctrl && matches!(k.code, KC::Char('o'));
+                if open_picker {
+                    self.file_picker.open();
                 }
             }
         }

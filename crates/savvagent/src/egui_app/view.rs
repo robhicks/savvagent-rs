@@ -37,6 +37,14 @@ pub fn paint(state: &mut SavvagentApp, ctx: &egui::Context) {
     if screen_open {
         paint_screen_overlay(state, ctx, &palette);
     }
+
+    // Plan 3: drive the file-dialog each frame. It paints itself; we only
+    // consume the result. The picked path becomes an `@<path>` reference
+    // in the prompt buffer.
+    state.file_picker.update(ctx);
+    if let Some(picked) = state.file_picker.take_picked() {
+        crate::egui_app::widgets::file_picker::splice_at_reference(&mut state.prompt, &picked);
+    }
 }
 
 /// Paint the top screen of the stack (if any) as an overlay above the home
