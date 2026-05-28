@@ -96,7 +96,6 @@ pub struct SavvagentApp {
     /// `widgets::editor::ensure_buffer_for_active_screen` on the first
     /// frame after the screen pushes; cleared by the same helper when
     /// the stack no longer contains a marker screen.
-    #[allow(dead_code)] // Task 4 wires this into the paint pass; remove then.
     pub editor_buffer: Option<widgets::editor::EditorBuffer>,
 }
 
@@ -404,6 +403,12 @@ impl eframe::App for SavvagentApp {
             let model = build_model(&self.app, RENDER_COLS).await;
             *self.render_cache.lock().unwrap() = model;
         });
+
+        // Plan 3: keep the GUI editor buffer in sync with the active
+        // marker screen. Loads lazy from `App::active_file_path` on the
+        // first frame after `view-file`/`edit-file` opens and drops when
+        // the screen pops.
+        widgets::editor::ensure_buffer_for_active_screen(&mut self.editor_buffer, &self.app);
 
         // 3. If a screen is open, route input to it and skip home handling —
         //    mirrors `run_app`'s precedence (quit → top screen `on_key` →

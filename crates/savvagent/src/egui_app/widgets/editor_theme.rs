@@ -100,10 +100,7 @@ mod tests {
     fn dark_palette_maps_keywords_to_accent() {
         let palette = Palette::for_theme(Theme::Dark);
         let theme = palette_to_color_theme(&palette);
-        let expected_accent = color32_to_hex(theme_color_to_color32(
-            ThemeColor::Accent,
-            &palette,
-        ));
+        let expected_accent = color32_to_hex(theme_color_to_color32(ThemeColor::Accent, &palette));
         assert_eq!(theme.keywords, expected_accent);
     }
 
@@ -111,10 +108,7 @@ mod tests {
     fn dark_palette_maps_strings_to_success() {
         let palette = Palette::for_theme(Theme::Dark);
         let theme = palette_to_color_theme(&palette);
-        let expected = color32_to_hex(theme_color_to_color32(
-            ThemeColor::Success,
-            &palette,
-        ));
+        let expected = color32_to_hex(theme_color_to_color32(ThemeColor::Success, &palette));
         assert_eq!(theme.strs, expected);
         assert_eq!(theme.literals, expected);
     }
@@ -123,10 +117,7 @@ mod tests {
     fn dark_palette_maps_comments_to_muted() {
         let palette = Palette::for_theme(Theme::Dark);
         let theme = palette_to_color_theme(&palette);
-        let expected = color32_to_hex(theme_color_to_color32(
-            ThemeColor::Muted,
-            &palette,
-        ));
+        let expected = color32_to_hex(theme_color_to_color32(ThemeColor::Muted, &palette));
         assert_eq!(theme.comments, expected);
     }
 
@@ -134,10 +125,7 @@ mod tests {
     fn light_palette_maps_background_to_bg() {
         let palette = Palette::for_theme(Theme::Light);
         let theme = palette_to_color_theme(&palette);
-        let expected = color32_to_hex(theme_color_to_color32(
-            ThemeColor::Bg,
-            &palette,
-        ));
+        let expected = color32_to_hex(theme_color_to_color32(ThemeColor::Bg, &palette));
         assert_eq!(theme.bg, expected);
     }
 }
