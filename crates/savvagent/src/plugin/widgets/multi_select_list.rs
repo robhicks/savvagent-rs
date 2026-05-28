@@ -288,10 +288,7 @@ mod tests {
     #[test]
     fn unknown_key_emits_stay() {
         let mut l = list();
-        assert!(matches!(
-            l.on_key(key(KC::F(5))),
-            MultiSelectOutcome::Stay
-        ));
+        assert!(matches!(l.on_key(key(KC::F(5))), MultiSelectOutcome::Stay));
     }
 
     #[test]
