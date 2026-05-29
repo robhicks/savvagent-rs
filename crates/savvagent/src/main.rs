@@ -4569,4 +4569,30 @@ mod canvas_key_tests {
         handle_focused_canvas_key(&mut app, &empty_host_slot(), a, None, k).await;
         assert!(app.is_canvas_focused(b), "Ctrl-J moves to the next canvas");
     }
+
+    #[tokio::test]
+    async fn ctrl_k_jumps_to_prev_canvas() {
+        // Mirror of `ctrl_j_jumps_to_next_canvas` — Ctrl-K must move
+        // focus to the previous canvas (wrapping). Starting focused on
+        // `b`, Ctrl-K lands on `a`.
+        let mut app = build_app();
+        let a = app.canvas_registry.allocate_id();
+        let b = app.canvas_registry.allocate_id();
+        app.entries.push(canvas(a.0));
+        app.entries.push(canvas(b.0));
+        app.focus_canvas(b, None);
+
+        let k = KeyEventPortable {
+            code: KeyCodePortable::Char('k'),
+            modifiers: KeyMods {
+                ctrl: true,
+                ..KeyMods::default()
+            },
+        };
+        handle_focused_canvas_key(&mut app, &empty_host_slot(), b, None, k).await;
+        assert!(
+            app.is_canvas_focused(a),
+            "Ctrl-K moves to the previous canvas",
+        );
+    }
 }

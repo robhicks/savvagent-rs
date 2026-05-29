@@ -285,9 +285,13 @@ pub async fn handle_focused_canvas_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{App, InputMode};
+    use crate::app::{App, Entry, InputMode};
+    use savvagent_plugin::{
+        ContentRenderer, Effect, Frame, InputOutcome, MouseEventKind, MouseEventPortable,
+        PixelFormat, PixelSize, PluginError, UrlTarget,
+    };
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::RwLock;
 
     fn build_app() -> App {
@@ -305,6 +309,64 @@ mod tests {
         }
     }
 
+    /// Synthetic mouse event used by the dispatch tests. Coordinates and
+    /// kind are arbitrary — the tests assert on the renderer's recorded
+    /// event and the function's return value, not the event payload.
+    fn synthetic_mouse() -> MouseEventPortable {
+        MouseEventPortable {
+            kind: MouseEventKind::Move,
+            button: None,
+            x_pixel: 5,
+            y_pixel: 5,
+            modifiers: savvagent_plugin::KeyMods::default(),
+        }
+    }
+
+    /// Renderer stub that records the last `dispatch` event and returns
+    /// a pre-seeded `InputOutcome` (or `PluginError`). Scoped to the test
+    /// module — kept distinct from `main.rs::canvas_key_tests::StubRenderer`
+    /// because that one focuses on Tab/element-focus assertions instead.
+    ///
+    /// `last_event` is an `Arc<Mutex<...>>` so the test can keep a clone
+    /// outside of the registry's `Box<dyn>` storage and inspect what the
+    /// renderer recorded.
+    struct DispatchStub {
+        id: ContentBlockId,
+        last_event: Arc<Mutex<Option<savvagent_plugin::InputEvent>>>,
+        dispatch_result: Mutex<Option<Result<InputOutcome, PluginError>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ContentRenderer for DispatchStub {
+        fn id(&self) -> ContentBlockId {
+            self.id
+        }
+        fn render(&mut self, _size: PixelSize) -> Frame {
+            Frame {
+                width: 1,
+                height: 1,
+                format: PixelFormat::Rgba8,
+                bytes: vec![0, 0, 0, 255],
+            }
+        }
+        async fn dispatch(
+            &mut self,
+            event: savvagent_plugin::InputEvent,
+        ) -> Result<InputOutcome, PluginError> {
+            *self.last_event.lock().unwrap() = Some(event);
+            self.dispatch_result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    Ok(InputOutcome {
+                        effects: vec![],
+                        dirty: false,
+                    })
+                })
+        }
+    }
+
     #[tokio::test]
     async fn esc_unfocuses_canvas() {
         let mut app = build_app();
@@ -319,4 +381,249 @@ mod tests {
         handle_focused_canvas_key(&mut app, &hs, id, None, key(KeyCodePortable::Esc)).await;
         assert!(matches!(app.input_mode, InputMode::Editing));
     }
+
+    // ---- I9: apply_canvas_effects coverage ----
+
+    #[tokio::test]
+    async fn continue_conversation_stages_prompt_and_flips_mode() {
+        let mut app = build_app();
+        let hs = empty_host_slot();
+        let url = "https://x.example".to_string();
+        apply_canvas_effects(
+            &mut app,
+            &hs,
+            vec![Effect::OpenUrl {
+                url: url.clone(),
+                target: UrlTarget::ContinueConversation,
+            }],
+        )
+        .await;
+        assert!(matches!(app.input_mode, InputMode::Editing));
+        let joined = app.input_textarea.lines().join("\n");
+        assert!(
+            joined.contains(&url),
+            "expected staged URL in input textarea; got {joined:?}",
+        );
+        let staged_note = app
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .any(|s| s.contains("Staged") && s.contains(&url));
+        assert!(staged_note, "expected a 'Staged ...' Note entry");
+    }
+
+    #[tokio::test]
+    async fn stack_flattens_recursively() {
+        let mut app = build_app();
+        let hs = empty_host_slot();
+        let url = "https://y.example".to_string();
+        let effects = vec![Effect::Stack(vec![Effect::Stack(vec![Effect::OpenUrl {
+            url: url.clone(),
+            target: UrlTarget::ContinueConversation,
+        }])])];
+        apply_canvas_effects(&mut app, &hs, effects).await;
+        // Exactly one staged URL: the prompt's joined text contains the
+        // URL once.
+        let joined = app.input_textarea.lines().join("\n");
+        assert_eq!(
+            joined.matches(&url).count(),
+            1,
+            "recursion should apply the inner OpenUrl exactly once; got prompt {joined:?}",
+        );
+        // Exactly one "Staged" Note (the only inner effect produced one).
+        let staged_notes: Vec<&str> = app
+            .entries
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Note(s) if s.contains("Staged") => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            staged_notes.len(),
+            1,
+            "expected exactly one 'Staged' Note; got {staged_notes:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn open_url_system_browser_pushes_note_or_warn_on_failure() {
+        // The opener (xdg-open / open / start) may or may not be on PATH
+        // in CI; the function pushes a Note in either branch (success or
+        // failure). The test only asserts that *some* Note mentioning
+        // the URL exists — it doesn't predict which branch ran.
+        let mut app = build_app();
+        let hs = empty_host_slot();
+        let url = "https://z.example".to_string();
+        apply_canvas_effects(
+            &mut app,
+            &hs,
+            vec![Effect::OpenUrl {
+                url: url.clone(),
+                target: UrlTarget::SystemBrowser,
+            }],
+        )
+        .await;
+        let has_note = app.entries.iter().any(|e| match e {
+            Entry::Note(s) => s.contains(&url),
+            _ => false,
+        });
+        assert!(
+            has_note,
+            "expected a Note mentioning the URL (success or failure branch); got {:?}",
+            app.entries,
+        );
+    }
+
+    // ---- I10: handle_canvas_mouse dirty propagation ----
+
+    #[tokio::test]
+    async fn mouse_dirty_true_propagates() {
+        let mut app = build_app();
+        let id = app.canvas_registry.allocate_id();
+        app.canvas_registry.insert(
+            id,
+            Box::new(DispatchStub {
+                id,
+                last_event: Arc::new(Mutex::new(None)),
+                dispatch_result: Mutex::new(Some(Ok(InputOutcome {
+                    effects: vec![],
+                    dirty: true,
+                }))),
+            }),
+        );
+        let dirty = handle_canvas_mouse(&mut app, &empty_host_slot(), id, synthetic_mouse()).await;
+        assert!(dirty, "dirty=true from dispatch must propagate");
+    }
+
+    #[tokio::test]
+    async fn mouse_dirty_false_propagates() {
+        let mut app = build_app();
+        let id = app.canvas_registry.allocate_id();
+        app.canvas_registry.insert(
+            id,
+            Box::new(DispatchStub {
+                id,
+                last_event: Arc::new(Mutex::new(None)),
+                dispatch_result: Mutex::new(Some(Ok(InputOutcome {
+                    effects: vec![],
+                    dirty: false,
+                }))),
+            }),
+        );
+        let dirty = handle_canvas_mouse(&mut app, &empty_host_slot(), id, synthetic_mouse()).await;
+        assert!(!dirty, "dirty=false from dispatch must propagate");
+    }
+
+    #[tokio::test]
+    async fn mouse_missing_renderer_returns_false() {
+        let mut app = build_app();
+        // Allocate an id but DO NOT insert a renderer — handle_canvas_mouse
+        // must return false without panicking on the missing-renderer
+        // branch.
+        let id = app.canvas_registry.allocate_id();
+        let dirty = handle_canvas_mouse(&mut app, &empty_host_slot(), id, synthetic_mouse()).await;
+        assert!(!dirty);
+    }
+
+    #[tokio::test]
+    async fn mouse_dispatch_err_returns_false() {
+        let mut app = build_app();
+        let id = app.canvas_registry.allocate_id();
+        app.canvas_registry.insert(
+            id,
+            Box::new(DispatchStub {
+                id,
+                last_event: Arc::new(Mutex::new(None)),
+                dispatch_result: Mutex::new(Some(Err(PluginError::Internal("boom".to_string())))),
+            }),
+        );
+        let dirty = handle_canvas_mouse(&mut app, &empty_host_slot(), id, synthetic_mouse()).await;
+        assert!(!dirty, "Err from dispatch must yield dirty=false");
+    }
+
+    // ---- I11: Raw key dispatch ----
+
+    #[tokio::test]
+    async fn raw_key_reaches_renderer_dispatch() {
+        let mut app = build_app();
+        let id = app.canvas_registry.allocate_id();
+        // Keep a clone of `last_event` outside the box so the test can
+        // inspect what `dispatch` recorded.
+        let last_event = Arc::new(Mutex::new(None));
+        let stub = DispatchStub {
+            id,
+            last_event: last_event.clone(),
+            dispatch_result: Mutex::new(Some(Ok(InputOutcome {
+                effects: vec![],
+                dirty: false,
+            }))),
+        };
+        app.canvas_registry.insert(id, Box::new(stub));
+        app.entries.push(Entry::Canvas {
+            id,
+            source: "<p/>".into(),
+            source_preview: None,
+        });
+        app.focus_canvas(id, None);
+        let k = key(KeyCodePortable::Char('a'));
+        handle_focused_canvas_key(&mut app, &empty_host_slot(), id, None, k.clone()).await;
+        // The renderer's `dispatch` recorded the InputEvent it received.
+        let recorded = last_event.lock().unwrap().clone();
+        match recorded {
+            Some(savvagent_plugin::InputEvent::Key(recorded_key)) => {
+                assert_eq!(recorded_key.code, KeyCodePortable::Char('a'));
+                assert!(!recorded_key.modifiers.ctrl);
+                assert!(!recorded_key.modifiers.shift);
+                assert!(!recorded_key.modifiers.alt);
+            }
+            other => panic!("expected InputEvent::Key('a') to reach renderer; got {other:?}",),
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_key_propagates_effects() {
+        let mut app = build_app();
+        let id = app.canvas_registry.allocate_id();
+        let url = "x.example".to_string();
+        app.canvas_registry.insert(
+            id,
+            Box::new(DispatchStub {
+                id,
+                last_event: Arc::new(Mutex::new(None)),
+                dispatch_result: Mutex::new(Some(Ok(InputOutcome {
+                    effects: vec![Effect::OpenUrl {
+                        url: url.clone(),
+                        target: UrlTarget::ContinueConversation,
+                    }],
+                    dirty: true,
+                }))),
+            }),
+        );
+        app.entries.push(Entry::Canvas {
+            id,
+            source: "<p/>".into(),
+            source_preview: None,
+        });
+        app.focus_canvas(id, None);
+        let k = key(KeyCodePortable::Char('a'));
+        let dirty = handle_focused_canvas_key(&mut app, &empty_host_slot(), id, None, k).await;
+        assert!(dirty, "raw key must return outcome.dirty=true");
+        // apply_canvas_effects ran: the ContinueConversation effect
+        // flips InputMode back to Editing and stages the URL.
+        assert!(matches!(app.input_mode, InputMode::Editing));
+        let staged = app.input_textarea.lines().join("\n");
+        assert!(
+            staged.contains(&url),
+            "expected URL staged in prompt; got {staged:?}",
+        );
+    }
+
+    // NOTE: the plugin `OnFocusedCanvas` route is not exercised here —
+    // it requires constructing `plugin_registry` + `plugin_indexes`
+    // fixtures (>50 lines of setup) and is best tested in the plugin
+    // crate's own routing module.
 }

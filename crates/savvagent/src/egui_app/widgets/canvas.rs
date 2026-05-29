@@ -532,4 +532,123 @@ mod tests {
         let ev = egui::Event::PointerMoved(pos);
         assert!(mouse_event_to_portable(&ev, rect, 1.0, Some(pos)).is_none());
     }
+
+    #[test]
+    fn mouse_pointer_moved_inside_rect_returns_some_move() {
+        use savvagent_plugin::MouseEventKind;
+
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(100.0, 50.0));
+        let pos = egui::pos2(30.0, 40.0);
+        let ev = egui::Event::PointerMoved(pos);
+        let m = mouse_event_to_portable(&ev, rect, 2.0, Some(pos)).expect("inside rect");
+        assert_eq!(m.kind, MouseEventKind::Move);
+        assert_eq!(m.button, None);
+        // (30 - 10) * 2.0 = 40px ; (40 - 20) * 2.0 = 40px.
+        assert_eq!(m.x_pixel, 40);
+        assert_eq!(m.y_pixel, 40);
+    }
+
+    #[test]
+    fn mouse_wheel_up_returns_scroll_up() {
+        use savvagent_plugin::MouseEventKind;
+
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let pos = egui::pos2(50.0, 50.0);
+        let ev = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::default(),
+        };
+        let m = mouse_event_to_portable(&ev, rect, 1.0, Some(pos)).expect("wheel inside");
+        assert_eq!(m.kind, MouseEventKind::ScrollUp);
+        assert_eq!(m.button, None);
+    }
+
+    #[test]
+    fn mouse_wheel_down_returns_scroll_down() {
+        use savvagent_plugin::MouseEventKind;
+
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let pos = egui::pos2(50.0, 50.0);
+        let ev = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -1.0),
+            modifiers: egui::Modifiers::default(),
+        };
+        let m = mouse_event_to_portable(&ev, rect, 1.0, Some(pos)).expect("wheel inside");
+        assert_eq!(m.kind, MouseEventKind::ScrollDown);
+    }
+
+    #[test]
+    fn mouse_wheel_zero_delta_returns_none() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let pos = egui::pos2(50.0, 50.0);
+        let ev = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 0.0),
+            modifiers: egui::Modifiers::default(),
+        };
+        assert!(mouse_event_to_portable(&ev, rect, 1.0, Some(pos)).is_none());
+    }
+
+    #[test]
+    fn mouse_wheel_without_pointer_returns_none() {
+        // Regression net for C1: wheel events have no embedded position,
+        // so a `None` pointer position must NOT fall back to `rect.center()`
+        // (which would silently claim the event for every canvas).
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let ev = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::default(),
+        };
+        assert!(mouse_event_to_portable(&ev, rect, 1.0, None).is_none());
+    }
+
+    #[test]
+    fn mouse_wheel_pointer_outside_returns_none() {
+        // Regression net for C1: a wheel event with a pointer outside this
+        // canvas's rect must not claim the event (it belongs to whichever
+        // canvas the pointer is over, if any).
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
+        let outside = egui::pos2(100.0, 100.0);
+        let ev = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::default(),
+        };
+        assert!(mouse_event_to_portable(&ev, rect, 1.0, Some(outside)).is_none());
+    }
+
+    #[test]
+    fn mouse_unsupported_event_returns_none() {
+        // `_ => return None` fallback: an event variant the translator
+        // doesn't recognize (here, window-focus) yields None.
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let ev = egui::Event::WindowFocused(true);
+        assert!(mouse_event_to_portable(&ev, rect, 1.0, None).is_none());
+    }
+
+    #[test]
+    fn mouse_extra_button_yields_no_button() {
+        // egui exposes Extra1/Extra2 PointerButtons; the translator's
+        // `_ => None` arm in the button-match keeps `button: None` but
+        // still emits the Press/Release kind. Document that behavior.
+        use savvagent_plugin::MouseEventKind;
+
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let pos = egui::pos2(50.0, 50.0);
+        let ev = egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Extra1,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        };
+        let m = mouse_event_to_portable(&ev, rect, 1.0, Some(pos)).expect("inside rect");
+        assert_eq!(m.kind, MouseEventKind::Press);
+        assert_eq!(
+            m.button, None,
+            "Extra1 maps to button: None (no plugin-portable variant)",
+        );
+    }
 }
