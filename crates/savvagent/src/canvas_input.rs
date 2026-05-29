@@ -12,7 +12,8 @@
 
 use savvagent_plugin::ContentBlockId;
 
-use crate::app::Entry;
+use crate::app::{App, Entry, InputMode, make_input_textarea};
+use crate::HostSlot;
 
 /// Direction of canvas-to-canvas traversal (`Ctrl-J` / `Ctrl-K`).
 pub(crate) const CANVAS_NEXT: i32 = 1;
@@ -58,4 +59,61 @@ pub(crate) fn cycle_index(current: Option<u32>, len: usize, delta: i32) -> Optio
         None => len_i - 1,
     };
     Some(next as u32)
+}
+
+/// Apply the effects a canvas renderer emitted in response to an input
+/// event. Phase 2.0 wires the two `OpenUrl` targets:
+///
+/// * `SystemBrowser` shells out to the OS opener (`xdg-open` / `open` /
+///   `start`); failures are warn-only so a missing opener never crashes the
+///   TUI. (Task 24 will consolidate this into an `open_in_browser` helper.)
+/// * `ContinueConversation` stages the URL into the prompt editor and notes
+///   it, leaving the user to review and submit — programmatic prompt
+///   submission (`Effect::PromptSend`) is still a stub, so we don't fabricate
+///   a turn here.
+///
+/// `Effect::Stack` is flattened recursively. Every other effect is logged and
+/// ignored for Phase 2.0 (canvases only emit `OpenUrl` today).
+pub(crate) async fn apply_canvas_effects(
+    app: &mut App,
+    _host_slot: &HostSlot,
+    effects: Vec<savvagent_plugin::Effect>,
+) {
+    for effect in effects {
+        match effect {
+            savvagent_plugin::Effect::OpenUrl { url, target } => match target {
+                savvagent_plugin::UrlTarget::SystemBrowser => {
+                    let opener = if cfg!(target_os = "macos") {
+                        "open"
+                    } else if cfg!(target_os = "windows") {
+                        "start"
+                    } else {
+                        "xdg-open"
+                    };
+                    match tokio::process::Command::new(opener).arg(&url).spawn() {
+                        Ok(_) => {
+                            app.push_note(format!("Opening {url} in browser"));
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, %url, "failed to open URL in browser");
+                            app.push_note(format!("Failed to open {url}: {err}"));
+                        }
+                    }
+                }
+                savvagent_plugin::UrlTarget::ContinueConversation => {
+                    app.input_textarea = make_input_textarea(std::iter::once(url.clone()));
+                    app.input_mode = InputMode::Editing;
+                    app.push_note(format!(
+                        "Staged \"{url}\" in the prompt — press Enter to send"
+                    ));
+                }
+            },
+            savvagent_plugin::Effect::Stack(inner) => {
+                Box::pin(apply_canvas_effects(app, _host_slot, inner)).await;
+            }
+            other => {
+                tracing::debug!(effect = ?other, "ignoring canvas effect (unhandled in Phase 2.0)");
+            }
+        }
+    }
 }
