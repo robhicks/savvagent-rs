@@ -274,3 +274,39 @@ pub async fn handle_focused_canvas_key(
         apply_canvas_effects(app, host_slot, effects).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{App, InputMode};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn build_app() -> App {
+        App::new("test-model".into(), PathBuf::from("/tmp"), "en".to_string())
+    }
+
+    fn empty_host_slot() -> crate::HostSlot {
+        Arc::new(RwLock::new(None))
+    }
+
+    fn key(code: KeyCodePortable) -> KeyEventPortable {
+        KeyEventPortable {
+            code,
+            modifiers: savvagent_plugin::KeyMods::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn esc_unfocuses_canvas() {
+        let mut app = build_app();
+        let id = ContentBlockId(0);
+        // Manually seed focus state — no renderer needs to exist for the
+        // built-in Esc branch.
+        app.input_mode = InputMode::Canvas { id, element_idx: None };
+        let hs = empty_host_slot();
+        handle_focused_canvas_key(&mut app, &hs, id, None, key(KeyCodePortable::Esc)).await;
+        assert!(matches!(app.input_mode, InputMode::Editing));
+    }
+}

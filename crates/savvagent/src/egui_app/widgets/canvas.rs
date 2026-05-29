@@ -214,6 +214,36 @@ pub fn paint(
         }
     }
 
+    // Keyboard dispatch: only when this canvas holds focus. Keys consumed
+    // here must not also drive the home keybindings — the focused-canvas
+    // handler owns the precedence ladder (built-ins → plugin → raw).
+    if app.is_canvas_focused(id) {
+        let element_idx = match app.input_mode {
+            crate::app::InputMode::Canvas { element_idx, .. } => element_idx,
+            _ => None,
+        };
+        let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
+        for ev in events {
+            let Some(portable) = crate::egui_app::convert::egui_event_to_portable(&ev) else {
+                continue;
+            };
+            let host_slot = host_slot.clone();
+            futures::executor::block_on(
+                crate::canvas_input::handle_focused_canvas_key(
+                    app,
+                    &host_slot,
+                    id,
+                    element_idx,
+                    portable,
+                ),
+            );
+            // Conservatively invalidate the cache once per focused-canvas
+            // key event — many built-in shortcuts (Tab/BackTab) mutate the
+            // renderer's focus state and the next paint should re-render.
+            cache.invalidate(id);
+        }
+    }
+
     // Report to `paint_log` whether this canvas absorbed a click this
     // frame; used to drive global click-outside unfocus.
     resp.clicked()
