@@ -6,16 +6,17 @@
 
 use std::collections::HashMap;
 
-use savvagent_plugin::{ContentBlockId, Frame, PixelFormat};
+use savvagent_plugin::{ContentBlockId, Frame, PixelFormat, PixelSize};
+
+use crate::app::App;
+use crate::palette::Palette;
 
 /// One cached texture for an `Entry::Canvas`. The pair `(width_px, height_px)`
 /// records the size the texture was built at so a width change invalidates
 /// the cache without re-querying the handle.
 pub(super) struct GuiTexEntry {
     pub(super) width_px: u32,
-    #[allow(dead_code)] // Used by Task 7 (paint()) to size the sampled rect.
     pub(super) height_px: u32,
-    #[allow(dead_code)] // Used by Task 7 (paint()) to draw the texture.
     pub(super) handle: egui::TextureHandle,
 }
 
@@ -55,7 +56,6 @@ impl GuiCanvasCache {
     }
 
     /// Internal: get the current entry for `id` whose `width_px` matches.
-    #[allow(dead_code)] // Used by Task 7 (paint()).
     pub(super) fn get_if_fits(
         &self,
         id: ContentBlockId,
@@ -66,7 +66,6 @@ impl GuiCanvasCache {
     }
 
     /// Internal: insert (or replace) the entry for `id`.
-    #[allow(dead_code)] // Used by Task 7 (paint()).
     pub(super) fn insert(
         &mut self,
         id: ContentBlockId,
@@ -89,7 +88,6 @@ impl GuiCanvasCache {
 /// Accepts both RGBA8 (canonical) and BGRA8 (byte-swapped) frames.
 /// Returns `None` for zero-sized frames or when the byte length does not
 /// match `width * height * 4`.
-#[allow(dead_code)] // Used by Task 7 (paint()).
 pub(super) fn frame_to_color_image(frame: &Frame) -> Option<egui::ColorImage> {
     if frame.width == 0 || frame.height == 0 {
         return None;
@@ -110,6 +108,82 @@ pub(super) fn frame_to_color_image(frame: &Frame) -> Option<egui::ColorImage> {
         [frame.width as usize, frame.height as usize],
         &rgba,
     ))
+}
+
+/// Paint one `Entry::Canvas` into the current `ui`.
+///
+/// Static rendering only in this task: render-or-cache, draw the texture,
+/// stop. Mouse, focus, and keyboard wiring land in Tasks 9/10/11.
+#[allow(dead_code)] // Wired into egui_app/view.rs in Task 8.
+#[allow(clippy::too_many_arguments)] // Distinct structural inputs; the signature is shared with Tasks 8-11.
+pub fn paint(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    app: &mut App,
+    cache: &mut GuiCanvasCache,
+    id: ContentBlockId,
+    source: &str,
+    source_preview: Option<&str>,
+    _palette: &Palette,
+) {
+    // Streaming preview: monospace text, no Blitz call.
+    if let Some(preview) = source_preview {
+        ui.label(egui::RichText::new("Rendering HTML canvas…").weak());
+        for line in preview.split('\n') {
+            ui.label(egui::RichText::new(line).monospace());
+        }
+        return;
+    }
+    if source.is_empty() {
+        ui.weak("[empty canvas]");
+        return;
+    }
+
+    let ppp = ctx.pixels_per_point();
+    let width_pts = ui.available_width().max(1.0);
+    let width_px = (width_pts * ppp).floor().max(1.0) as u32;
+
+    // Cache hit?
+    if let Some(entry) = cache.get_if_fits(id, width_px) {
+        let display = egui::vec2(
+            entry.width_px as f32 / ppp,
+            entry.height_px as f32 / ppp,
+        );
+        ui.add(
+            egui::Image::new(egui::load::SizedTexture::new(entry.handle.id(), display))
+                .sense(egui::Sense::click_and_drag()),
+        );
+        return;
+    }
+
+    // Cache miss: render + upload.
+    let frame = match app.canvas_registry.get_mut(id) {
+        Some(r) => r.render(PixelSize {
+            width: width_px,
+            height: 0,
+        }),
+        None => {
+            tracing::warn!(?id, "no renderer for canvas — skipping paint");
+            ui.weak("[canvas renderer missing]");
+            return;
+        }
+    };
+    let Some(img) = frame_to_color_image(&frame) else {
+        tracing::warn!(?id, w = frame.width, h = frame.height, "bad canvas frame");
+        ui.weak("[canvas render failed]");
+        return;
+    };
+    let handle = ctx.load_texture(
+        format!("canvas-{}", id.0),
+        img,
+        egui::TextureOptions::LINEAR,
+    );
+    let display = egui::vec2(frame.width as f32 / ppp, frame.height as f32 / ppp);
+    let _resp = ui.add(
+        egui::Image::new(egui::load::SizedTexture::new(handle.id(), display))
+            .sense(egui::Sense::click_and_drag()),
+    );
+    cache.insert(id, frame.width, frame.height, handle);
 }
 
 #[cfg(test)]
