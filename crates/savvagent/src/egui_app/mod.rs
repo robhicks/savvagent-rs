@@ -138,6 +138,16 @@ impl SavvagentApp {
         })
     }
 
+    /// Drop every cached GUI texture and the renderer-side ratatui state
+    /// the TUI keeps. Call this anywhere `App::canvas_registry.clear` runs
+    /// — today that's only inside `App::replay_transcript`, which the GUI
+    /// path does not yet invoke (Plan 5 / GUI `/resume` wires this).
+    #[allow(dead_code)] // Consumed by GUI /resume in a later plan.
+    pub(crate) fn clear_canvas_caches(&mut self) {
+        self.app.canvas_registry.clear();
+        self.gui_canvas_cache.clear();
+    }
+
     /// Read-only access to the cached render model for the paint pass.
     pub(crate) fn render_cache(&self) -> &RenderModelCache {
         &self.render_cache
