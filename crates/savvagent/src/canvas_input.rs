@@ -10,10 +10,10 @@
 
 #![allow(dead_code)] // items are wired up over the next few tasks
 
-use savvagent_plugin::ContentBlockId;
+use savvagent_plugin::{ContentBlockId, KeyCodePortable, KeyEventPortable};
 
-use crate::app::{App, Entry, InputMode, make_input_textarea};
 use crate::HostSlot;
+use crate::app::{App, Entry, InputMode, make_input_textarea};
 
 /// Direction of canvas-to-canvas traversal (`Ctrl-J` / `Ctrl-K`).
 pub(crate) const CANVAS_NEXT: i32 = 1;
@@ -115,5 +115,138 @@ pub(crate) async fn apply_canvas_effects(
                 tracing::debug!(effect = ?other, "ignoring canvas effect (unhandled in Phase 2.0)");
             }
         }
+    }
+}
+
+/// Handle a key event delivered while a canvas holds focus.
+///
+/// Precedence:
+/// 1. Built-in keys (`Esc`, `Tab`, `BackTab`, `Ctrl-J`, `Ctrl-K`, `Ctrl-O`).
+/// 2. Plugin `KeyScope::OnFocusedCanvas` bindings.
+/// 3. Raw key dispatch to the focused renderer.
+///
+/// Mirrors the TUI's previous inline handler in `main.rs` — the move
+/// preserves behaviour byte-for-byte; only the entry shape changes.
+pub async fn handle_focused_canvas_key(
+    app: &mut App,
+    host_slot: &HostSlot,
+    id: ContentBlockId,
+    element_idx: Option<u32>,
+    key: KeyEventPortable,
+) {
+    let ctrl = key.modifiers.ctrl;
+
+    // --- 1. Built-in keys (always win) ---
+    match key.code {
+        KeyCodePortable::Esc => {
+            app.unfocus_canvas();
+            return;
+        }
+        KeyCodePortable::Tab => {
+            let len = app
+                .canvas_registry
+                .get_mut(id)
+                .map(|r| r.focusable_elements().len())
+                .unwrap_or(0);
+            let next = cycle_index(element_idx, len, 1);
+            if let Some(r) = app.canvas_registry.get_mut(id) {
+                r.set_focus(next);
+            }
+            app.set_canvas_element(next);
+            return;
+        }
+        KeyCodePortable::BackTab => {
+            let len = app
+                .canvas_registry
+                .get_mut(id)
+                .map(|r| r.focusable_elements().len())
+                .unwrap_or(0);
+            let next = cycle_index(element_idx, len, -1);
+            if let Some(r) = app.canvas_registry.get_mut(id) {
+                r.set_focus(next);
+            }
+            app.set_canvas_element(next);
+            return;
+        }
+        KeyCodePortable::Char('j') if ctrl => {
+            if let Some(next) = adjacent_canvas(&app.entries, id, CANVAS_NEXT) {
+                app.focus_canvas(next, None);
+            }
+            return;
+        }
+        KeyCodePortable::Char('k') if ctrl => {
+            if let Some(prev) = adjacent_canvas(&app.entries, id, CANVAS_PREV) {
+                app.focus_canvas(prev, None);
+            }
+            return;
+        }
+        KeyCodePortable::Char('o') if ctrl => {
+            // Open the focused canvas's final source in the system browser.
+            let source = app.entries.iter().find_map(|e| match e {
+                Entry::Canvas {
+                    id: eid, source, ..
+                } if *eid == id => Some(source.clone()),
+                _ => None,
+            });
+            match source {
+                Some(source) => {
+                    use crate::plugin::builtin::html_canvas::open_in_browser;
+                    match open_in_browser::write_temp_html(id, &source) {
+                        Ok(path) => match open_in_browser::shell_open(&path) {
+                            Ok(()) => app.push_note(format!(
+                                "Opening canvas in browser ({})",
+                                path.display()
+                            )),
+                            Err(err) => {
+                                tracing::warn!(error = %err, "failed to open canvas in browser");
+                                app.push_note(format!("Failed to open canvas: {err}"));
+                            }
+                        },
+                        Err(err) => {
+                            tracing::warn!(error = %err, "failed to write canvas temp file");
+                            app.push_note(format!("Failed to write canvas file: {err}"));
+                        }
+                    }
+                }
+                None => app.push_note("No source available for this canvas yet".to_string()),
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    // --- 2. Plugin OnFocusedCanvas bindings (built-in keys already missed) ---
+    if let (Some(_reg), Some(idx)) = (&app.plugin_registry, &app.plugin_indexes) {
+        let action = {
+            let idx_guard = idx.read().await;
+            let router = crate::plugin::keybindings::KeybindingRouter::new(&idx_guard);
+            router.route_canvas(&key)
+        };
+        if let Some(action) = action {
+            crate::dispatch_bound_action(app, action).await;
+            return;
+        }
+    }
+
+    // --- 3. Raw key dispatch to the renderer ---
+    // Borrow the renderer mutably only for the dispatch await; `effects`
+    // is owned afterwards so no borrow of `app` is held across
+    // `apply_canvas_effects` (mirrors the mouse handler).
+    let effects = if let Some(renderer) = app.canvas_registry.get_mut(id) {
+        match renderer
+            .dispatch(savvagent_plugin::InputEvent::Key(key))
+            .await
+        {
+            Ok(outcome) => Some(outcome.effects),
+            Err(err) => {
+                tracing::warn!(error = %err, "canvas key dispatch failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(effects) = effects {
+        apply_canvas_effects(app, host_slot, effects).await;
     }
 }

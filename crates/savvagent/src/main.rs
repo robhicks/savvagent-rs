@@ -3089,7 +3089,8 @@ async fn run_app(
                                 None
                             };
                             if let Some(effects) = effects {
-                                crate::canvas_input::apply_canvas_effects(app, &host_slot, effects).await;
+                                crate::canvas_input::apply_canvas_effects(app, &host_slot, effects)
+                                    .await;
                             }
                         }
                     }
@@ -3732,143 +3733,20 @@ async fn run_app(
             // Canvas focus: built-in keys (Esc / Tab / BackTab / Ctrl-J /
             // Ctrl-K / Ctrl-O) take precedence over plugin
             // `OnFocusedCanvas` bindings, which in turn precede a raw key
-            // dispatch to the renderer. See `handle_canvas_key`.
+            // dispatch to the renderer. See
+            // `canvas_input::handle_focused_canvas_key`.
             InputMode::Canvas { id, element_idx } => {
-                handle_canvas_key(app, *key, id, element_idx, &host_slot).await;
+                let portable = crate::plugin::convert::key_event_to_portable(*key);
+                crate::canvas_input::handle_focused_canvas_key(
+                    app,
+                    &host_slot,
+                    id,
+                    element_idx,
+                    portable,
+                )
+                .await;
             }
         }
-    }
-}
-
-/// Handle a key while a canvas holds focus. Precedence:
-/// 1. Built-in keys (Esc, Tab, BackTab, Ctrl-J/K, Ctrl-O).
-/// 2. Plugin `KeyScope::OnFocusedCanvas` bindings.
-/// 3. Raw key dispatch to the focused renderer.
-async fn handle_canvas_key(
-    app: &mut App,
-    key: crossterm::event::KeyEvent,
-    id: savvagent_plugin::ContentBlockId,
-    element_idx: Option<u32>,
-    host_slot: &HostSlot,
-) {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    use crate::canvas_input::{adjacent_canvas, cycle_index, CANVAS_NEXT, CANVAS_PREV};
-
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-    // --- 1. Built-in keys (always win) ---
-    match key.code {
-        KeyCode::Esc => {
-            app.unfocus_canvas();
-            return;
-        }
-        KeyCode::Tab => {
-            let len = app
-                .canvas_registry
-                .get_mut(id)
-                .map(|r| r.focusable_elements().len())
-                .unwrap_or(0);
-            let next = cycle_index(element_idx, len, 1);
-            if let Some(r) = app.canvas_registry.get_mut(id) {
-                r.set_focus(next);
-            }
-            app.set_canvas_element(next);
-            return;
-        }
-        KeyCode::BackTab => {
-            let len = app
-                .canvas_registry
-                .get_mut(id)
-                .map(|r| r.focusable_elements().len())
-                .unwrap_or(0);
-            let next = cycle_index(element_idx, len, -1);
-            if let Some(r) = app.canvas_registry.get_mut(id) {
-                r.set_focus(next);
-            }
-            app.set_canvas_element(next);
-            return;
-        }
-        KeyCode::Char('j') if ctrl => {
-            if let Some(next) = adjacent_canvas(&app.entries, id, CANVAS_NEXT) {
-                app.focus_canvas(next, None);
-            }
-            return;
-        }
-        KeyCode::Char('k') if ctrl => {
-            if let Some(prev) = adjacent_canvas(&app.entries, id, CANVAS_PREV) {
-                app.focus_canvas(prev, None);
-            }
-            return;
-        }
-        KeyCode::Char('o') if ctrl => {
-            // Open the focused canvas's final source in the system browser.
-            let source = app.entries.iter().find_map(|e| match e {
-                Entry::Canvas {
-                    id: eid, source, ..
-                } if *eid == id => Some(source.clone()),
-                _ => None,
-            });
-            match source {
-                Some(source) => {
-                    use crate::plugin::builtin::html_canvas::open_in_browser;
-                    match open_in_browser::write_temp_html(id, &source) {
-                        Ok(path) => match open_in_browser::shell_open(&path) {
-                            Ok(()) => app.push_note(format!(
-                                "Opening canvas in browser ({})",
-                                path.display()
-                            )),
-                            Err(err) => {
-                                tracing::warn!(error = %err, "failed to open canvas in browser");
-                                app.push_note(format!("Failed to open canvas: {err}"));
-                            }
-                        },
-                        Err(err) => {
-                            tracing::warn!(error = %err, "failed to write canvas temp file");
-                            app.push_note(format!("Failed to write canvas file: {err}"));
-                        }
-                    }
-                }
-                None => app.push_note("No source available for this canvas yet".to_string()),
-            }
-            return;
-        }
-        _ => {}
-    }
-
-    // --- 2. Plugin OnFocusedCanvas bindings (built-in keys already missed) ---
-    let portable = crate::plugin::convert::key_event_to_portable(key);
-    if let (Some(_reg), Some(idx)) = (&app.plugin_registry, &app.plugin_indexes) {
-        let action = {
-            let idx_guard = idx.read().await;
-            let router = crate::plugin::keybindings::KeybindingRouter::new(&idx_guard);
-            router.route_canvas(&portable)
-        };
-        if let Some(action) = action {
-            dispatch_bound_action(app, action).await;
-            return;
-        }
-    }
-
-    // --- 3. Raw key dispatch to the renderer ---
-    // Borrow the renderer mutably only for the dispatch await; `effects`
-    // is owned afterwards so no borrow of `app` is held across
-    // `apply_canvas_effects` (mirrors the mouse handler).
-    let effects = if let Some(renderer) = app.canvas_registry.get_mut(id) {
-        match renderer
-            .dispatch(savvagent_plugin::InputEvent::Key(portable))
-            .await
-        {
-            Ok(outcome) => Some(outcome.effects),
-            Err(err) => {
-                tracing::warn!(error = %err, "canvas key dispatch failed");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(effects) = effects {
-        crate::canvas_input::apply_canvas_effects(app, host_slot, effects).await;
     }
 }
 
@@ -3876,7 +3754,7 @@ async fn handle_canvas_key(
 /// keybinding router. Logs and surfaces errors to the user via
 /// `push_styled_note` so a malformed binding or runtime error doesn't
 /// silently no-op a keystroke.
-async fn dispatch_bound_action(app: &mut App, action: savvagent_plugin::BoundAction) {
+pub(crate) async fn dispatch_bound_action(app: &mut App, action: savvagent_plugin::BoundAction) {
     match action {
         savvagent_plugin::BoundAction::EmitEffect(effect) => {
             if let Err(e) = crate::plugin::effects::apply_effects(app, vec![effect]).await {
@@ -4489,10 +4367,13 @@ anthropic = "from-models-toml"
 #[cfg(test)]
 mod canvas_key_tests {
     use super::*;
-    use crate::canvas_input::{adjacent_canvas, cycle_index, CANVAS_NEXT, CANVAS_PREV};
+    use crate::canvas_input::{
+        CANVAS_NEXT, CANVAS_PREV, adjacent_canvas, cycle_index, handle_focused_canvas_key,
+    };
     use async_trait::async_trait;
     use savvagent_plugin::{
-        ContentBlockId, ContentRenderer, FocusableElement, Frame, PixelFormat, PixelSize, Rect,
+        ContentBlockId, ContentRenderer, FocusableElement, Frame, KeyCodePortable,
+        KeyEventPortable, KeyMods, PixelFormat, PixelSize, Rect,
     };
 
     /// Build an empty `App` for canvas-key tests.
@@ -4505,8 +4386,11 @@ mod canvas_key_tests {
         Arc::new(RwLock::new(None))
     }
 
-    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
-        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+    fn key(code: KeyCodePortable) -> KeyEventPortable {
+        KeyEventPortable {
+            code,
+            modifiers: KeyMods::default(),
+        }
     }
 
     /// Stub renderer exposing `n` focusable elements and recording the
@@ -4605,7 +4489,14 @@ mod canvas_key_tests {
         app.entries.push(canvas(id.0));
         app.focus_canvas(id, None);
         assert!(app.is_canvas_focused(id));
-        handle_canvas_key(&mut app, key(KeyCode::Esc), id, None, &empty_host_slot()).await;
+        handle_focused_canvas_key(
+            &mut app,
+            &empty_host_slot(),
+            id,
+            None,
+            key(KeyCodePortable::Esc),
+        )
+        .await;
         assert!(matches!(app.input_mode, InputMode::Editing));
     }
 
@@ -4625,7 +4516,14 @@ mod canvas_key_tests {
         app.focus_canvas(id, None);
 
         // None -> 0
-        handle_canvas_key(&mut app, key(KeyCode::Tab), id, None, &empty_host_slot()).await;
+        handle_focused_canvas_key(
+            &mut app,
+            &empty_host_slot(),
+            id,
+            None,
+            key(KeyCodePortable::Tab),
+        )
+        .await;
         assert!(matches!(
             app.input_mode,
             InputMode::Canvas {
@@ -4635,7 +4533,14 @@ mod canvas_key_tests {
         ));
 
         // 0 -> 1
-        handle_canvas_key(&mut app, key(KeyCode::Tab), id, Some(0), &empty_host_slot()).await;
+        handle_focused_canvas_key(
+            &mut app,
+            &empty_host_slot(),
+            id,
+            Some(0),
+            key(KeyCodePortable::Tab),
+        )
+        .await;
         assert!(matches!(
             app.input_mode,
             InputMode::Canvas {
@@ -4645,12 +4550,12 @@ mod canvas_key_tests {
         ));
 
         // BackTab 1 -> 0
-        handle_canvas_key(
+        handle_focused_canvas_key(
             &mut app,
-            key(KeyCode::BackTab),
+            &empty_host_slot(),
             id,
             Some(1),
-            &empty_host_slot(),
+            key(KeyCodePortable::BackTab),
         )
         .await;
         assert!(matches!(
@@ -4671,9 +4576,14 @@ mod canvas_key_tests {
         app.entries.push(canvas(b.0));
         app.focus_canvas(a, None);
 
-        let mut k = key(KeyCode::Char('j'));
-        k.modifiers = crossterm::event::KeyModifiers::CONTROL;
-        handle_canvas_key(&mut app, k, a, None, &empty_host_slot()).await;
+        let k = KeyEventPortable {
+            code: KeyCodePortable::Char('j'),
+            modifiers: KeyMods {
+                ctrl: true,
+                ..KeyMods::default()
+            },
+        };
+        handle_focused_canvas_key(&mut app, &empty_host_slot(), a, None, k).await;
         assert!(app.is_canvas_focused(b), "Ctrl-J moves to the next canvas");
     }
 }
