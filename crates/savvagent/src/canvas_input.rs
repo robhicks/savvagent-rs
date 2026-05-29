@@ -8,9 +8,9 @@
 //! (Esc / Tab / BackTab / Ctrl-J / Ctrl-K / Ctrl-O) or plugin
 //! `OnFocusedCanvas` keybinding dispatch.
 
-#![allow(dead_code)] // items are wired up over the next few tasks
-
-use savvagent_plugin::{ContentBlockId, InputEvent, KeyCodePortable, KeyEventPortable, MouseEventPortable};
+use savvagent_plugin::{
+    ContentBlockId, InputEvent, KeyCodePortable, KeyEventPortable, MouseEventPortable,
+};
 
 use crate::HostSlot;
 use crate::app::{App, Entry, InputMode, make_input_textarea};
@@ -304,7 +304,10 @@ mod tests {
         let id = ContentBlockId(0);
         // Manually seed focus state — no renderer needs to exist for the
         // built-in Esc branch.
-        app.input_mode = InputMode::Canvas { id, element_idx: None };
+        app.input_mode = InputMode::Canvas {
+            id,
+            element_idx: None,
+        };
         let hs = empty_host_slot();
         handle_focused_canvas_key(&mut app, &hs, id, None, key(KeyCodePortable::Esc)).await;
         assert!(matches!(app.input_mode, InputMode::Editing));

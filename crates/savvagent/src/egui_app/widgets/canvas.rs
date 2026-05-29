@@ -37,7 +37,6 @@ impl std::fmt::Debug for GuiCanvasCache {
 }
 
 impl GuiCanvasCache {
-    #[allow(dead_code)] // Wired into App in Task 8.
     pub fn new() -> Self {
         Self::default()
     }
@@ -50,17 +49,12 @@ impl GuiCanvasCache {
     }
 
     /// Drop the cached texture for `id` if present.
-    #[allow(dead_code)] // Wired into dispatch in Task 9.
     pub fn invalidate(&mut self, id: ContentBlockId) {
         self.textures.remove(&id);
     }
 
     /// Internal: get the current entry for `id` whose `width_px` matches.
-    pub(super) fn get_if_fits(
-        &self,
-        id: ContentBlockId,
-        width_px: u32,
-    ) -> Option<&GuiTexEntry> {
+    pub(super) fn get_if_fits(&self, id: ContentBlockId, width_px: u32) -> Option<&GuiTexEntry> {
         let entry = self.textures.get(&id)?;
         (entry.width_px == width_px).then_some(entry)
     }
@@ -148,10 +142,7 @@ pub fn paint(
 
     // Two paths build a Response; both must surface it for input handling.
     let resp = if let Some(entry) = cache.get_if_fits(id, width_px) {
-        let display = egui::vec2(
-            entry.width_px as f32 / ppp,
-            entry.height_px as f32 / ppp,
-        );
+        let display = egui::vec2(entry.width_px as f32 / ppp, entry.height_px as f32 / ppp);
         ui.add(
             egui::Image::new(egui::load::SizedTexture::new(entry.handle.id(), display))
                 .sense(egui::Sense::click_and_drag()),
@@ -205,9 +196,9 @@ pub fn paint(
             // iteration so we re-enter freshly each dispatch.
             let _guard = rt.enter();
             let host_slot = host_slot.clone();
-            let dirty = futures::executor::block_on(
-                crate::canvas_input::handle_canvas_mouse(app, &host_slot, id, mouse),
-            );
+            let dirty = futures::executor::block_on(crate::canvas_input::handle_canvas_mouse(
+                app, &host_slot, id, mouse,
+            ));
             if dirty {
                 cache.invalidate(id);
             }
@@ -217,7 +208,11 @@ pub fn paint(
     // Keyboard dispatch: only when this canvas holds focus. Keys consumed
     // here must not also drive the home keybindings — the focused-canvas
     // handler owns the precedence ladder (built-ins → plugin → raw).
-    if app.is_canvas_focused(id) {
+    // Skip the keyboard branch on the frame the canvas just received focus.
+    // Otherwise a Tab keystroke that egui already routed to the prompt's
+    // TextEdit earlier in this frame would be re-dispatched to the canvas
+    // via `ctx.input(|i| i.events.clone())`.
+    if app.is_canvas_focused(id) && !resp.clicked() {
         let element_idx = match app.input_mode {
             crate::app::InputMode::Canvas { element_idx, .. } => element_idx,
             _ => None,
@@ -228,15 +223,13 @@ pub fn paint(
                 continue;
             };
             let host_slot = host_slot.clone();
-            futures::executor::block_on(
-                crate::canvas_input::handle_focused_canvas_key(
-                    app,
-                    &host_slot,
-                    id,
-                    element_idx,
-                    portable,
-                ),
-            );
+            futures::executor::block_on(crate::canvas_input::handle_focused_canvas_key(
+                app,
+                &host_slot,
+                id,
+                element_idx,
+                portable,
+            ));
             // Conservatively invalidate the cache once per focused-canvas
             // key event — many built-in shortcuts (Tab/BackTab) mutate the
             // renderer's focus state and the next paint should re-render.
@@ -285,9 +278,7 @@ fn mouse_event_to_portable(
                 modifiers_to_portable(modifiers),
             )
         }
-        egui::Event::PointerMoved(pos) => {
-            (MouseEventKind::Move, None, *pos, KeyMods::default())
-        }
+        egui::Event::PointerMoved(pos) => (MouseEventKind::Move, None, *pos, KeyMods::default()),
         egui::Event::MouseWheel {
             delta, modifiers, ..
         } => {
@@ -444,10 +435,7 @@ mod tests {
     fn mouse_translates_pointer_button_inside_rect() {
         use savvagent_plugin::{MouseButton, MouseEventKind};
 
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(10.0, 20.0),
-            egui::vec2(100.0, 50.0),
-        );
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(100.0, 50.0));
         let ev = egui::Event::PointerButton {
             pos: egui::pos2(30.0, 40.0),
             button: egui::PointerButton::Primary,
@@ -464,10 +452,7 @@ mod tests {
 
     #[test]
     fn mouse_outside_rect_returns_none() {
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(0.0, 0.0),
-            egui::vec2(10.0, 10.0),
-        );
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
         let ev = egui::Event::PointerMoved(egui::pos2(100.0, 100.0));
         assert!(mouse_event_to_portable(&ev, rect, 1.0).is_none());
     }
