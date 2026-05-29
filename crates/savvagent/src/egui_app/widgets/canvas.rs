@@ -4,19 +4,18 @@
 //! This module owns only the GUI-side texture handles. See
 //! `docs/superpowers/specs/2026-05-28-v0.19.0-egui-canvas-design.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use savvagent_plugin::{ContentBlockId, Frame, PixelFormat, PixelSize};
 
 use crate::app::App;
 use crate::palette::Palette;
 
-/// One cached texture for an `Entry::Canvas`. The pair `(width_px, height_px)`
-/// records the size the texture was built at so a width change invalidates
-/// the cache without re-querying the handle.
+/// One cached texture for an `Entry::Canvas`. `size` records the pixel
+/// dimensions the texture was built at so a width change invalidates the
+/// cache without re-querying the handle.
 pub(super) struct GuiTexEntry {
-    pub(super) width_px: u32,
-    pub(super) height_px: u32,
+    pub(super) size: PixelSize,
     pub(super) handle: egui::TextureHandle,
 }
 
@@ -26,6 +25,11 @@ pub(super) struct GuiTexEntry {
 #[derive(Default)]
 pub struct GuiCanvasCache {
     textures: HashMap<ContentBlockId, GuiTexEntry>,
+    /// Per-id failure-mode tracking so the conversation Note stream is hit
+    /// at most once per canvas per failure mode (missing renderer or bad
+    /// frame). The set is pruned on `invalidate` and cleared on `clear`,
+    /// so a canvas that recovers can re-notify on a subsequent failure.
+    noted_failures: HashSet<ContentBlockId>,
 }
 
 impl std::fmt::Debug for GuiCanvasCache {
@@ -43,38 +47,33 @@ impl GuiCanvasCache {
 
     /// Drop every cached texture handle. Call alongside
     /// `App::canvas_registry.clear()` (today only in `App::replay_transcript`).
-    #[allow(dead_code)] // Wired into App in Task 12.
+    #[allow(dead_code)] // Consumed transitively via SavvagentApp::clear_canvas_caches.
     pub fn clear(&mut self) {
         self.textures.clear();
+        self.noted_failures.clear();
     }
 
-    /// Drop the cached texture for `id` if present.
+    /// Drop the cached texture for `id` if present. Also clears any
+    /// failure-mode marker for the id — the canvas may recover.
     pub fn invalidate(&mut self, id: ContentBlockId) {
         self.textures.remove(&id);
+        self.noted_failures.remove(&id);
     }
 
-    /// Internal: get the current entry for `id` whose `width_px` matches.
+    /// Internal: get the current entry for `id` whose width matches.
     pub(super) fn get_if_fits(&self, id: ContentBlockId, width_px: u32) -> Option<&GuiTexEntry> {
         let entry = self.textures.get(&id)?;
-        (entry.width_px == width_px).then_some(entry)
+        (entry.size.width == width_px).then_some(entry)
     }
 
     /// Internal: insert (or replace) the entry for `id`.
     pub(super) fn insert(
         &mut self,
         id: ContentBlockId,
-        width_px: u32,
-        height_px: u32,
+        size: PixelSize,
         handle: egui::TextureHandle,
     ) {
-        self.textures.insert(
-            id,
-            GuiTexEntry {
-                width_px,
-                height_px,
-                handle,
-            },
-        );
+        self.textures.insert(id, GuiTexEntry { size, handle });
     }
 }
 
@@ -110,7 +109,11 @@ pub(super) fn frame_to_color_image(frame: &Frame) -> Option<egui::ColorImage> {
 /// events for the painted rect and forwards them to
 /// [`crate::canvas_input::handle_canvas_mouse`]. A `dirty=true` outcome
 /// invalidates the texture cache so the next frame re-renders.
-#[allow(clippy::too_many_arguments)] // Distinct structural inputs; the signature is shared with Tasks 8-11.
+///
+/// When `screen_open` is `true`, event dispatch (mouse + keyboard +
+/// click-to-focus) is suppressed; only the texture render + cache logic
+/// runs. The screen overlay owns input while it is up.
+#[allow(clippy::too_many_arguments)] // Each arg is a distinct structural dependency.
 pub fn paint(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -121,6 +124,7 @@ pub fn paint(
     id: ContentBlockId,
     source: &str,
     source_preview: Option<&str>,
+    screen_open: bool,
     _palette: &Palette,
 ) -> bool {
     // Streaming preview: monospace text, no Blitz call.
@@ -129,10 +133,12 @@ pub fn paint(
         for line in preview.split('\n') {
             ui.label(egui::RichText::new(line).monospace());
         }
+        // Return false: a streaming preview has no renderer in the registry, so it can't receive focus yet.
         return false;
     }
     if source.is_empty() {
         ui.weak("[empty canvas]");
+        // No source yet; nothing to paint or to focus.
         return false;
     }
 
@@ -142,7 +148,10 @@ pub fn paint(
 
     // Two paths build a Response; both must surface it for input handling.
     let resp = if let Some(entry) = cache.get_if_fits(id, width_px) {
-        let display = egui::vec2(entry.width_px as f32 / ppp, entry.height_px as f32 / ppp);
+        let display = egui::vec2(
+            entry.size.width as f32 / ppp,
+            entry.size.height as f32 / ppp,
+        );
         ui.add(
             egui::Image::new(egui::load::SizedTexture::new(entry.handle.id(), display))
                 .sense(egui::Sense::click_and_drag()),
@@ -156,12 +165,40 @@ pub fn paint(
             None => {
                 tracing::warn!(?id, "no renderer for canvas — skipping paint");
                 ui.weak("[canvas renderer missing]");
+                if !cache.noted_failures.contains(&id) {
+                    app.push_note(format!(
+                        "Canvas {} unavailable: renderer not registered",
+                        id.0
+                    ));
+                    cache.noted_failures.insert(id);
+                }
                 return false;
             }
         };
         let Some(img) = frame_to_color_image(&frame) else {
-            tracing::warn!(?id, w = frame.width, h = frame.height, "bad canvas frame");
+            let expected_bytes = (frame.width as usize)
+                .checked_mul(frame.height as usize)
+                .and_then(|n| n.checked_mul(4));
+            let actual_bytes = frame.bytes.len();
+            tracing::warn!(
+                ?id,
+                w = frame.width,
+                h = frame.height,
+                expected_bytes = ?expected_bytes,
+                actual_bytes,
+                "bad canvas frame"
+            );
             ui.weak("[canvas render failed]");
+            if !cache.noted_failures.contains(&id) {
+                app.push_note(format!(
+                    "Canvas {} render failed (bad frame: {}x{}, {} bytes)",
+                    id.0,
+                    frame.width,
+                    frame.height,
+                    frame.bytes.len()
+                ));
+                cache.noted_failures.insert(id);
+            }
             return false;
         };
         let handle = ctx.load_texture(
@@ -174,9 +211,23 @@ pub fn paint(
             egui::Image::new(egui::load::SizedTexture::new(handle.id(), display))
                 .sense(egui::Sense::click_and_drag()),
         );
-        cache.insert(id, frame.width, frame.height, handle);
+        cache.insert(
+            id,
+            PixelSize {
+                width: frame.width,
+                height: frame.height,
+            },
+            handle,
+        );
         resp
     };
+
+    // While a screen overlay is up, the texture still paints but the
+    // canvas must NOT process clicks, mouse, or keyboard — the screen
+    // owns input.
+    if screen_open {
+        return false;
+    }
 
     // Click-to-focus: any primary-press inside this canvas takes focus.
     // Runs before the mouse-dispatch loop so a click in the same frame
@@ -186,11 +237,11 @@ pub fn paint(
         app.focus_canvas(id, None);
     }
 
-    // ---- Mouse dispatch ------------------------------------------------
     let rect = resp.rect;
+    let pointer_pos = ctx.input(|i| i.pointer.latest_pos());
     let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
     for ev in events {
-        if let Some(mouse) = mouse_event_to_portable(&ev, rect, ppp) {
+        if let Some(mouse) = mouse_event_to_portable(&ev, rect, ppp, pointer_pos) {
             // Enter the tokio runtime so any task spawned during dispatch
             // lands on the right scheduler. Drop the guard before the next
             // iteration so we re-enter freshly each dispatch.
@@ -218,22 +269,22 @@ pub fn paint(
             _ => None,
         };
         let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
-        for ev in events {
-            let Some(portable) = crate::egui_app::convert::egui_event_to_portable(&ev) else {
-                continue;
-            };
+        // De-duplicate egui's paired Key/Text events so a single printable
+        // keystroke doesn't double-dispatch as both `Char` and the text Char.
+        let keys = crate::egui_app::screen::portable_keys_from_events(&events);
+        for portable in keys {
             let host_slot = host_slot.clone();
-            futures::executor::block_on(crate::canvas_input::handle_focused_canvas_key(
-                app,
-                &host_slot,
-                id,
-                element_idx,
-                portable,
-            ));
-            // Conservatively invalidate the cache once per focused-canvas
-            // key event — many built-in shortcuts (Tab/BackTab) mutate the
-            // renderer's focus state and the next paint should re-render.
-            cache.invalidate(id);
+            let dirty =
+                futures::executor::block_on(crate::canvas_input::handle_focused_canvas_key(
+                    app,
+                    &host_slot,
+                    id,
+                    element_idx,
+                    portable,
+                ));
+            if dirty {
+                cache.invalidate(id);
+            }
         }
     }
 
@@ -245,12 +296,18 @@ pub fn paint(
 /// Translate an `egui::Event` into a frame-pixel
 /// [`savvagent_plugin::MouseEventPortable`] for the painted rect.
 ///
+/// `pointer_pos` is the latest known pointer position this frame. Wheel
+/// events have no embedded position, so they require `pointer_pos` to be
+/// `Some(p)` with `p` inside `rect` — otherwise the event is broadcast to
+/// every canvas (every canvas's `rect.center()` is inside its own rect).
+///
 /// Returns `None` for events outside the rect, for unsupported button kinds,
 /// or for events without a meaningful pointer position.
 fn mouse_event_to_portable(
     ev: &egui::Event,
     rect: egui::Rect,
     ppp: f32,
+    pointer_pos: Option<egui::Pos2>,
 ) -> Option<savvagent_plugin::MouseEventPortable> {
     use savvagent_plugin::{KeyMods, MouseButton, MouseEventKind, MouseEventPortable};
 
@@ -282,10 +339,14 @@ fn mouse_event_to_portable(
         egui::Event::MouseWheel {
             delta, modifiers, ..
         } => {
-            // Wheel events don't carry a pointer position; fall back to the
-            // rect center so the rect-contains check below always passes for
-            // wheel events that arrive while hovering the canvas.
-            let pos = egui::pos2(rect.center().x, rect.center().y);
+            // Wheel events don't carry a pointer position; require an
+            // actual pointer position inside this canvas's rect to claim
+            // them. Without this check every canvas would see every wheel
+            // event (a `rect.center()` fallback satisfies any rect).
+            let pos = pointer_pos?;
+            if !rect.contains(pos) {
+                return None;
+            }
             let kind = if delta.y > 0.0 {
                 MouseEventKind::ScrollUp
             } else if delta.y < 0.0 {
@@ -389,7 +450,14 @@ mod tests {
         let ctx = egui::Context::default();
         let img = egui::ColorImage::filled([1, 1], egui::Color32::RED);
         let h = ctx.load_texture("t", img, egui::TextureOptions::LINEAR);
-        cache.insert(ContentBlockId(0), 100, 50, h);
+        cache.insert(
+            ContentBlockId(0),
+            PixelSize {
+                width: 100,
+                height: 50,
+            },
+            h,
+        );
         assert!(cache.get_if_fits(ContentBlockId(0), 100).is_some());
         assert!(cache.get_if_fits(ContentBlockId(0), 200).is_none());
     }
@@ -401,14 +469,18 @@ mod tests {
         let img = || egui::ColorImage::filled([1, 1], egui::Color32::RED);
         cache.insert(
             ContentBlockId(0),
-            10,
-            10,
+            PixelSize {
+                width: 10,
+                height: 10,
+            },
             ctx.load_texture("a", img(), egui::TextureOptions::LINEAR),
         );
         cache.insert(
             ContentBlockId(1),
-            10,
-            10,
+            PixelSize {
+                width: 10,
+                height: 10,
+            },
             ctx.load_texture("b", img(), egui::TextureOptions::LINEAR),
         );
         cache.invalidate(ContentBlockId(0));
@@ -423,8 +495,10 @@ mod tests {
         let img = egui::ColorImage::filled([1, 1], egui::Color32::RED);
         cache.insert(
             ContentBlockId(0),
-            10,
-            10,
+            PixelSize {
+                width: 10,
+                height: 10,
+            },
             ctx.load_texture("a", img, egui::TextureOptions::LINEAR),
         );
         cache.clear();
@@ -436,13 +510,14 @@ mod tests {
         use savvagent_plugin::{MouseButton, MouseEventKind};
 
         let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(100.0, 50.0));
+        let pos = egui::pos2(30.0, 40.0);
         let ev = egui::Event::PointerButton {
-            pos: egui::pos2(30.0, 40.0),
+            pos,
             button: egui::PointerButton::Primary,
             pressed: true,
             modifiers: egui::Modifiers::default(),
         };
-        let m = mouse_event_to_portable(&ev, rect, 2.0).expect("inside rect");
+        let m = mouse_event_to_portable(&ev, rect, 2.0, Some(pos)).expect("inside rect");
         assert_eq!(m.kind, MouseEventKind::Press);
         assert_eq!(m.button, Some(MouseButton::Left));
         // (30 - 10) * 2.0 = 40px ; (40 - 20) * 2.0 = 40px.
@@ -453,7 +528,8 @@ mod tests {
     #[test]
     fn mouse_outside_rect_returns_none() {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
-        let ev = egui::Event::PointerMoved(egui::pos2(100.0, 100.0));
-        assert!(mouse_event_to_portable(&ev, rect, 1.0).is_none());
+        let pos = egui::pos2(100.0, 100.0);
+        let ev = egui::Event::PointerMoved(pos);
+        assert!(mouse_event_to_portable(&ev, rect, 1.0, Some(pos)).is_none());
     }
 }

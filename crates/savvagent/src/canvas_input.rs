@@ -62,18 +62,16 @@ pub(crate) fn cycle_index(current: Option<u32>, len: usize, delta: i32) -> Optio
 }
 
 /// Apply the effects a canvas renderer emitted in response to an input
-/// event. Phase 2.0 wires the two `OpenUrl` targets:
+/// event:
 ///
-/// * `SystemBrowser` shells out to the OS opener (`xdg-open` / `open` /
-///   `start`); failures are warn-only so a missing opener never crashes the
-///   TUI. (Task 24 will consolidate this into an `open_in_browser` helper.)
-/// * `ContinueConversation` stages the URL into the prompt editor and notes
-///   it, leaving the user to review and submit — programmatic prompt
-///   submission (`Effect::PromptSend`) is still a stub, so we don't fabricate
-///   a turn here.
+/// * `OpenUrl { SystemBrowser }` shells out to the OS opener (`xdg-open` /
+///   `open` / `start`); failures are warn-only so a missing opener never
+///   crashes the TUI.
+/// * `OpenUrl { ContinueConversation }` stages the URL into the prompt
+///   editor and notes it, leaving the user to review and submit.
 ///
-/// `Effect::Stack` is flattened recursively. Every other effect is logged and
-/// ignored for Phase 2.0 (canvases only emit `OpenUrl` today).
+/// `Effect::Stack` is flattened recursively. Every other effect is logged
+/// and ignored — canvases don't emit them today.
 pub(crate) async fn apply_canvas_effects(
     app: &mut App,
     _host_slot: &HostSlot,
@@ -112,7 +110,7 @@ pub(crate) async fn apply_canvas_effects(
                 Box::pin(apply_canvas_effects(app, _host_slot, inner)).await;
             }
             other => {
-                tracing::debug!(effect = ?other, "ignoring canvas effect (unhandled in Phase 2.0)");
+                tracing::warn!(effect = ?other, "ignoring unhandled canvas effect");
             }
         }
     }
@@ -142,29 +140,29 @@ pub async fn handle_canvas_mouse(
     dirty
 }
 
-/// Handle a key event delivered while a canvas holds focus.
+/// Handle a key event delivered while a canvas holds focus. Returns
+/// `true` when the renderer's bitmap may have changed (so the caller
+/// should invalidate any cached texture), `false` otherwise.
 ///
 /// Precedence:
 /// 1. Built-in keys (`Esc`, `Tab`, `BackTab`, `Ctrl-J`, `Ctrl-K`, `Ctrl-O`).
 /// 2. Plugin `KeyScope::OnFocusedCanvas` bindings.
 /// 3. Raw key dispatch to the focused renderer.
-///
-/// Mirrors the TUI's previous inline handler in `main.rs` — the move
-/// preserves behaviour byte-for-byte; only the entry shape changes.
 pub async fn handle_focused_canvas_key(
     app: &mut App,
     host_slot: &HostSlot,
     id: ContentBlockId,
     element_idx: Option<u32>,
     key: KeyEventPortable,
-) {
+) -> bool {
     let ctrl = key.modifiers.ctrl;
 
     // --- 1. Built-in keys (always win) ---
     match key.code {
         KeyCodePortable::Esc => {
             app.unfocus_canvas();
-            return;
+            // Esc doesn't mutate the renderer's bitmap.
+            return false;
         }
         KeyCodePortable::Tab => {
             let len = app
@@ -177,7 +175,8 @@ pub async fn handle_focused_canvas_key(
                 r.set_focus(next);
             }
             app.set_canvas_element(next);
-            return;
+            // `set_focus` mutates renderer state — next paint should re-render.
+            return true;
         }
         KeyCodePortable::BackTab => {
             let len = app
@@ -190,19 +189,19 @@ pub async fn handle_focused_canvas_key(
                 r.set_focus(next);
             }
             app.set_canvas_element(next);
-            return;
+            return true;
         }
         KeyCodePortable::Char('j') if ctrl => {
             if let Some(next) = adjacent_canvas(&app.entries, id, CANVAS_NEXT) {
                 app.focus_canvas(next, None);
             }
-            return;
+            return false;
         }
         KeyCodePortable::Char('k') if ctrl => {
             if let Some(prev) = adjacent_canvas(&app.entries, id, CANVAS_PREV) {
                 app.focus_canvas(prev, None);
             }
-            return;
+            return false;
         }
         KeyCodePortable::Char('o') if ctrl => {
             // Open the focused canvas's final source in the system browser.
@@ -234,7 +233,7 @@ pub async fn handle_focused_canvas_key(
                 }
                 None => app.push_note("No source available for this canvas yet".to_string()),
             }
-            return;
+            return false;
         }
         _ => {}
     }
@@ -248,7 +247,9 @@ pub async fn handle_focused_canvas_key(
         };
         if let Some(action) = action {
             crate::dispatch_bound_action(app, action).await;
-            return;
+            // Conservatively assume the plugin action may have changed
+            // renderer state.
+            return true;
         }
     }
 
@@ -256,22 +257,28 @@ pub async fn handle_focused_canvas_key(
     // Borrow the renderer mutably only for the dispatch await; `effects`
     // is owned afterwards so no borrow of `app` is held across
     // `apply_canvas_effects` (mirrors the mouse handler).
-    let effects = if let Some(renderer) = app.canvas_registry.get_mut(id) {
+    let dispatch_result = if let Some(renderer) = app.canvas_registry.get_mut(id) {
         match renderer
             .dispatch(savvagent_plugin::InputEvent::Key(key))
             .await
         {
-            Ok(outcome) => Some(outcome.effects),
-            Err(err) => {
-                tracing::warn!(error = %err, "canvas key dispatch failed");
-                None
-            }
+            Ok(outcome) => Some(Ok((outcome.effects, outcome.dirty))),
+            Err(err) => Some(Err(err)),
         }
     } else {
         None
     };
-    if let Some(effects) = effects {
-        apply_canvas_effects(app, host_slot, effects).await;
+    match dispatch_result {
+        Some(Ok((effects, dirty))) => {
+            apply_canvas_effects(app, host_slot, effects).await;
+            dirty
+        }
+        Some(Err(err)) => {
+            tracing::warn!(error = %err, "canvas key dispatch failed");
+            app.push_note(format!("Canvas didn't accept key input: {err}"));
+            false
+        }
+        None => false,
     }
 }
 

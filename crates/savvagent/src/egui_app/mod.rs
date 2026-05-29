@@ -138,11 +138,10 @@ impl SavvagentApp {
         })
     }
 
-    /// Drop every cached GUI texture and the renderer-side ratatui state
-    /// the TUI keeps. Call this anywhere `App::canvas_registry.clear` runs
-    /// — today that's only inside `App::replay_transcript`, which the GUI
-    /// path does not yet invoke (Plan 5 / GUI `/resume` wires this).
-    #[allow(dead_code)] // Consumed by GUI /resume in a later plan.
+    /// Drop the GUI texture cache and the shared renderer state in
+    /// `App::canvas_registry`. Call alongside any operation that resets
+    /// the conversation (today only `App::replay_transcript`).
+    #[allow(dead_code)] // Hook for upcoming GUI conversation-reset paths.
     pub(crate) fn clear_canvas_caches(&mut self) {
         self.app.canvas_registry.clear();
         self.gui_canvas_cache.clear();
@@ -197,21 +196,27 @@ impl SavvagentApp {
                 }
                 if was_complete {
                     if let Some(host) = current_host(&self.host_slot).await {
-                        if let Ok(path) = save_transcript_now(&self.app, &host).await {
-                            if !path.as_os_str().is_empty() {
-                                let saved_path = path.to_string_lossy().into_owned();
-                                self.app.last_transcript = Some(path);
-                                if let Err(err) = crate::plugin::effects::dispatch_host_event(
-                                    &mut self.app,
-                                    savvagent_plugin::HostEvent::TranscriptSaved {
-                                        path: saved_path,
-                                    },
-                                    0,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(error = %err, "TranscriptSaved dispatch failed");
+                        match save_transcript_now(&self.app, &host).await {
+                            Ok(path) => {
+                                if !path.as_os_str().is_empty() {
+                                    let saved_path = path.to_string_lossy().into_owned();
+                                    self.app.last_transcript = Some(path);
+                                    if let Err(err) = crate::plugin::effects::dispatch_host_event(
+                                        &mut self.app,
+                                        savvagent_plugin::HostEvent::TranscriptSaved {
+                                            path: saved_path,
+                                        },
+                                        0,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(error = %err, "TranscriptSaved dispatch failed");
+                                    }
                                 }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "save_transcript_now failed");
+                                self.app.push_note(format!("Couldn't save transcript: {e}"));
                             }
                         }
                     }
@@ -420,7 +425,12 @@ impl eframe::App for SavvagentApp {
                 if quit {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
-                let open_picker = k.modifiers.ctrl && matches!(k.code, KC::Char('o'));
+                // Skip global Ctrl-O while a canvas holds focus — the
+                // focused-canvas handler owns Ctrl-O (open-in-browser),
+                // and the two would otherwise both fire.
+                let open_picker = k.modifiers.ctrl
+                    && matches!(k.code, KC::Char('o'))
+                    && !matches!(self.app.input_mode, crate::app::InputMode::Canvas { .. });
                 if open_picker {
                     self.file_picker.open();
                 }

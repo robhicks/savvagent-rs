@@ -3071,7 +3071,10 @@ async fn run_app(
                                     me.modifiers,
                                 ),
                             };
-                            let _ = crate::canvas_input::handle_canvas_mouse(app, &host_slot, cid, portable).await;
+                            let _ = crate::canvas_input::handle_canvas_mouse(
+                                app, &host_slot, cid, portable,
+                            )
+                            .await;
                         }
                     }
                 }

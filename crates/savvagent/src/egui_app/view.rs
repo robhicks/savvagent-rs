@@ -202,8 +202,6 @@ fn paint_footer(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
 
 /// Central panel: the conversation log, bottom-anchored and scrollable.
 fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
-    // Local because it is only used inside this function; keeps module
-    // scope uncluttered.
     enum EntrySnap {
         User(String),
         Assistant(String),
@@ -211,6 +209,7 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
         Note(String),
     }
 
+    let screen_open = !state.app.screen_stack.is_empty();
     let model = state.render_cache().lock().unwrap().clone();
     egui::CentralPanel::default().show(ctx, |ui| {
         egui::ScrollArea::vertical()
@@ -230,9 +229,6 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                 // The Nth `Entry::Tool` maps to the Nth `tool_entries` element
                 // — the render model is built in entry order. We walk a tool
                 // cursor alongside the entry loop to keep them aligned.
-                //
-                // Walk entries by index so we can split the borrow when we
-                // need `&mut state.app` for the canvas branch.
                 let mut tool_cursor = 0usize;
                 let mut any_canvas_clicked = false;
                 let entry_count = state.app.entries.len();
@@ -243,9 +239,7 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                         Entry::User(t) => Some(EntrySnap::User(t.clone())),
                         Entry::Assistant(t) => Some(EntrySnap::Assistant(t.clone())),
                         Entry::Tool { name, .. } => Some(EntrySnap::Tool(name.clone())),
-                        Entry::RouteBadge(t) | Entry::Note(t) => {
-                            Some(EntrySnap::Note(t.clone()))
-                        }
+                        Entry::RouteBadge(t) | Entry::Note(t) => Some(EntrySnap::Note(t.clone())),
                         Entry::Canvas { .. } => None, // handled below
                     };
                     if let Some(snap) = entry_snapshot {
@@ -264,17 +258,23 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                             }
                         }
                     } else {
-                        // Canvas branch: borrow `state.app` mutably for the
-                        // renderer; pull the source/preview out by cloning
-                        // because `state.app.entries[idx]` aliases the same
-                        // mutable borrow.
+                        // Canvas branch: pull the source/preview out by
+                        // cloning so `state.app` can be borrowed mutably
+                        // for the renderer (the indexed entry aliases the
+                        // same borrow).
                         let (cid, source, preview) = match &state.app.entries[idx] {
                             Entry::Canvas {
                                 id,
                                 source,
                                 source_preview,
                             } => (*id, source.clone(), source_preview.clone()),
-                            _ => unreachable!("entry_snapshot was None only for Canvas"),
+                            Entry::User(..)
+                            | Entry::Assistant(..)
+                            | Entry::Tool { .. }
+                            | Entry::RouteBadge(..)
+                            | Entry::Note(..) => {
+                                unreachable!("entry_snapshot was None only for Canvas")
+                            }
                         };
                         let clicked = crate::egui_app::widgets::canvas::paint(
                             ui,
@@ -286,6 +286,7 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                             cid,
                             &source,
                             preview.as_deref(),
+                            screen_open,
                             palette,
                         );
                         if clicked {
@@ -306,14 +307,14 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                 // Click-outside-to-unfocus: if the user clicked anywhere
                 // this frame but no canvas claimed it, drop any active
                 // canvas focus. Runs after the entry loop so
-                // `any_canvas_clicked` is final.
+                // `any_canvas_clicked` is final. Skipped while a screen
+                // overlay is up — the user can't be clicking on a canvas,
+                // and `InputMode::Canvas` should survive the overlay.
                 let global_click = ctx.input(|i| i.pointer.any_click());
-                if global_click
+                if !screen_open
+                    && global_click
                     && !any_canvas_clicked
-                    && matches!(
-                        state.app.input_mode,
-                        crate::app::InputMode::Canvas { .. }
-                    )
+                    && matches!(state.app.input_mode, crate::app::InputMode::Canvas { .. })
                 {
                     state.app.unfocus_canvas();
                 }
