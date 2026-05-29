@@ -280,6 +280,8 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                             ctx,
                             &mut state.app,
                             &mut state.gui_canvas_cache,
+                            &state.host_slot,
+                            &state.rt,
                             cid,
                             &source,
                             preview.as_deref(),

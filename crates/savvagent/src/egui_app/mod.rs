@@ -63,14 +63,14 @@ pub struct SavvagentApp {
     /// Shared conversation/UI state, built once by `bootstrap_app_and_host`.
     pub app: App,
     /// Atomically-swappable active host (shared with future `/connect`).
-    host_slot: HostSlot,
+    pub(crate) host_slot: HostSlot,
     /// Worker → UI messages, drained each frame in `update`.
     worker_rx: mpsc::Receiver<WorkerMsg>,
     /// Cloned into each spawned turn worker so it can report back.
     worker_tx: mpsc::Sender<WorkerMsg>,
     /// Tokio runtime handle captured from `main`'s `#[tokio::main]` runtime;
     /// turn workers are spawned onto it.
-    rt: Handle,
+    pub(crate) rt: Handle,
     /// Latest slot snapshot (banner/tips/footer/tool_entries) rebuilt each
     /// frame off the live `App`.
     render_cache: RenderModelCache,
