@@ -128,18 +128,18 @@ pub fn paint(
     source: &str,
     source_preview: Option<&str>,
     _palette: &Palette,
-) {
+) -> bool {
     // Streaming preview: monospace text, no Blitz call.
     if let Some(preview) = source_preview {
         ui.label(egui::RichText::new("Rendering HTML canvas…").weak());
         for line in preview.split('\n') {
             ui.label(egui::RichText::new(line).monospace());
         }
-        return;
+        return false;
     }
     if source.is_empty() {
         ui.weak("[empty canvas]");
-        return;
+        return false;
     }
 
     let ppp = ctx.pixels_per_point();
@@ -165,13 +165,13 @@ pub fn paint(
             None => {
                 tracing::warn!(?id, "no renderer for canvas — skipping paint");
                 ui.weak("[canvas renderer missing]");
-                return;
+                return false;
             }
         };
         let Some(img) = frame_to_color_image(&frame) else {
             tracing::warn!(?id, w = frame.width, h = frame.height, "bad canvas frame");
             ui.weak("[canvas render failed]");
-            return;
+            return false;
         };
         let handle = ctx.load_texture(
             format!("canvas-{}", id.0),
@@ -186,6 +186,14 @@ pub fn paint(
         cache.insert(id, frame.width, frame.height, handle);
         resp
     };
+
+    // Click-to-focus: any primary-press inside this canvas takes focus.
+    // Runs before the mouse-dispatch loop so a click in the same frame
+    // freezes/thaws renderers via `focus_canvas` before any wheel/move
+    // events are forwarded to the plugin.
+    if resp.clicked() && !app.is_canvas_focused(id) {
+        app.focus_canvas(id, None);
+    }
 
     // ---- Mouse dispatch ------------------------------------------------
     let rect = resp.rect;
@@ -205,6 +213,10 @@ pub fn paint(
             }
         }
     }
+
+    // Report to `paint_log` whether this canvas absorbed a click this
+    // frame; used to drive global click-outside unfocus.
+    resp.clicked()
 }
 
 /// Translate an `egui::Event` into a frame-pixel

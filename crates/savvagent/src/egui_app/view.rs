@@ -234,6 +234,7 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                 // Walk entries by index so we can split the borrow when we
                 // need `&mut state.app` for the canvas branch.
                 let mut tool_cursor = 0usize;
+                let mut any_canvas_clicked = false;
                 let entry_count = state.app.entries.len();
                 for idx in 0..entry_count {
                     // Snapshot the entry shape for the immutable branches so
@@ -275,7 +276,7 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                             } => (*id, source.clone(), source_preview.clone()),
                             _ => unreachable!("entry_snapshot was None only for Canvas"),
                         };
-                        crate::egui_app::widgets::canvas::paint(
+                        let clicked = crate::egui_app::widgets::canvas::paint(
                             ui,
                             ctx,
                             &mut state.app,
@@ -287,6 +288,9 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                             preview.as_deref(),
                             palette,
                         );
+                        if clicked {
+                            any_canvas_clicked = true;
+                        }
                     }
                     ui.add_space(4.0);
                 }
@@ -297,6 +301,21 @@ fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                 // appears as it streams.
                 if !state.app.live_text.is_empty() {
                     paint_role_block(ui, palette, "savvagent", &state.app.live_text);
+                }
+
+                // Click-outside-to-unfocus: if the user clicked anywhere
+                // this frame but no canvas claimed it, drop any active
+                // canvas focus. Runs after the entry loop so
+                // `any_canvas_clicked` is final.
+                let global_click = ctx.input(|i| i.pointer.any_click());
+                if global_click
+                    && !any_canvas_clicked
+                    && matches!(
+                        state.app.input_mode,
+                        crate::app::InputMode::Canvas { .. }
+                    )
+                {
+                    state.app.unfocus_canvas();
                 }
             });
     });
