@@ -3800,52 +3800,6 @@ async fn run_app(
     }
 }
 
-/// Direction of canvas-to-canvas traversal (`Ctrl-J` / `Ctrl-K`).
-const CANVAS_NEXT: i32 = 1;
-const CANVAS_PREV: i32 = -1;
-
-/// Return the id of the canvas adjacent to `current` in `entries` order,
-/// stepping by `delta` (`+1` next, `-1` previous) with wrap-around.
-/// Returns `None` when there are no canvases, and `Some(current)` when it
-/// is the only canvas. Non-canvas entries are skipped.
-fn adjacent_canvas(
-    entries: &[Entry],
-    current: savvagent_plugin::ContentBlockId,
-    delta: i32,
-) -> Option<savvagent_plugin::ContentBlockId> {
-    let ids: Vec<savvagent_plugin::ContentBlockId> = entries
-        .iter()
-        .filter_map(|e| match e {
-            Entry::Canvas { id, .. } => Some(*id),
-            _ => None,
-        })
-        .collect();
-    if ids.is_empty() {
-        return None;
-    }
-    let pos = ids.iter().position(|x| *x == current)?;
-    let len = ids.len() as i32;
-    let next = (pos as i32 + delta).rem_euclid(len) as usize;
-    Some(ids[next])
-}
-
-/// Compute the next focusable-element index after stepping `current` by
-/// `delta` over `len` elements, wrapping. `None` (nothing focused) steps
-/// to the first (`delta >= 0`) or last (`delta < 0`) element. Returns
-/// `None` when there are no focusable elements.
-fn cycle_index(current: Option<u32>, len: usize, delta: i32) -> Option<u32> {
-    if len == 0 {
-        return None;
-    }
-    let len_i = len as i32;
-    let next = match current {
-        Some(c) => (c as i32 + delta).rem_euclid(len_i),
-        None if delta >= 0 => 0,
-        None => len_i - 1,
-    };
-    Some(next as u32)
-}
-
 /// Handle a key while a canvas holds focus. Precedence:
 /// 1. Built-in keys (Esc, Tab, BackTab, Ctrl-J/K, Ctrl-O).
 /// 2. Plugin `KeyScope::OnFocusedCanvas` bindings.
@@ -3858,6 +3812,7 @@ async fn handle_canvas_key(
     host_slot: &HostSlot,
 ) {
     use crossterm::event::{KeyCode, KeyModifiers};
+    use crate::canvas_input::{adjacent_canvas, cycle_index, CANVAS_NEXT, CANVAS_PREV};
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -4594,6 +4549,7 @@ anthropic = "from-models-toml"
 #[cfg(test)]
 mod canvas_key_tests {
     use super::*;
+    use crate::canvas_input::{adjacent_canvas, cycle_index, CANVAS_NEXT, CANVAS_PREV};
     use async_trait::async_trait;
     use savvagent_plugin::{
         ContentBlockId, ContentRenderer, FocusableElement, Frame, PixelFormat, PixelSize, Rect,
