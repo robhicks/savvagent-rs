@@ -3071,27 +3071,7 @@ async fn run_app(
                                     me.modifiers,
                                 ),
                             };
-                            // Borrow the renderer mutably only for the dispatch
-                            // await; `effects` is owned afterwards so no borrow
-                            // of `app` is held across `apply_canvas_effects`.
-                            let effects = if let Some(renderer) = app.canvas_registry.get_mut(cid) {
-                                match renderer
-                                    .dispatch(savvagent_plugin::InputEvent::Mouse(portable))
-                                    .await
-                                {
-                                    Ok(outcome) => Some(outcome.effects),
-                                    Err(err) => {
-                                        tracing::warn!(error = %err, "canvas dispatch failed");
-                                        None
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-                            if let Some(effects) = effects {
-                                crate::canvas_input::apply_canvas_effects(app, &host_slot, effects)
-                                    .await;
-                            }
+                            let _ = crate::canvas_input::handle_canvas_mouse(app, &host_slot, cid, portable).await;
                         }
                     }
                 }

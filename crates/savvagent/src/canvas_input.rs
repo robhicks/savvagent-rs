@@ -10,7 +10,7 @@
 
 #![allow(dead_code)] // items are wired up over the next few tasks
 
-use savvagent_plugin::{ContentBlockId, KeyCodePortable, KeyEventPortable};
+use savvagent_plugin::{ContentBlockId, InputEvent, KeyCodePortable, KeyEventPortable, MouseEventPortable};
 
 use crate::HostSlot;
 use crate::app::{App, Entry, InputMode, make_input_textarea};
@@ -116,6 +116,30 @@ pub(crate) async fn apply_canvas_effects(
             }
         }
     }
+}
+
+/// Dispatch a frame-pixel mouse event to the renderer for `id` and apply any
+/// returned effects. Returns `true` if the renderer reported `dirty=true`,
+/// so the caller can invalidate any cached texture for that canvas.
+pub async fn handle_canvas_mouse(
+    app: &mut App,
+    host_slot: &HostSlot,
+    id: ContentBlockId,
+    mouse: MouseEventPortable,
+) -> bool {
+    let outcome = match app.canvas_registry.get_mut(id) {
+        Some(renderer) => match renderer.dispatch(InputEvent::Mouse(mouse)).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                tracing::warn!(error = %err, "canvas mouse dispatch failed");
+                return false;
+            }
+        },
+        None => return false,
+    };
+    let dirty = outcome.dirty;
+    apply_canvas_effects(app, host_slot, outcome.effects).await;
+    dirty
 }
 
 /// Handle a key event delivered while a canvas holds focus.
