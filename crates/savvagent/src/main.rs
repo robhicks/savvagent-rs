@@ -35,6 +35,7 @@ mod i18n_smoke {
 }
 
 mod app;
+mod canvas_input;
 mod config_file;
 mod creds;
 mod egui_app;
