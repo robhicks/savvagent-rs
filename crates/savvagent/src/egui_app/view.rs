@@ -201,7 +201,16 @@ fn paint_footer(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
 }
 
 /// Central panel: the conversation log, bottom-anchored and scrollable.
-fn paint_log(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
+fn paint_log(state: &mut SavvagentApp, ctx: &egui::Context, palette: &Palette) {
+    // Local because it is only used inside this function; keeps module
+    // scope uncluttered.
+    enum EntrySnap {
+        User(String),
+        Assistant(String),
+        Tool(String),
+        Note(String),
+    }
+
     let model = state.render_cache().lock().unwrap().clone();
     egui::CentralPanel::default().show(ctx, |ui| {
         egui::ScrollArea::vertical()
@@ -221,25 +230,61 @@ fn paint_log(state: &SavvagentApp, ctx: &egui::Context, palette: &Palette) {
                 // The Nth `Entry::Tool` maps to the Nth `tool_entries` element
                 // — the render model is built in entry order. We walk a tool
                 // cursor alongside the entry loop to keep them aligned.
+                //
+                // Walk entries by index so we can split the borrow when we
+                // need `&mut state.app` for the canvas branch.
                 let mut tool_cursor = 0usize;
-                for entry in &state.app.entries {
-                    match entry {
-                        Entry::User(text) => paint_role_block(ui, palette, "you", text),
-                        Entry::Assistant(text) => paint_role_block(ui, palette, "savvagent", text),
-                        Entry::Tool { name, .. } => {
-                            let render = model.tool_entries.get(tool_cursor);
-                            tool_cursor += 1;
-                            paint_tool(ui, palette, name, render);
+                let entry_count = state.app.entries.len();
+                for idx in 0..entry_count {
+                    // Snapshot the entry shape for the immutable branches so
+                    // we don't hold a borrow across the canvas branch.
+                    let entry_snapshot = match &state.app.entries[idx] {
+                        Entry::User(t) => Some(EntrySnap::User(t.clone())),
+                        Entry::Assistant(t) => Some(EntrySnap::Assistant(t.clone())),
+                        Entry::Tool { name, .. } => Some(EntrySnap::Tool(name.clone())),
+                        Entry::RouteBadge(t) | Entry::Note(t) => {
+                            Some(EntrySnap::Note(t.clone()))
                         }
-                        Entry::RouteBadge(text) => {
-                            ui.weak(text);
+                        Entry::Canvas { .. } => None, // handled below
+                    };
+                    if let Some(snap) = entry_snapshot {
+                        match snap {
+                            EntrySnap::User(t) => paint_role_block(ui, palette, "you", &t),
+                            EntrySnap::Assistant(t) => {
+                                paint_role_block(ui, palette, "savvagent", &t)
+                            }
+                            EntrySnap::Tool(name) => {
+                                let render = model.tool_entries.get(tool_cursor);
+                                tool_cursor += 1;
+                                paint_tool(ui, palette, &name, render);
+                            }
+                            EntrySnap::Note(t) => {
+                                ui.weak(t);
+                            }
                         }
-                        Entry::Note(text) => {
-                            ui.weak(text);
-                        }
-                        Entry::Canvas { .. } => {
-                            ui.weak("[canvas — rendered in Plan 4]");
-                        }
+                    } else {
+                        // Canvas branch: borrow `state.app` mutably for the
+                        // renderer; pull the source/preview out by cloning
+                        // because `state.app.entries[idx]` aliases the same
+                        // mutable borrow.
+                        let (cid, source, preview) = match &state.app.entries[idx] {
+                            Entry::Canvas {
+                                id,
+                                source,
+                                source_preview,
+                            } => (*id, source.clone(), source_preview.clone()),
+                            _ => unreachable!("entry_snapshot was None only for Canvas"),
+                        };
+                        crate::egui_app::widgets::canvas::paint(
+                            ui,
+                            ctx,
+                            &mut state.app,
+                            &mut state.gui_canvas_cache,
+                            cid,
+                            &source,
+                            preview.as_deref(),
+                            palette,
+                        );
                     }
                     ui.add_space(4.0);
                 }

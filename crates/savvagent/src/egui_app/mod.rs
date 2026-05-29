@@ -101,6 +101,10 @@ pub struct SavvagentApp {
     /// `Ctrl+O` file picker. The dialog is always allocated; `open()`
     /// puts it in pick-file mode and `update()` paints it each frame.
     pub file_picker: widgets::file_picker::FilePicker,
+
+    /// Per-canvas egui `TextureHandle` cache. Renderer ownership stays on
+    /// `App::canvas_registry`; this cache only stores the GPU-side handles.
+    pub gui_canvas_cache: widgets::canvas::GuiCanvasCache,
 }
 
 impl SavvagentApp {
@@ -130,6 +134,7 @@ impl SavvagentApp {
             tool_bins,
             editor_buffer: None,
             file_picker: widgets::file_picker::FilePicker::default(),
+            gui_canvas_cache: widgets::canvas::GuiCanvasCache::new(),
         })
     }
 
