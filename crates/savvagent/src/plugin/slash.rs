@@ -1,6 +1,9 @@
 //! Slash command routing.
 
+use std::sync::Arc;
+
 use savvagent_plugin::{Effect, PluginError, PluginId};
+use tokio::sync::RwLock;
 
 use crate::plugin::manifests::Indexes;
 use crate::plugin::registry::PluginRegistry;
@@ -9,9 +12,16 @@ use crate::plugin::registry::PluginRegistry;
 /// the call. Re-entrancy depth enforcement is handled upstream in
 /// `apply_effects` via `MAX_RUNSLASH_DEPTH`; `SlashRouter` is a pure
 /// resolver + single-shot dispatcher.
-pub struct SlashRouter<'a> {
-    indexes: &'a Indexes,
-    registry: &'a PluginRegistry,
+///
+/// Lock-acquisition order (shared with
+/// [`crate::plugin::tool_summaries::ToolSummaryRouter`]): always lock `indexes`
+/// **before** `registry`. Both routers acquire the same two `RwLock`s;
+/// acquiring them in a consistent order forestalls a lock-ordering inversion
+/// between them. (`dispatch` locks `indexes` via `resolve` and releases it
+/// before taking `registry`; `ToolSummaryRouter` holds both guards at once.)
+pub struct SlashRouter {
+    indexes: Arc<RwLock<Indexes>>,
+    registry: Arc<RwLock<PluginRegistry>>,
 }
 
 /// Errors that can occur during slash command dispatch.
@@ -34,16 +44,18 @@ impl std::fmt::Display for SlashError {
 
 impl std::error::Error for SlashError {}
 
-impl<'a> SlashRouter<'a> {
-    /// Construct a router backed by the given index and registry snapshots.
-    pub fn new(indexes: &'a Indexes, registry: &'a PluginRegistry) -> Self {
+impl SlashRouter {
+    /// Construct a router over shared `Arc<RwLock<..>>` handles to the index
+    /// and registry; each is read-locked fresh per `resolve`/`dispatch` call.
+    pub fn new(indexes: Arc<RwLock<Indexes>>, registry: Arc<RwLock<PluginRegistry>>) -> Self {
         Self { indexes, registry }
     }
 
     /// Look up which plugin owns `name` (without the leading `/`).
     /// Returns `None` if no enabled plugin has registered that command.
-    pub fn resolve(&self, name: &str) -> Option<&PluginId> {
-        self.indexes.slash.get(name)
+    pub async fn resolve(&self, name: &str) -> Option<PluginId> {
+        let indexes_guard = self.indexes.read().await;
+        indexes_guard.slash.get(name).cloned()
     }
 
     /// Dispatch a slash command by name. Locks the owning plugin, calls
@@ -54,10 +66,11 @@ impl<'a> SlashRouter<'a> {
     pub async fn dispatch(&self, name: &str, args: Vec<String>) -> Result<Vec<Effect>, SlashError> {
         let pid = self
             .resolve(name)
-            .ok_or_else(|| SlashError::Unknown(name.to_string()))?
-            .clone();
-        let handle = self
-            .registry
+            .await
+            .ok_or_else(|| SlashError::Unknown(name.to_string()))?;
+
+        let registry_guard = self.registry.read().await;
+        let handle = registry_guard
             .get(&pid)
             .ok_or_else(|| SlashError::Unknown(name.to_string()))?;
 
@@ -117,7 +130,7 @@ mod tests {
     async fn dispatch_routes_to_the_plugin() {
         let reg = PluginRegistry::from_plugins(vec![Box::new(Echo("test:p".into()))]);
         let idx = Indexes::build(&reg).await.unwrap();
-        let r = SlashRouter::new(&idx, &reg);
+        let r = SlashRouter::new(Arc::new(RwLock::new(idx)), Arc::new(RwLock::new(reg)));
         let out = r.dispatch("echo", vec!["hi".into()]).await.unwrap();
         assert_eq!(out.len(), 1);
     }
@@ -126,7 +139,7 @@ mod tests {
     async fn unknown_slash_yields_unknown_error() {
         let reg = PluginRegistry::from_plugins(vec![Box::new(Echo("test:p".into()))]);
         let idx = Indexes::build(&reg).await.unwrap();
-        let r = SlashRouter::new(&idx, &reg);
+        let r = SlashRouter::new(Arc::new(RwLock::new(idx)), Arc::new(RwLock::new(reg)));
         let err = r.dispatch("nope", vec![]).await.unwrap_err();
         assert!(matches!(err, SlashError::Unknown(ref n) if n == "nope"));
     }

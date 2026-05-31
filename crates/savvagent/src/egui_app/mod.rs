@@ -8,20 +8,24 @@
 //! Linux; submodules are added by later foundation tasks.
 //!
 //! This front-end reuses the exact host/turn machinery the ratatui TUI drives
-//! in `run_app`: the same `bootstrap_app_and_host`, the same `WorkerMsg`
-//! channel, the same turn-id counters, and the same pub(crate) leaf helpers
-//! (`translate_turn_event_to_host_event`, `create_canvas_renderer`,
-//! `auto_export_canvas`, `save_transcript_now`, `current_host`). The only
-//! difference is the shell: egui paints synchronously each frame instead of
-//! ratatui's blocking `run_app` event loop.
+//! in `run_app`: the same `WorkerMsg` channel, the same turn-id counters, and
+//! the same pub(crate) leaf helpers (`translate_turn_event_to_host_event`,
+//! `create_canvas_renderer`, `auto_export_canvas`, `save_transcript_now`,
+//! `current_host`). Bootstrap is split for the GUI — `bootstrap_host_only`
+//! runs the network half off the UI thread and `build_app_with_host` builds
+//! the `App` on it — whereas the TUI calls `bootstrap_app_and_host` straight
+//! through. The other difference is the shell: egui paints synchronously each
+//! frame instead of ratatui's blocking `run_app` event loop.
 //!
 //! ## Async inside a synchronous paint pass
 //!
 //! `eframe::App::update` is synchronous, and `main()` is `#[tokio::main]`, so
-//! the paint pass runs *inside* a Tokio runtime. We therefore use
-//! `futures::executor::block_on` (NOT `Handle::block_on`, which panics with
-//! "Cannot block the current thread from within a runtime") to drive the async
-//! worker-drain / render-model rebuild on the UI thread. The Tokio context is
+//! the paint pass runs *inside* a Tokio runtime. We drive the async
+//! worker-drain / render-model rebuild on the UI thread via [`block_on_ui`],
+//! which wraps `futures::executor::block_on` (NOT `Handle::block_on`, which
+//! panics inside a runtime) and — critically — `tokio::task::unconstrained`,
+//! so the polled futures opt out of Tokio's cooperative-scheduling budget.
+//! See [`block_on_ui`] for why that wrapper is mandatory. The Tokio context is
 //! still entered, so `tokio::spawn` inside those futures works — and the turn
 //! workers spawned by `submit_prompt` use the stored `Handle`.
 
@@ -40,10 +44,16 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, Entry};
 use crate::{
-    HostSlot, ToolBins, WorkerMsg, auto_export_canvas, bootstrap_app_and_host,
-    create_canvas_renderer, current_host, save_transcript_now, translate_turn_event_to_host_event,
+    HostSlot, ToolBins, WorkerMsg, auto_export_canvas, create_canvas_renderer, current_host,
+    save_transcript_now, translate_turn_event_to_host_event,
 };
 use render_model::{RenderModel, RenderModelCache, build_model};
+
+/// What `build_app_with_host` returns — the seed for a [`SavvagentApp`]. The
+/// network half (`bootstrap_host_only`) runs off the UI thread so a hanging
+/// provider probe (e.g. Ollama on a dropped `localhost:11434`) can't freeze
+/// the window; this `App` half is then built on the UI thread.
+type BootOutput = (App, HostSlot, std::path::PathBuf, ToolBins);
 
 /// Logical monospace columns the slot/render-model builder lays out against.
 /// The ratatui path sizes this to the live terminal width; the egui paint pass
@@ -55,6 +65,28 @@ const RENDER_COLS: u16 = 120;
 /// Font size (px) used for every styled-text section in the GUI log/footer.
 /// Matches the value the `convert` unit tests exercise.
 const FONT_SIZE: f32 = 14.0;
+
+/// Drive a future to completion on the UI (winit) thread.
+///
+/// The egui paint pass is synchronous but needs to run async host/plugin
+/// code, so it drives futures with the foreign `futures` executor rather than
+/// `Handle::block_on` (which panics inside a runtime). The crucial detail is
+/// [`tokio::task::unconstrained`]: it opts the future out of Tokio's
+/// cooperative-scheduling budget.
+///
+/// Without it, a Tokio future polled by `futures::executor::block_on` can wedge
+/// the entire window. Tokio's `coop` budget is per-*task* and refreshed by the
+/// Tokio scheduler at the start of each poll. The `futures` executor is not a
+/// Tokio task, so once a poll exhausts the budget, `tokio::task::coop::poll_proceed`
+/// returns `Pending` and there is no scheduler to refresh it and re-poll — the
+/// future (e.g. a perfectly *uncontended* `RwLock::read`/`Mutex::lock`) never
+/// completes, and `block_on` never returns control to the winit event loop.
+/// That presented as the GUI freezing (no input, no resize) on a lock acquire
+/// with no actual lock holder. `unconstrained` makes `poll_proceed` always
+/// proceed, so these futures complete normally.
+pub(crate) fn block_on_ui<F: std::future::Future>(fut: F) -> F::Output {
+    futures::executor::block_on(tokio::task::unconstrained(fut))
+}
 
 /// The eframe application. Mirrors the state `run_app` keeps on its stack —
 /// the host slot, the worker channel, the four HostEvent turn-id counters —
@@ -105,20 +137,27 @@ pub struct SavvagentApp {
     /// Per-canvas egui `TextureHandle` cache. Renderer ownership stays on
     /// `App::canvas_registry`; this cache only stores the GPU-side handles.
     pub gui_canvas_cache: widgets::canvas::GuiCanvasCache,
+
+    /// Set by `view::paint_prompt` when the user types `/` into an empty
+    /// prompt; consumed at the top of the next frame's async pass to open the
+    /// `palette` command picker. Mirrors the TUI's `/`-opens-palette
+    /// keybinding, which the egui shell doesn't route through the plugin
+    /// `KeybindingRouter`.
+    pub(crate) pending_open_palette: bool,
 }
 
 impl SavvagentApp {
-    /// Build the app: bootstrap the host/plugin runtime synchronously (we are
-    /// inside the Tokio runtime, so `futures::executor::block_on` drives the
-    /// async bootstrap without `Handle::block_on`'s reentrancy panic), open the
-    /// worker channel, and initialize an empty render cache.
-    fn new(cc: &eframe::CreationContext<'_>, rt: Handle) -> anyhow::Result<Self> {
-        fonts::install(&cc.egui_ctx);
+    /// Build the running front-end from a completed `build_app_with_host`
+    /// result. Synchronous and non-blocking: the network half of bootstrap
+    /// (provider health probes / `list_models`, via `bootstrap_host_only`) has
+    /// already happened off the UI thread inside [`GuiApp`], so this only wires
+    /// up the worker channel and the empty render cache. The UI thread never
+    /// blocks here.
+    fn from_boot(boot: BootOutput, rt: Handle) -> Self {
+        let (app, host_slot, project_root, tool_bins) = boot;
         let (worker_tx, worker_rx) = mpsc::channel::<WorkerMsg>(128);
-        let (app, host_slot, project_root, tool_bins) =
-            futures::executor::block_on(bootstrap_app_and_host())?;
         let render_cache: RenderModelCache = Arc::new(Mutex::new(RenderModel::default()));
-        Ok(Self {
+        Self {
             app,
             host_slot,
             worker_rx,
@@ -135,7 +174,8 @@ impl SavvagentApp {
             editor_buffer: None,
             file_picker: widgets::file_picker::FilePicker::default(),
             gui_canvas_cache: widgets::canvas::GuiCanvasCache::new(),
-        })
+            pending_open_palette: false,
+        }
     }
 
     /// Drop the GUI texture cache and the shared renderer state in
@@ -343,7 +383,7 @@ impl SavvagentApp {
         if text.starts_with('/') {
             self.app.prompt_history.append(text.clone());
             let tx = self.worker_tx.clone();
-            futures::executor::block_on(crate::dispatch_slash_command(
+            block_on_ui(crate::dispatch_slash_command(
                 &mut self.app,
                 &text,
                 &self.host_slot,
@@ -351,10 +391,10 @@ impl SavvagentApp {
                 &self.tool_bins,
                 &tx,
             ));
-            futures::executor::block_on(self.drain_pending());
+            block_on_ui(self.drain_pending());
             return;
         }
-        let Some(host) = futures::executor::block_on(current_host(&self.host_slot)) else {
+        let Some(host) = block_on_ui(current_host(&self.host_slot)) else {
             self.app
                 .push_note(rust_i18n::t!("notes.not-connected-connect-first").to_string());
             return;
@@ -408,8 +448,23 @@ impl SavvagentApp {
     }
 }
 
-impl eframe::App for SavvagentApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl SavvagentApp {
+    /// One paint pass for the *running* (post-bootstrap) front-end. Driven by
+    /// [`GuiApp::update`] once the host half (`bootstrap_host_only`) has
+    /// completed off the UI thread and `build_app_with_host` has built the
+    /// `App` on it. Formerly the `eframe::App::update` body; the eframe trait
+    /// now lives on [`GuiApp`] so the window can open and stay responsive while
+    /// the (network-touching) host build runs in the background.
+    fn frame(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 0. Drain any prompt prefill staged by `apply_effects` last frame
+        //    (the command palette emits `Effect::PrefillInput { "/cmd " }` for
+        //    arg-requiring slashes). `prefill_input` writes the ratatui
+        //    textarea AND this bridge field; the egui prompt lives on
+        //    `self.prompt`, so we move it across here.
+        if let Some(text) = self.app.take_pending_prefill() {
+            self.prompt = text;
+        }
+
         // 1. Global quit chord. Observes Ctrl-C / Ctrl-D and requests a viewport
         //    close — the events themselves still propagate to block 3 (when a
         //    screen is open) or to the prompt `TextEdit`, but the close request
@@ -446,7 +501,20 @@ impl eframe::App for SavvagentApp {
         //    `self.worker_rx`; we resolve the aliasing by first collecting
         //    messages into an owned `Vec` (borrows only `self.worker_rx`), then
         //    handling them (borrows the rest of `self`).
-        futures::executor::block_on(async {
+        block_on_ui(async {
+            // `/` on an empty prompt opens the command palette (set by
+            // `view::paint_prompt`). Reuses the `palette` screen, which
+            // `apply_effects::open_screen` self-populates from the slash index.
+            if std::mem::take(&mut self.pending_open_palette) {
+                let effs = vec![savvagent_plugin::Effect::OpenScreen {
+                    id: "palette".into(),
+                    args: savvagent_plugin::ScreenArgs::None,
+                }];
+                if let Err(err) = crate::plugin::effects::apply_effects(&mut self.app, effs).await {
+                    tracing::warn!(error = %err, "apply_effects (open palette) failed");
+                }
+                self.drain_pending().await;
+            }
             let mut drained = Vec::new();
             while let Ok(msg) = self.worker_rx.try_recv() {
                 drained.push(msg);
@@ -521,7 +589,7 @@ impl eframe::App for SavvagentApp {
             }
             let keys = all_keys;
             let had_keys = !keys.is_empty();
-            futures::executor::block_on(async {
+            block_on_ui(async {
                 for key in keys {
                     let effs = match self.app.screen_stack.top_mut() {
                         Some((top, _layout)) => match top.on_key(key).await {
@@ -565,11 +633,179 @@ impl eframe::App for SavvagentApp {
     }
 }
 
+/// The eframe application. A thin lifecycle wrapper around [`SavvagentApp`]
+/// whose sole job is to keep the window responsive while the network-touching
+/// host build (`bootstrap_host_only`) runs **off the UI thread** (the `App`
+/// half, `build_app_with_host`, is then built on the UI thread).
+///
+/// The previous design `block_on`'d bootstrap inside the eframe creation
+/// closure, so a hanging provider probe (Ollama on a dropped
+/// `localhost:11434`) wedged the UI thread before the first frame — the window
+/// couldn't be moved, resized, or typed into. Here the closure returns
+/// immediately; bootstrap runs on a Tokio worker and reports back over a
+/// `oneshot`, and `update` paints a splash until it lands.
+enum Boot {
+    /// The network host-build is running on a Tokio worker (it returns only
+    /// `Send` data — no `App`). `project_root`/`tool_bins` are kept on the UI
+    /// thread so it can build the `!Send` `App` once the host arrives.
+    Pending {
+        rx: tokio::sync::oneshot::Receiver<Option<crate::HostBoot>>,
+        project_root: std::path::PathBuf,
+        tool_bins: ToolBins,
+    },
+    /// Bootstrap finished; normal painting takes over.
+    Running(Box<SavvagentApp>),
+    /// Bootstrap failed; the UI paints the error instead of crashing.
+    Failed(String),
+}
+
+struct GuiApp {
+    rt: Handle,
+    boot: Boot,
+}
+
+impl GuiApp {
+    /// Install fonts and kick off the **network** half of bootstrap on a Tokio
+    /// worker. `App` is `!Send` (it holds a non-`Send` tree-sitter parser via
+    /// the ratatui editor fields), so it cannot be built off-thread — only the
+    /// host build, which returns `Send` data, runs on the worker. Returns
+    /// immediately with [`Boot::Pending`] so the window opens at once.
+    fn new(cc: &eframe::CreationContext<'_>, rt: Handle) -> Self {
+        fonts::install(&cc.egui_ctx);
+        // Local + fast (path resolution, config-file read): fine on the UI
+        // thread.
+        let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let tool_bins = crate::build_tool_bins();
+        let config_file = crate::config_file::ConfigFile::load_or_default(
+            &crate::config_file::ConfigFile::default_path(),
+        );
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let ctx = cc.egui_ctx.clone();
+        let pr = project_root.clone();
+        let tb = tool_bins.clone();
+        rt.spawn(async move {
+            let host = crate::bootstrap_host_only(pr, tb, config_file).await;
+            // Ignore send errors: the only receiver is `Boot::Pending`, which
+            // outlives the window unless the app already shut down.
+            let _ = tx.send(host);
+            // Wake the UI loop so the next frame builds + swaps in the running
+            // app instead of waiting for an unrelated input event.
+            ctx.request_repaint();
+        });
+        Self {
+            rt,
+            boot: Boot::Pending {
+                rx,
+                project_root,
+                tool_bins,
+            },
+        }
+    }
+}
+
+impl GuiApp {
+    /// Advance the boot state machine and hand back the running front-end once
+    /// bootstrap has settled. While the host build is still in flight — or if
+    /// it failed — this paints the splash and returns `None`, so the caller
+    /// only ever touches a live `SavvagentApp`.
+    ///
+    /// The "`Boot::Pending` never escapes this function" invariant is expressed
+    /// in control flow rather than a runtime `unreachable!`: the empty-channel
+    /// case returns early, and every other `Pending` outcome transitions
+    /// `self.boot` to `Running`/`Failed` before the final match. The residual
+    /// `Pending` arm therefore needs no panic — it simply paints nothing and
+    /// resolves on the next frame.
+    fn poll_boot(&mut self, ctx: &egui::Context) -> Option<&mut SavvagentApp> {
+        // While pending, poll the oneshot without blocking and keep repainting
+        // so we notice completion.
+        if let Boot::Pending {
+            rx,
+            project_root,
+            tool_bins,
+        } = &mut self.boot
+        {
+            use tokio::sync::oneshot::error::TryRecvError;
+            match rx.try_recv() {
+                Ok(host) => {
+                    // Build the `!Send` `App` here on the UI thread. This is
+                    // local-only work (manifests, plugin instantiation) — no
+                    // network — so the brief `block_on` cannot freeze the
+                    // window the way the old all-in-one bootstrap did.
+                    let built = block_on_ui(crate::build_app_with_host(
+                        host,
+                        project_root.clone(),
+                        tool_bins.clone(),
+                    ));
+                    self.boot = match built {
+                        Ok(boot) => {
+                            Boot::Running(Box::new(SavvagentApp::from_boot(boot, self.rt.clone())))
+                        }
+                        Err(e) => Boot::Failed(format!("{e:#}")),
+                    };
+                }
+                Err(TryRecvError::Closed) => {
+                    self.boot = Boot::Failed("bootstrap task was dropped".to_string())
+                }
+                Err(TryRecvError::Empty) => {
+                    paint_boot_splash(ctx, None);
+                    ctx.request_repaint(); // keep polling the oneshot
+                    return None;
+                }
+            }
+        }
+
+        match &mut self.boot {
+            Boot::Running(app) => Some(app),
+            Boot::Failed(msg) => {
+                paint_boot_splash(ctx, Some(msg));
+                None
+            }
+            // Settled to Running/Failed by the block above (or returned early
+            // while empty); a stray Pending just paints nothing this frame.
+            Boot::Pending { .. } => None,
+        }
+    }
+}
+
+impl eframe::App for GuiApp {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(app) = self.poll_boot(ctx) {
+            app.frame(ctx, frame);
+        }
+    }
+}
+
+/// Centered "starting…" (or error) screen shown until bootstrap completes.
+/// Deliberately trivial: no `App`, no plugins, no host — it must be paintable
+/// before any of that exists.
+fn paint_boot_splash(ctx: &egui::Context, error: Option<&str>) {
+    egui::CentralPanel::default().show(ctx, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.4);
+            match error {
+                None => {
+                    ui.heading("savvagent");
+                    ui.add_space(8.0);
+                    ui.add(egui::Spinner::new());
+                    ui.add_space(8.0);
+                    ui.weak("Starting…");
+                }
+                Some(msg) => {
+                    ui.heading("savvagent — startup failed");
+                    ui.add_space(8.0);
+                    ui.colored_label(egui::Color32::LIGHT_RED, msg);
+                }
+            }
+        });
+    });
+}
+
 /// Launch the native window. Called from `main()` on the `gui` subcommand.
 /// `main()` is `#[tokio::main]`, so a runtime is already running on this
-/// thread; we capture its `Handle` and hand it to `SavvagentApp` for spawning
-/// turn workers. `eframe::run_native` then owns the thread for the window's
-/// lifetime.
+/// thread; we capture its `Handle` and hand it to [`GuiApp`] for spawning the
+/// bootstrap task and (later) turn workers. `eframe::run_native` then owns the
+/// thread for the window's lifetime.
 pub fn run() -> eframe::Result {
     let rt = Handle::current();
     let native_options = eframe::NativeOptions {
@@ -581,13 +817,6 @@ pub fn run() -> eframe::Result {
     eframe::run_native(
         "savvagent",
         native_options,
-        Box::new(move |cc| {
-            let app = SavvagentApp::new(cc, rt).map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> {
-                    Box::new(std::io::Error::other(e.to_string()))
-                },
-            )?;
-            Ok(Box::new(app))
-        }),
+        Box::new(move |cc| Ok(Box::new(GuiApp::new(cc, rt)))),
     )
 }

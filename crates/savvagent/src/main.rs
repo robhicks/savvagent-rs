@@ -203,25 +203,80 @@ async fn main() -> Result<()> {
 /// provider-pool host, build `App`, install the plugin runtime, and align
 /// startup state/notes. Shared by the ratatui TUI (`run_app`) and the egui
 /// front-end (`egui_app::run`); contains no terminal/window-specific setup.
-pub(crate) async fn bootstrap_app_and_host() -> Result<(App, HostSlot, std::path::PathBuf, ToolBins)>
-{
-    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let tool_bins = ToolBins {
+/// Send-only result of the network half of bootstrap (the provider-pool host
+/// build). Carries no `App` (which is `!Send`), so it can be produced on a
+/// background Tokio worker and handed back to the UI thread — see the GUI's
+/// `GuiApp` bootstrap in `egui_app`.
+/// The `Send` result of the network half of bootstrap, handed back from the
+/// background Tokio worker to the UI thread. A named struct (rather than a bare
+/// 4-tuple) so the two `String`/`Vec<String>`-family members can't be
+/// transposed at a decode site.
+pub(crate) struct HostBoot {
+    /// The started provider-pool host.
+    pub host: Arc<Host>,
+    /// Model id to show in the header for the initial active provider.
+    pub header_model: String,
+    /// `&'static` id of the initial active provider, if one connected.
+    pub provider_id: Option<&'static str>,
+    /// One-shot startup notes (timeouts, build failures, routing parse errors)
+    /// to surface once `App` exists.
+    pub startup_notes: Vec<String>,
+}
+
+/// Resolve the bundled tool binaries. Cheap, local, and `Send`.
+pub(crate) fn build_tool_bins() -> ToolBins {
+    ToolBins {
         fs: locate_bundled_bin("savvagent-tool-fs", "SAVVAGENT_TOOL_FS_BIN"),
         bash: locate_bundled_bin("savvagent-tool-bash", "SAVVAGENT_TOOL_BASH_BIN"),
         grep: locate_bundled_bin("savvagent-tool-grep", "SAVVAGENT_TOOL_GREP_BIN"),
         lsp: locate_bundled_bin("savvagent-tool-lsp", "SAVVAGENT_TOOL_LSP_BIN"),
-    };
+    }
+}
 
+/// The network-bearing half of bootstrap: build the provider-pool host. Owns
+/// its arguments and returns only `Send` data, so the GUI can run it on a
+/// background Tokio worker without dragging the `!Send` `App` across threads.
+/// `App` is built afterward on the UI thread by [`build_app_with_host`].
+pub(crate) async fn bootstrap_host_only(
+    project_root: PathBuf,
+    tool_bins: ToolBins,
+    config_file: config_file::ConfigFile,
+) -> Option<HostBoot> {
+    bootstrap_pool_host(&project_root, &tool_bins, &config_file).await
+}
+
+/// Full bootstrap: build the host (network) then `App` (local), run
+/// sequentially on one thread. Used by the ratatui TUI path; the GUI runs the
+/// two halves separately (host off-thread, `App` on the UI thread).
+pub(crate) async fn bootstrap_app_and_host() -> Result<(App, HostSlot, std::path::PathBuf, ToolBins)>
+{
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let tool_bins = build_tool_bins();
     let config_file =
         config_file::ConfigFile::load_or_default(&config_file::ConfigFile::default_path());
-    let initial = bootstrap_pool_host(&project_root, &tool_bins, &config_file).await;
+    let initial = bootstrap_host_only(project_root.clone(), tool_bins.clone(), config_file).await;
+    build_app_with_host(initial, project_root, tool_bins).await
+}
+
+/// The local, `!Send` half of bootstrap: construct `App`, install the plugin
+/// runtime, and wrap the (already-built) host in a `HostSlot`. No network I/O
+/// happens here — only local manifest/plugin work — so it is safe to run on
+/// the GUI's UI thread without freezing the window.
+pub(crate) async fn build_app_with_host(
+    initial: Option<HostBoot>,
+    project_root: std::path::PathBuf,
+    tool_bins: ToolBins,
+) -> Result<(App, HostSlot, std::path::PathBuf, ToolBins)> {
     let (header_model, initial_provider, startup_notes) = match &initial {
-        Some((_, model, id, notes)) => (model.clone(), *id, notes.clone()),
+        Some(boot) => (
+            boot.header_model.clone(),
+            boot.provider_id,
+            boot.startup_notes.clone(),
+        ),
         None => ("(disconnected)".to_string(), None, Vec::new()),
     };
 
-    let host_slot: HostSlot = Arc::new(RwLock::new(initial.map(|(h, _, _, _)| h)));
+    let host_slot: HostSlot = Arc::new(RwLock::new(initial.map(|boot| boot.host)));
 
     let transcript_dir = transcript_dir();
 
@@ -384,7 +439,7 @@ async fn bootstrap_pool_host(
     project_root: &Path,
     tool_bins: &ToolBins,
     config_file: &config_file::ConfigFile,
-) -> Option<(Arc<Host>, String, Option<&'static str>, Vec<String>)> {
+) -> Option<HostBoot> {
     // Legacy MCP-over-HTTP debug path. When this env var is set the host
     // connects to a remote provider binary instead of using the in-process
     // pool. No pool, no policy, no timeout wrapping.
@@ -394,7 +449,12 @@ async fn bootstrap_pool_host(
         match start_host_remote(url, model.clone(), project_root.to_path_buf(), tool_bins).await {
             Ok(host) => {
                 let notes = host.take_startup_notes();
-                return Some((host, model, None, notes));
+                return Some(HostBoot {
+                    host,
+                    header_model: model,
+                    provider_id: None,
+                    startup_notes: notes,
+                });
             }
             Err(e) => {
                 eprintln!("warning: SAVVAGENT_PROVIDER_URL set but connect failed: {e:#}");
@@ -590,7 +650,12 @@ async fn bootstrap_pool_host(
             deferred_notes.extend(host.take_startup_notes());
             let host_arc = Arc::new(host);
             host_arc.wire_self_arc();
-            Some((host_arc, initial_model, initial_provider_id, deferred_notes))
+            Some(HostBoot {
+                host: host_arc,
+                header_model: initial_model,
+                provider_id: initial_provider_id,
+                startup_notes: deferred_notes,
+            })
         }
         Err(e) => {
             eprintln!("warning: pool host start failed: {e:#}");
@@ -808,7 +873,7 @@ pub(crate) async fn dispatch_slash_command(
         let suppress: Vec<String> = {
             let reg_guard = reg.read().await;
             let idx_guard = idx.read().await;
-            idx_guard
+            let result = idx_guard
                 .slash
                 .get(name_str)
                 .and_then(|pid| reg_guard.get(pid))
@@ -821,8 +886,10 @@ pub(crate) async fn dispatch_slash_command(
                         .map(|s| s.suppress_prompt_segments)
                         .unwrap_or_default()
                 })
-                .unwrap_or_default()
-            // reg_guard and idx_guard drop here
+                .unwrap_or_default();
+            drop(reg_guard); // Explicitly drop to ensure no long-held locks
+            drop(idx_guard); // Explicitly drop to ensure no long-held locks
+            result
         };
         // If the slash spec suppresses any prompt segments, tell the host
         // before dispatching so the next turn (which some slashes trigger
@@ -834,9 +901,7 @@ pub(crate) async fn dispatch_slash_command(
         }
 
         let effs_result = {
-            let reg_guard = reg.read().await;
-            let idx_guard = idx.read().await;
-            let router = crate::plugin::slash::SlashRouter::new(&idx_guard, &reg_guard);
+            let router = crate::plugin::slash::SlashRouter::new(idx.clone(), reg.clone());
             router.dispatch(name_str, args).await
         };
         match effs_result {
@@ -3756,9 +3821,7 @@ pub(crate) async fn dispatch_bound_action(app: &mut App, action: savvagent_plugi
                 }
             };
             let effs_result = {
-                let reg_guard = reg.read().await;
-                let idx_guard = idx.read().await;
-                let router = crate::plugin::slash::SlashRouter::new(&idx_guard, &reg_guard);
+                let router = crate::plugin::slash::SlashRouter::new(idx.clone(), reg.clone());
                 router.dispatch(&name, args).await
             };
             match effs_result {

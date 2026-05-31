@@ -1063,9 +1063,7 @@ async fn run_slash(
         _ => return Err("plugin runtime not installed".into()),
     };
     let effs = {
-        let reg_guard = reg.read().await;
-        let idx_guard = idx.read().await;
-        let router = SlashRouter::new(&idx_guard, &reg_guard);
+        let router = SlashRouter::new(idx.clone(), reg.clone());
         router
             .dispatch(&name, args)
             .await
@@ -1284,6 +1282,17 @@ mod tests {
             app.input_textarea.lines(),
             &["/view ".to_string()],
             "PrefillInput must install the literal text as a single line"
+        );
+        assert_eq!(
+            app.take_pending_prefill().as_deref(),
+            Some("/view "),
+            "PrefillInput must also stage the text on the pending_prefill bridge \
+             that the egui prompt drains"
+        );
+        assert_eq!(
+            app.take_pending_prefill(),
+            None,
+            "take_pending_prefill is one-shot: draining the bridge leaves it empty",
         );
     }
 
